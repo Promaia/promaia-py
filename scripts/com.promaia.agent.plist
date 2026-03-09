@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Service Label -->
+    <key>Label</key>
+    <string>com.promaia.agent</string>
+
+    <!-- Program to Run -->
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Python interpreter path - MUST BE UPDATED for your system -->
+        <string>/usr/local/bin/python3</string>
+        <string>-m</string>
+        <string>promaia.agents.daemon</string>
+        <string>--interval</string>
+        <string>1</string>
+        <string>--window</string>
+        <string>5</string>
+    </array>
+
+    <!-- Working Directory -->
+    <key>WorkingDirectory</key>
+    <string>__HOME__</string>
+
+    <!-- Environment Variables -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Add NOTION_TOKEN, SLACK_BOT_TOKEN, etc. if not in .env file -->
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>__HOME__</string>
+    </dict>
+
+    <!-- Auto-Start Configuration -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Auto-Restart on Crash -->
+    <key>KeepAlive</key>
+    <dict>
+        <!-- Restart if crashed -->
+        <key>SuccessfulExit</key>
+        <false/>
+        <!-- But don't restart if exited cleanly (exit 0) -->
+    </dict>
+
+    <!-- Throttle restart attempts -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <!-- Logging -->
+    <key>StandardOutPath</key>
+    <string>__HOME__/.promaia/logs/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.promaia/logs/daemon.error.log</string>
+
+    <!-- Process Management -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- Nice value (lower priority than interactive processes) -->
+    <key>Nice</key>
+    <integer>5</integer>
+
+    <!-- Session Type -->
+    <key>SessionCreate</key>
+    <true/>
+
+    <!-- Abandon Process Group -->
+    <key>AbandonProcessGroup</key>
+    <true/>
+</dict>
+</plist>

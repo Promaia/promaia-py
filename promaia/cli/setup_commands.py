@@ -1,0 +1,379 @@
+"""
+Interactive setup wizard for Promaia.
+
+Guides the user through:
+1. AI provider selection (Claude, Gemini, ChatGPT)
+2. API key entry and validation
+3. .env file configuration
+4. promaia.config.json initialization
+5. Optional Notion workspace configuration
+
+Usage:
+    maia setup              # Full interactive setup
+    maia setup --check      # Verify current configuration
+"""
+import os
+import shutil
+import asyncio
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.application import Application
+from prompt_toolkit.layout.containers import HSplit, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.layout import Layout
+
+from promaia.utils.env_writer import (
+    get_config_path,
+    get_config_template_path,
+)
+
+
+console = Console()
+
+
+# ── Docker detection ─────────────────────────────────────────────────
+
+
+def is_running_in_docker() -> bool:
+    """Detect if running inside a Docker container."""
+    if os.path.exists("/.dockerenv"):
+        return True
+    try:
+        with open("/proc/1/cgroup", "r") as f:
+            return "docker" in f.read()
+    except (FileNotFoundError, PermissionError):
+        pass
+    return False
+
+
+# ── Config file initialization ───────────────────────────────────────
+
+
+def ensure_config_file() -> bool:
+    """
+    Copy promaia.config.template.json -> promaia.config.json if missing.
+    Config goes into the data directory (maia-data/ or project root).
+    Returns True if config file exists after this call.
+    """
+    config_path = get_config_path()
+    template_path = get_config_template_path()
+
+    if config_path.exists():
+        return True
+
+    if template_path.exists():
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(template_path, config_path)
+        return True
+
+    return False
+
+
+# ── Main setup flow ──────────────────────────────────────────────────
+
+
+def handle_setup(args):
+    """Entry point for `maia setup`. Sync wrapper around async flow."""
+    asyncio.run(_run_setup(args))
+
+
+async def _run_setup(args):
+    """Async setup flow."""
+    check_only = getattr(args, "check", False)
+
+    if check_only:
+        await _check_config()
+        return
+
+    _print_banner()
+
+    in_docker = is_running_in_docker()
+    if in_docker and getattr(args, "debug", False):
+        console.print("[dim]Running inside Docker container[/dim]\n")
+
+    from promaia.auth.registry import get_ai_integrations, get_integration
+    from promaia.auth.flow import configure_credential
+
+    # Step 1: AI provider selection
+    integrations = get_ai_integrations()
+    selected = await _select_provider(integrations)
+    if selected is None:
+        console.print("\n[yellow]Setup cancelled.[/yellow]")
+        return
+
+    # Step 2: Configure the selected AI provider
+    success = await configure_credential(selected, console)
+    if not success:
+        console.print("\n[yellow]Setup cancelled.[/yellow]")
+        return
+
+    # Step 3: Notion workspace (optional)
+    console.print()
+    if await _confirm("Configure a Notion workspace?"):
+        notion = get_integration("notion")
+        await configure_credential(notion, console)
+
+    # Step 4: Ensure config file
+    if ensure_config_file():
+        console.print("[green]OK[/green] promaia.config.json ready")
+    else:
+        console.print(
+            "[yellow]Warning:[/yellow] promaia.config.template.json not found — "
+            "skipped config file creation"
+        )
+
+    # Step 5: Next steps
+    console.print()
+    from_installer = os.environ.get("PROMAIA_FROM_INSTALLER") == "1"
+    maia_installed = os.environ.get("PROMAIA_MAIA_INSTALLED") == "1"
+    _print_next_steps(from_installer, maia_installed)
+
+
+def _print_banner():
+    banner = Panel(
+        "[bold magenta]🐙 Promaia Setup[/bold magenta]\n"
+        "[dim]Configure your AI provider and API key[/dim]",
+        border_style="magenta",
+        padding=(1, 2),
+    )
+    console.print(banner)
+    console.print()
+
+
+async def _select_provider(integrations):
+    """Arrow-key provider selector. Returns chosen Integration or None."""
+    current_focus = 0
+    confirmed = False
+
+    def get_entry_display(index: int) -> str:
+        p = integrations[index]
+        indicator = "\u2192" if index == current_focus else " "
+        tag = "  (recommended)" if p.recommended else ""
+        return f" {indicator}  {p.display_name}{tag}"
+
+    def get_status_display():
+        return " \u2191\u2193 Navigate   ENTER Select   ESC Cancel"
+
+    def create_layout():
+        status_window = Window(
+            FormattedTextControl(text=get_status_display), height=1,
+            style="fg:gray",
+        )
+        title_window = Window(
+            FormattedTextControl(text=" Select your AI provider:"), height=1
+        )
+        entry_windows = [
+            Window(
+                FormattedTextControl(text=lambda i=i: get_entry_display(i)),
+                height=1,
+            )
+            for i in range(len(integrations))
+        ]
+        return Layout(HSplit([
+            title_window,
+            Window(height=1),
+            *entry_windows,
+            Window(height=1),
+            status_window,
+        ]))
+
+    layout = create_layout()
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.Up)
+    def move_up(event):
+        nonlocal current_focus
+        if current_focus > 0:
+            current_focus -= 1
+            event.app.layout = create_layout()
+
+    @bindings.add(Keys.Down)
+    def move_down(event):
+        nonlocal current_focus
+        if current_focus < len(integrations) - 1:
+            current_focus += 1
+            event.app.layout = create_layout()
+
+    @bindings.add(Keys.Enter)
+    def confirm_selection(event):
+        nonlocal confirmed
+        confirmed = True
+        event.app.exit()
+
+    @bindings.add(Keys.Escape)
+    def cancel(event):
+        event.app.exit()
+
+    app = Application(
+        layout=layout,
+        key_bindings=bindings,
+        full_screen=False,
+        mouse_support=False,
+    )
+    await app.run_async()
+
+    if confirmed:
+        selected = integrations[current_focus]
+        console.print(f"  [magenta]{selected.display_name}[/magenta]\n")
+        return selected
+    return None
+
+
+async def _confirm(prompt: str, default_yes: bool = False) -> bool:
+    """Arrow-key Yes/No selector. Returns True for Yes, False for No."""
+    options = ["Yes", "No"]
+    current_focus = 0 if default_yes else 1
+    confirmed = False
+
+    def get_entry_display(index: int) -> str:
+        indicator = "\u2192" if index == current_focus else " "
+        return f" {indicator}  {options[index]}"
+
+    def get_status_display():
+        return " \u2191\u2193 Navigate   ENTER Select"
+
+    def create_layout():
+        prompt_window = Window(
+            FormattedTextControl(text=f" {prompt}"), height=1
+        )
+        entry_windows = [
+            Window(
+                FormattedTextControl(text=lambda i=i: get_entry_display(i)),
+                height=1,
+            )
+            for i in range(len(options))
+        ]
+        status_window = Window(
+            FormattedTextControl(text=get_status_display), height=1,
+            style="fg:gray",
+        )
+        return Layout(HSplit([
+            prompt_window,
+            Window(height=1),
+            *entry_windows,
+            Window(height=1),
+            status_window,
+        ]))
+
+    layout = create_layout()
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.Up)
+    def move_up(event):
+        nonlocal current_focus
+        if current_focus > 0:
+            current_focus -= 1
+            event.app.layout = create_layout()
+
+    @bindings.add(Keys.Down)
+    def move_down(event):
+        nonlocal current_focus
+        if current_focus < len(options) - 1:
+            current_focus += 1
+            event.app.layout = create_layout()
+
+    @bindings.add(Keys.Enter)
+    def confirm_selection(event):
+        nonlocal confirmed
+        confirmed = True
+        event.app.exit()
+
+    @bindings.add(Keys.Escape)
+    def cancel(event):
+        event.app.exit()
+
+    app = Application(
+        layout=layout,
+        key_bindings=bindings,
+        full_screen=False,
+        mouse_support=False,
+    )
+    await app.run_async()
+
+    result = confirmed and current_focus == 0
+    console.print(f"  [dim]{'Yes' if result else 'No'}[/dim]\n")
+    return result
+
+
+async def _check_config():
+    """Non-destructive config check: maia setup --check"""
+    console.print("[bold]Configuration Status[/bold]\n")
+
+    from promaia.auth.registry import list_integrations
+
+    table = Table(show_header=True)
+    table.add_column("Integration", style="magenta")
+    table.add_column("Status")
+
+    for integration in list_integrations():
+        cred = integration.get_default_credential()
+        if cred:
+            masked = (
+                cred[:8] + "..." + cred[-4:]
+                if len(cred) > 12
+                else "***"
+            )
+            table.add_row(
+                integration.display_name,
+                f"[green]Set[/green] ({masked})",
+            )
+        else:
+            table.add_row(integration.display_name, "[dim]Not set[/dim]")
+
+    console.print(table)
+
+    config_path = get_config_path()
+    if config_path.exists():
+        console.print(f"\n[green]OK[/green] {config_path}")
+    else:
+        console.print(f"\n[yellow]Missing[/yellow] {config_path}")
+        console.print("[dim]Run 'maia setup' to create it[/dim]")
+
+
+def _print_next_steps(from_installer: bool = False, maia_installed: bool = False):
+    """Print success message and quick-start commands."""
+    if from_installer and not maia_installed:
+        cmds = (
+            "  docker compose run --rm maia chat\n"
+            "  docker compose up -d       [dim]# start web API + scheduler[/dim]\n"
+            "  docker compose run --rm maia --help"
+        )
+        reconfigure = (
+            "  docker compose run --rm maia setup\n"
+            "  docker compose run --rm maia setup --check"
+        )
+    else:
+        cmds = "  maia chat\n  maia --help"
+        reconfigure = "  maia setup\n  maia setup --check"
+
+    panel = Panel(
+        "[bold green]Setup complete![/bold green]\n\n"
+        f"Quick start:\n{cmds}\n\n"
+        f"Reconfigure anytime:\n{reconfigure}",
+        title="[bold]Ready[/bold]",
+        border_style="magenta",
+        padding=(1, 2),
+    )
+    console.print(panel)
+
+
+# ── Argparse registration ────────────────────────────────────────────
+
+
+def add_setup_commands(subparsers):
+    """Register 'maia setup' command with argparse."""
+    setup_parser = subparsers.add_parser(
+        "setup",
+        help="Interactive setup wizard — configure AI provider and API key",
+    )
+    setup_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check current configuration status without changing anything",
+    )
+    setup_parser.set_defaults(func=handle_setup)

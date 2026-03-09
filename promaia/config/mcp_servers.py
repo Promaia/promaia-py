@@ -1,0 +1,213 @@
+"""
+MCP (Model Context Protocol) server configuration and management.
+
+This module handles the configuration, discovery, and management of MCP servers
+that can be integrated into Promaia chat sessions.
+"""
+import json
+import os
+import re
+from typing import Dict, List, Optional, Any
+from dataclasses import dataclass
+from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class McpServerConfig:
+    """Configuration for an MCP server."""
+    name: str
+    description: str
+    command: List[str]  # Command to start the server
+    args: List[str] = None  # Additional arguments
+    env: Dict[str, str] = None  # Environment variables
+    working_dir: str = None  # Working directory
+    timeout: int = 30  # Connection timeout in seconds
+    enabled: bool = True
+
+    def __post_init__(self):
+        """Initialize optional fields."""
+        if self.args is None:
+            self.args = []
+        if self.env is None:
+            self.env = {}
+    
+    def get_resolved_env(self) -> Dict[str, str]:
+        """Get environment variables with ${VAR_NAME} substitution resolved.
+        
+        Returns:
+            Dictionary with environment variables resolved
+        """
+        resolved_env = {}
+        
+        for key, value in self.env.items():
+            resolved_value = self._substitute_env_vars(value)
+            resolved_env[key] = resolved_value
+            
+        return resolved_env
+    
+    def _substitute_env_vars(self, value: str) -> str:
+        """Substitute environment variables in the format ${VAR_NAME}.
+        
+        Args:
+            value: String that may contain ${VAR_NAME} patterns
+            
+        Returns:
+            String with environment variables substituted
+        """
+        def replace_var(match):
+            var_name = match.group(1)
+            env_value = os.getenv(var_name)
+            if env_value is None:
+                logger.warning(f"Environment variable {var_name} not found, leaving as-is")
+                return match.group(0)  # Return original ${VAR_NAME} if not found
+            return env_value
+        
+        # Replace ${VAR_NAME} patterns with environment variable values
+        return re.sub(r'\$\{([^}]+)\}', replace_var, value)
+
+class McpServerManager:
+    """Manages MCP server configurations and connections."""
+    
+    def __init__(self, config_path: str = "mcp_servers.json"):
+        """Initialize the MCP server manager.
+        
+        Args:
+            config_path: Path to the MCP servers configuration file
+        """
+        self.config_path = config_path
+        self.servers: Dict[str, McpServerConfig] = {}
+        self.load_config()
+    
+    def load_config(self) -> None:
+        """Load MCP server configurations from file."""
+        if not os.path.exists(self.config_path):
+            logger.info(f"MCP config file not found at {self.config_path}, creating default config")
+            self.create_default_config()
+            return
+        
+        try:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                config_data = json.load(f)
+            
+            self.servers = {}
+            for server_name, server_data in config_data.get('servers', {}).items():
+                self.servers[server_name] = McpServerConfig(
+                    name=server_name,
+                    description=server_data.get('description', ''),
+                    command=server_data.get('command', []),
+                    args=server_data.get('args', []),
+                    env=server_data.get('env', {}),
+                    working_dir=server_data.get('working_dir'),
+                    timeout=server_data.get('timeout', 30),
+                    enabled=server_data.get('enabled', True)
+                )
+            
+            logger.info(f"Loaded {len(self.servers)} MCP server configurations")
+            
+        except Exception as e:
+            logger.error(f"Error loading MCP config from {self.config_path}: {e}")
+            self.servers = {}
+    
+    def create_default_config(self) -> None:
+        """Create a default MCP configuration file with examples."""
+        default_config = {
+            "servers": {
+                "filesystem": {
+                    "description": "Access local filesystem for reading and writing files",
+                    "command": ["npx", "@modelcontextprotocol/server-filesystem"],
+                    "args": ["/path/to/allowed/directory"],
+                    "enabled": False
+                },
+                "git": {
+                    "description": "Git repository operations and information",
+                    "command": ["npx", "@modelcontextprotocol/server-git"],
+                    "args": ["--repository", "."],
+                    "enabled": False
+                },
+                "sqlite": {
+                    "description": "SQLite database access and queries",
+                    "command": ["npx", "@modelcontextprotocol/server-sqlite"],
+                    "args": ["--db-path", "data/example.db"],
+                    "enabled": False
+                }
+            }
+        }
+        
+        try:
+            with open(self.config_path, 'w', encoding='utf-8') as f:
+                json.dump(default_config, f, indent=2)
+            logger.info(f"Created default MCP config at {self.config_path}")
+        except Exception as e:
+            logger.error(f"Error creating default MCP config: {e}")
+    
+    def get_server(self, name: str) -> Optional[McpServerConfig]:
+        """Get a specific MCP server configuration.
+        
+        Args:
+            name: Name of the MCP server
+            
+        Returns:
+            McpServerConfig if found, None otherwise
+        """
+        return self.servers.get(name)
+    
+    def list_servers(self, enabled_only: bool = False) -> List[str]:
+        """List available MCP server names.
+        
+        Args:
+            enabled_only: If True, only return enabled servers
+            
+        Returns:
+            List of server names
+        """
+        if enabled_only:
+            return [name for name, config in self.servers.items() if config.enabled]
+        return list(self.servers.keys())
+    
+    def get_enabled_servers(self) -> Dict[str, McpServerConfig]:
+        """Get all enabled MCP servers.
+        
+        Returns:
+            Dictionary of enabled server configurations
+        """
+        return {name: config for name, config in self.servers.items() if config.enabled}
+    
+    def validate_server_config(self, config: McpServerConfig) -> List[str]:
+        """Validate an MCP server configuration.
+        
+        Args:
+            config: Server configuration to validate
+            
+        Returns:
+            List of validation errors (empty if valid)
+        """
+        errors = []
+        
+        if not config.name:
+            errors.append("Server name is required")
+        
+        if not config.command:
+            errors.append("Server command is required")
+        
+        # Check if command exists
+        import shutil
+        if config.command and not shutil.which(config.command[0]):
+            errors.append(f"Command '{config.command[0]}' not found in PATH")
+        
+        # Validate working directory if specified
+        if config.working_dir and not os.path.isdir(config.working_dir):
+            errors.append(f"Working directory '{config.working_dir}' does not exist")
+        
+        return errors
+
+# Global MCP server manager instance
+_mcp_manager = None
+
+def get_mcp_manager() -> McpServerManager:
+    """Get the global MCP server manager instance."""
+    global _mcp_manager
+    if _mcp_manager is None:
+        _mcp_manager = McpServerManager()
+    return _mcp_manager 

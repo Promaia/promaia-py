@@ -1,0 +1,46 @@
+{
+  "global": {
+    "default_sync_days": 7,
+    "default_output_directory": "data",
+    "markdown_base_directory": "data",
+    "registry_db": "data/hybrid_metadata.db",
+    "enable_ai_editing": true,
+    "ai_edit_safety_mode": true,
+    "savecontexts": true,
+    "display": {
+      "plain_output": false,
+      "copy_friendly_mode": true
+    },
+    "chat": {
+      "default_days": 7,
+      "default_sources": [],
+      "enable_multi_source_by_default": false
+    },
+    "ocr": {
+      "enabled": true,
+      "engine": "openai_vision",
+      "uploads_directory": "data/uploads/pending",
+      "processed_directory": "data/uploads/processed",
+      "failed_directory": "data/uploads/failed",
+      "auto_process": false,
+      "batch_size": 10,
+      "confidence_threshold": 0.7,
+      "preprocessing": {
+        "resize_max": 4096,
+        "enhance_contrast": true,
+        "denoise": false
+      },
+      "api_settings": {
+        "model": "gpt-4o",
+        "api_key": "${OPENAI_API_KEY}",
+        "max_tokens": 4096,
+        "temperature": 0.1,
+        "detail": "high"
+      }
+    }
+  },
+  "databases": {},
+  "workspaces": {},
+  "default_workspace": null
+}
+
