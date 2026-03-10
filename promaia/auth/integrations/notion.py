@@ -115,7 +115,11 @@ class NotionIntegration(Integration):
         If ``workspace`` or ``workspace_name`` kwarg is provided, stores
         per-workspace; otherwise stores globally.
         """
-        workspace = kwargs.get("workspace_name") or kwargs.get("workspace")
+        # Only use the explicit maia workspace name.  Do NOT fall back to
+        # the Notion OAuth ``workspace_name`` — that is the Notion workspace
+        # display name (e.g. "Mitchell Magat's Notion") which should never
+        # be used as a filesystem path.  It is stored as metadata below.
+        workspace = kwargs.get("workspace")
         path = self._token_path(workspace)
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -140,6 +144,8 @@ class NotionIntegration(Integration):
             token_data["expires_in"] = kwargs["expires_in"]
         if kwargs.get("workspace_id"):
             token_data["workspace_id"] = kwargs["workspace_id"]
+        if kwargs.get("workspace_name"):
+            token_data["workspace_name"] = kwargs["workspace_name"]
         if kwargs.get("bot_id"):
             token_data["bot_id"] = kwargs["bot_id"]
 
