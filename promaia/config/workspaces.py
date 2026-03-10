@@ -31,6 +31,7 @@ class WorkspaceConfig:
         self.agents_page_id = config_data.get("agents_page_id")  # The parent Promaia Agents page
         self.promaia_page_id = config_data.get("promaia_page_id")  # The main Promaia page (template root)
         self.main_prompt_page_id = config_data.get("main_prompt_page_id")  # The Main prompt subpage
+        self.prompts_database_id = config_data.get("prompts_database_id")  # The Prompts inline database
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert workspace config to dictionary."""
@@ -64,6 +65,10 @@ class WorkspaceConfig:
         # Include main_prompt_page_id if set
         if self.main_prompt_page_id:
             result["main_prompt_page_id"] = self.main_prompt_page_id
+
+        # Include prompts_database_id if set
+        if self.prompts_database_id:
+            result["prompts_database_id"] = self.prompts_database_id
 
         return result
 
