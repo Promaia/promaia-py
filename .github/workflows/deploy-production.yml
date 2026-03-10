@@ -30,10 +30,10 @@ jobs:
             git pull origin main --ff-only
 
             # Pull the new image from GHCR (public, no auth needed)
-            docker compose -f docker-compose.prod.yml pull
+            docker compose pull
 
             # Recreate containers with the new image
-            docker compose -f docker-compose.prod.yml up -d
+            docker compose up -d
 
             echo "Deployment complete"
-            docker compose -f docker-compose.prod.yml ps
+            docker compose ps

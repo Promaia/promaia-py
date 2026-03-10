@@ -1,0 +1,141 @@
+# Development compose — builds locally and bind-mounts source tree for live editing.
+# All runtime state lives in maia-data/.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up -d
+#
+# The .:/app mount includes maia-data/ at /app/maia-data, so no extra
+# data mounts are needed — PROMAIA_DATA_DIR=/app/maia-data resolves correctly.
+#
+# Machine-specific overrides (e.g. macOS host mounts) go in
+# docker-compose.override.yml, which is gitignored.
+#
+# Before first run, ensure maia-data/ exists:
+#   mkdir -p maia-data/data
+#   cp .env.example maia-data/.env
+#   cp promaia.config.template.json maia-data/promaia.config.json
+
+services:
+  # ---------------------------------------------------------------------------
+  # CLI / TUI — persistent idle container for fast `exec`-based commands:
+  #   maia <command>          (wrapper auto-starts if needed)
+  #   maia restart-container  (force-recreate all containers)
+  # ---------------------------------------------------------------------------
+  maia:
+    build: .
+    image: promaia:dev
+    entrypoint: ["sh", "-c", "if [ $# -eq 0 ]; then exec sleep infinity; else exec maia \"$@\"; fi", "--"]
+    command: []
+    volumes:
+      - .:/app
+    env_file: ./maia-data/.env
+    environment:
+      - PROMAIA_DATA_DIR=/app/maia-data
+      - TZ=${TZ:-America/Los_Angeles}
+    ports:
+      - "8085:8085"   # OAuth callback for interactive Google re-auth
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # FastAPI web API — http://localhost:8000
+  # Supervisor watches services.json to enable/disable at runtime.
+  # ---------------------------------------------------------------------------
+  maia-web:
+    image: promaia:dev
+    entrypoint: ["python", "-m", "promaia.services.supervisor", "web", "--"]
+    command: ["uvicorn", "promaia.web.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - .:/app
+    env_file: ./maia-data/.env
+    environment:
+      - PROMAIA_DATA_DIR=/app/maia-data
+      - TZ=${TZ:-America/Los_Angeles}
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Agent scheduler daemon
+  # Supervisor watches services.json to enable/disable at runtime.
+  # ---------------------------------------------------------------------------
+  maia-scheduler:
+    image: promaia:dev
+    entrypoint: ["python", "-m", "promaia.services.supervisor", "scheduler", "--"]
+    command: ["maia", "agent", "scheduler-start"]
+    volumes:
+      - .:/app
+    env_file: ./maia-data/.env
+    environment:
+      - PROMAIA_DATA_DIR=/app/maia-data
+      - TZ=${TZ:-America/Los_Angeles}
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Calendar monitor daemon
+  # Watches Google Calendar for agent events, triggers runs, syncs databases.
+  # Supervisor watches services.json to enable/disable at runtime.
+  # ---------------------------------------------------------------------------
+  maia-calendar:
+    image: promaia:dev
+    entrypoint: ["python", "-m", "promaia.services.supervisor", "calendar", "--"]
+    command: ["maia", "daemon", "start", "--foreground"]
+    volumes:
+      - .:/app
+    env_file: ./maia-data/.env
+    environment:
+      - PROMAIA_DATA_DIR=/app/maia-data
+      - TZ=${TZ:-America/Los_Angeles}
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Mail processor — checks Gmail and drafts responses
+  # Uses --loop/--interval for proper Python loop (graceful SIGTERM).
+  # Supervisor watches services.json to enable/disable at runtime.
+  # ---------------------------------------------------------------------------
+  maia-mail:
+    image: promaia:dev
+    entrypoint: ["python", "-m", "promaia.services.supervisor", "mail", "--"]
+    command: ["maia", "mail", "-p", "--loop", "--interval", "1800"]
+    volumes:
+      - .:/app
+    env_file: ./maia-data/.env
+    environment:
+      - PROMAIA_DATA_DIR=/app/maia-data
+      - TZ=${TZ:-America/Los_Angeles}
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Discord bot
+  # Supervisor watches services.json to enable/disable at runtime.
+  # Disabled by default in services.json (requires credentials).
+  # ---------------------------------------------------------------------------
+  maia-discord:
+    image: promaia:dev
+    entrypoint: ["python", "-m", "promaia.services.supervisor", "discord", "--"]
+    command: ["python", "-m", "promaia.discord_bot.bot"]
+    volumes:
+      - .:/app
+    env_file: ./maia-data/.env
+    environment:
+      - PROMAIA_DATA_DIR=/app/maia-data
+      - TZ=${TZ:-America/Los_Angeles}
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Slack bot
+  # Supervisor watches services.json to enable/disable at runtime.
+  # Disabled by default in services.json (requires credentials).
+  # ---------------------------------------------------------------------------
+  maia-slack:
+    image: promaia:dev
+    entrypoint: ["python", "-m", "promaia.services.supervisor", "slack", "--"]
+    command: ["python", "-m", "promaia.messaging.slack_bot"]
+    volumes:
+      - .:/app
+    env_file: ./maia-data/.env
+    environment:
+      - PROMAIA_DATA_DIR=/app/maia-data
+      - TZ=${TZ:-America/Los_Angeles}
+    restart: unless-stopped
