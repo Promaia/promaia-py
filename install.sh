@@ -66,11 +66,11 @@ if [ -f "Dockerfile" ] && [ -d "promaia" ]; then
         docker compose build maia
     else
         printf "\n${MAGENTA}Pulling pre-built image...${NC}\n"
-        docker pull ghcr.io/promaia/promaia:latest
+        docker pull ghcr.io/promaia/promaia-py:latest
     fi
 else
     printf "${MAGENTA}Pulling pre-built image...${NC}\n"
-    docker pull ghcr.io/promaia/promaia:latest
+    docker pull ghcr.io/promaia/promaia-py:latest
 fi
 printf "  ${GREEN}OK${NC} image ready\n\n"
 
