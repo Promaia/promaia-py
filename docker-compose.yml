@@ -70,6 +70,18 @@ services:
       - TZ=${TZ:-America/Los_Angeles}
     restart: unless-stopped
 
+  maia-slack:
+    image: ghcr.io/promaia/promaia-py:latest
+    entrypoint: ["python", "-m", "promaia.services.supervisor", "slack", "--"]
+    command: ["python", "-m", "promaia.messaging.slack_bot"]
+    volumes:
+      - ./maia-data:/app/maia-data
+    env_file: ./maia-data/.env
+    environment:
+      - PROMAIA_DATA_DIR=/app/maia-data
+      - TZ=${TZ:-America/Los_Angeles}
+    restart: unless-stopped
+
   maia-discord:
     image: ghcr.io/promaia/promaia-py:latest
     entrypoint: ["python", "-m", "promaia.services.supervisor", "discord", "--"]
