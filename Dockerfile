@@ -1,5 +1,8 @@
 FROM python:3.13-slim AS base
 
+LABEL org.opencontainers.image.source=https://github.com/Promaia/promaia-py
+LABEL org.opencontainers.image.description="Promaia personal AI assistant"
+
 WORKDIR /app
 
 # System deps for opencv, chromadb native extensions, build tools,

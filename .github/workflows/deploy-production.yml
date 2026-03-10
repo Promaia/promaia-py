@@ -1,19 +1,21 @@
 name: Deploy to Production (Mac Mini)
 
 on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:  # Allow manual trigger
+  workflow_run:
+    workflows: ["Build and Push to GHCR"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Deploy to Mac Mini
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -22,34 +24,17 @@ jobs:
           key: ${{ secrets.MAC_MINI_SSH_KEY }}
           port: 22
           script: |
-            # Navigate to promaia directory
             cd ~/promaia
-            
-            # Stash any local changes (shouldn't be any on production)
-            git stash
-            
-            # Pull latest from main
-            git checkout main
-            git pull origin main
-            
-            # Activate virtual environment
-            source venv/bin/activate
-            
-            # Install/update dependencies
-            pip install -e . --quiet
-            
-            # Run any migrations if needed
-            # python -m promaia.storage.migrations
-            
-            # Restart services
-            # If using systemd:
-            # sudo systemctl restart promaia-discord-bot
-            # sudo systemctl restart promaia-scheduler
-            
-            # Or if using screen/tmux:
-            # screen -S promaia-bot -X quit || true
-            # screen -dmS promaia-bot bash -c "source venv/bin/activate && python -m promaia.discord_bot.bot"
-            
-            echo "✅ Deployment complete!"
-            echo "📊 Git status:"
-            git log -1 --oneline
+
+            # Pull latest compose file
+            git pull origin main --ff-only
+
+            # Log in to GHCR and pull the new image
+            echo ${{ secrets.GHCR_TOKEN }} | docker login ghcr.io -u ${{ secrets.MAC_MINI_USER }} --password-stdin
+            docker compose -f docker-compose.prod.yml pull
+
+            # Recreate containers with the new image
+            docker compose -f docker-compose.prod.yml up -d
+
+            echo "Deployment complete"
+            docker compose -f docker-compose.prod.yml ps
