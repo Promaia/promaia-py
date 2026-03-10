@@ -23,6 +23,11 @@
         "command": "/promaia-status",
         "description": "Show conversation status",
         "should_escape": false
+      },
+      {
+        "command": "/agent",
+        "description": "List and pick an agent",
+        "should_escape": false
       }
     ]
   },
@@ -33,6 +38,7 @@
         "channels:history",
         "channels:read",
         "chat:write",
+        "channels:join",
         "commands",
         "groups:history",
         "groups:read",
@@ -42,6 +48,7 @@
         "mpim:history",
         "mpim:read",
         "reactions:read",
+        "reactions:write",
         "users:read"
       ]
     }
@@ -50,6 +57,7 @@
     "event_subscriptions": {
       "bot_events": [
         "app_mention",
+        "reaction_added",
         "message.channels",
         "message.groups",
         "message.im",
