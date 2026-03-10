@@ -78,6 +78,15 @@ printf "  ${GREEN}OK${NC} image ready\n\n"
 printf "${MAGENTA}Preparing maia-data/...${NC}\n"
 mkdir -p maia-data/data
 
+# The container runs as uid 1000 (maia). Ensure the host directory is
+# writable by that uid so mounted volumes work correctly.
+if [ "$(id -u)" = "0" ]; then
+    chown -R 1000:1000 maia-data
+else
+    # Non-root install — try chown, fall back to chmod if not permitted
+    chown -R 1000:1000 maia-data 2>/dev/null || chmod -R a+rwX maia-data
+fi
+
 if [ ! -f "maia-data/.env" ]; then
     if [ -f ".env.example" ]; then
         cp .env.example maia-data/.env
