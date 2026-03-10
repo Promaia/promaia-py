@@ -29,8 +29,7 @@ jobs:
             # Pull latest compose file
             git pull origin main --ff-only
 
-            # Log in to GHCR and pull the new image
-            echo ${{ secrets.GHCR_TOKEN }} | docker login ghcr.io -u ${{ secrets.MAC_MINI_USER }} --password-stdin
+            # Pull the new image from GHCR (public, no auth needed)
             docker compose -f docker-compose.prod.yml pull
 
             # Recreate containers with the new image
