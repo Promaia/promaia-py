@@ -2974,9 +2974,11 @@ def main():
     # In non-interactive mode (like in the app), send logs to a file
     # and only critical errors to stderr.
     if not sys.stdout.isatty():
+        from promaia.utils.env_writer import get_data_dir
+        log_path = get_data_dir() / "maia_desktop.log"
         logging.basicConfig(level=log_level,
                             format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-                            filename='maia_desktop.log',
+                            filename=str(log_path),
                             filemode='w')
         # Also log critical errors to stderr for the app to see
         stderr_handler = logging.StreamHandler(sys.stderr)
