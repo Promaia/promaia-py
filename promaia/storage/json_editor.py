@@ -24,8 +24,13 @@ class NotionJSONEditor:
     """Editor for local Notion JSON files with change tracking"""
     
     def __init__(self, workspace_root: str = None):
-        self.workspace_root = workspace_root or os.getcwd()
-        self.data_dir = os.path.join(self.workspace_root, "data")
+        if workspace_root:
+            self.workspace_root = workspace_root
+            self.data_dir = os.path.join(self.workspace_root, "data")
+        else:
+            from promaia.utils.env_writer import get_data_dir, get_data_subdir
+            self.workspace_root = str(get_data_dir())
+            self.data_dir = str(get_data_subdir())
         
     def load_page(self, content_type: str, page_id: str) -> Dict[str, Any]:
         """Load a page from JSON storage"""

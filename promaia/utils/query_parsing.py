@@ -3,6 +3,8 @@ Utility functions for parsing command-line query arguments.
 """
 import json
 
+from promaia.utils.env_writer import get_config_path
+
 
 def parse_vs_queries_with_params(argv):
     """
@@ -67,7 +69,7 @@ def parse_vs_queries_with_params(argv):
 
         # Load defaults from config
         try:
-            with open('promaia.config.json', 'r') as f:
+            with open(str(get_config_path()), 'r') as f:
                 config = json.load(f)
                 top_k = config.get('vector_search', {}).get('default_n_results', 20)
                 threshold = config.get('vector_search', {}).get('default_similarity_threshold', 0.2)

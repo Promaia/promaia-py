@@ -5,6 +5,7 @@ Provides beautiful terminal output that copies cleanly without formatting artifa
 import os
 import json
 from typing import Optional, Union
+from promaia.utils.env_writer import get_config_path
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.text import Text
@@ -22,9 +23,9 @@ def get_display_config() -> dict:
     """
     try:
         # Look for config file in current directory
-        config_path = "promaia.config.json"
-        if os.path.exists(config_path):
-            with open(config_path, 'r') as f:
+        config_path = get_config_path()
+        if config_path.exists():
+            with open(str(config_path), 'r') as f:
                 config = json.load(f)
                 return config.get("global", {}).get("display", {})
     except Exception as e:

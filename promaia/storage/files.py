@@ -14,6 +14,7 @@ import sqlite3
 
 # Import the new centralized path function
 from promaia.config.paths import get_project_root
+from promaia.utils.env_writer import get_data_dir, get_data_subdir
 
 # Use the centralized function to define PROJECT_ROOT
 PROJECT_ROOT = get_project_root()
@@ -93,7 +94,7 @@ def get_output_dir(content_type: str) -> str:
         # e.g., if content_type is "example", dir_name will be "notion-example"
         dir_name = f"notion-{content_type}"
     
-    return os.path.join(PROJECT_ROOT, dir_name)
+    return str(get_data_dir() / dir_name) if dir_name else str(get_data_dir())
 
 def ensure_output_dir(content_type: str):
     """Ensure the output directory exists. Uses PROJECT_ROOT via get_output_dir."""
@@ -214,7 +215,7 @@ def read_markdown_files(
         source_dir_name = get_journal_directory() # Default to private journal if ambiguous
 
     # Construct the absolute path to the source directory using PROJECT_ROOT
-    data_directory_path = os.path.join(PROJECT_ROOT, source_dir_name)
+    data_directory_path = str(get_data_dir() / source_dir_name)
 
     if not os.path.isdir(data_directory_path):
         print(f"Error: Source directory not found: {data_directory_path}")
@@ -391,7 +392,7 @@ def read_markdown_files_from_sources(sources: List[Dict[str, Any]]) -> Dict[str,
         days_filter = None if days == 'all' else days
         
         # Construct the path to the database directory
-        database_path = os.path.join(PROJECT_ROOT, "data", database_name)
+        database_path = str(get_data_subdir() / database_name)
         
         if not os.path.isdir(database_path):
             print(f"Warning: Database directory not found: {database_path}")
@@ -566,7 +567,7 @@ def load_json_files_with_property_filter(property_filters: Dict[str, Any], json_
     if not property_filters:
         return []
     
-    json_dir_path = os.path.join(PROJECT_ROOT, json_directory)
+    json_dir_path = str(get_data_dir() / json_directory)
     
     if not os.path.exists(json_dir_path):
         print(f"Warning: JSON directory not found: {json_dir_path}")

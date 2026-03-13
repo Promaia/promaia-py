@@ -2,9 +2,7 @@ import os
 from datetime import datetime
 from typing import Optional
 
-# Determine Project Root by going up three levels from a file in maia/storage/
-# This assumes this file itself is maia/storage/markdown_files.py
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from promaia.utils.env_writer import get_data_subdir, get_data_dir
 
 def get_md_output_dir(content_type: str, workspace: str = None) -> str:
     """
@@ -21,7 +19,7 @@ def get_md_output_dir(content_type: str, workspace: str = None) -> str:
     if not workspace:
         workspace = "default"
     
-    return os.path.join(PROJECT_ROOT, "data", workspace, "md", content_type)
+    return str(get_data_subdir() / workspace / "md" / content_type)
 
 def get_md_output_dir_for_database(database_name: str) -> str:
     """
@@ -45,7 +43,7 @@ def get_md_output_dir_for_database(database_name: str) -> str:
         if db_config:
             # Use the actual markdown_directory from the database configuration
             # This already has the correct unified storage path
-            return os.path.join(PROJECT_ROOT, db_config.markdown_directory)
+            return str(get_data_dir() / db_config.markdown_directory)
         else:
             # Fall back to simple content type lookup for backward compatibility
             return get_md_output_dir(database_name)

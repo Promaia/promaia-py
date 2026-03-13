@@ -870,7 +870,8 @@ Return ONLY the JSON object:"""
 
             # Get database IDs for the target databases
             import json
-            with open('promaia.config.json', 'r') as f:
+            from promaia.utils.env_writer import get_config_path
+            with open(str(get_config_path()), 'r') as f:
                 config = json.load(f)
 
             # Build property name mapping for all target databases

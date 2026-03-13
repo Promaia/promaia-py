@@ -37,7 +37,7 @@ from promaia.utils.env_writer import get_data_dir as _get_data_dir
 session = PromptSession(history=FileHistory(str(_get_data_dir() / ".maia_write_history")))
 
 # Create drafts directory if it doesn't exist
-DRAFTS_DIR = "drafts"
+DRAFTS_DIR = str(_get_data_dir() / "drafts")
 os.makedirs(DRAFTS_DIR, exist_ok=True)
 
 DEBUG_MODE = os.environ.get("MAIA_DEBUG") == "1"
@@ -411,7 +411,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
     system_prompt = create_blog_system_prompt(journal_pages, webflow_pages, custom_prompt, api_type, max_entries)
 
     # Save the system prompt to a file without output
-    debug_dir = "debug"
+    debug_dir = str(_get_data_dir() / "debug")
     os.makedirs(debug_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     debug_file = os.path.join(debug_dir, f"write_prompt_{timestamp}.txt")
@@ -862,10 +862,10 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
             # If there's an error, save the content locally as a fallback
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"blog_post_{timestamp}.md"
-            filepath = os.path.join("drafts", filename)
-            
+            filepath = os.path.join(DRAFTS_DIR, filename)
+
             # Ensure drafts directory exists
-            os.makedirs("drafts", exist_ok=True)
+            os.makedirs(DRAFTS_DIR, exist_ok=True)
             
             # Save the content
             with open(filepath, "w", encoding="utf-8") as f:

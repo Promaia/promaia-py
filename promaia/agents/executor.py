@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import tempfile
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from pathlib import Path
@@ -35,8 +36,7 @@ try:
     _SDK_IMPORT_DEBUG.append("✓ SDK import successful")
     logger.info("Claude Agent SDK imported successfully")
     # Write to debug file
-    import os
-    with open(f"/tmp/promaia_sdk_debug_{os.getpid()}.txt", "w") as f:
+    with open(os.path.join(tempfile.gettempdir(), f"promaia_sdk_debug_{os.getpid()}.txt"), "w") as f:
         f.write(f"SDK_AVAILABLE = True\n")
         f.write(f"PID: {os.getpid()}\n")
 except ImportError as e:
@@ -45,8 +45,7 @@ except ImportError as e:
     _SDK_IMPORT_DEBUG.append(f"✗ ImportError: {e}")
     logger.info(f"Claude Agent SDK not available, will use legacy execution mode: {e}")
     # Write to debug file
-    import os
-    with open(f"/tmp/promaia_sdk_debug_{os.getpid()}.txt", "w") as f:
+    with open(os.path.join(tempfile.gettempdir(), f"promaia_sdk_debug_{os.getpid()}.txt"), "w") as f:
         f.write(f"SDK_AVAILABLE = False (ImportError)\n")
         f.write(f"Error: {e}\n")
         f.write(f"PID: {os.getpid()}\n")
@@ -56,8 +55,7 @@ except Exception as e:
     _SDK_IMPORT_DEBUG.append(f"✗ Exception: {e}")
     logger.error(f"Claude Agent SDK import failed (Exception): {e}")
     # Write to debug file
-    import os
-    with open(f"/tmp/promaia_sdk_debug_{os.getpid()}.txt", "w") as f:
+    with open(os.path.join(tempfile.gettempdir(), f"promaia_sdk_debug_{os.getpid()}.txt"), "w") as f:
         f.write(f"SDK_AVAILABLE = False (Exception)\n")
         f.write(f"Error: {e}\n")
         f.write(f"PID: {os.getpid()}\n")

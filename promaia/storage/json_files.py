@@ -8,20 +8,19 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import re
 
-# Determine Project Root
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from promaia.utils.env_writer import get_data_subdir
 
 def get_json_output_dir(content_type: str) -> str:
     """
     Get the JSON output directory for a specific content type.
     Uses the new root-level structure: data/json/{content_type}/
-    
+
     Args:
         content_type: Type of content (database nickname, e.g., "journal", "stories")
     Returns:
         Absolute path to the JSON output directory
     """
-    return os.path.join(PROJECT_ROOT, "data", "json", content_type)
+    return str(get_data_subdir() / "json" / content_type)
 
 def ensure_json_output_dir(content_type: str):
     """Ensure the JSON output directory exists."""

@@ -11,21 +11,19 @@ from pathlib import Path
 
 from promaia.markdown.converter import page_to_markdown
 from promaia.storage.json_files import get_json_output_dir, read_json_files
-
-# Determine Project Root
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from promaia.utils.env_writer import get_data_subdir
 
 def get_markdown_output_dir(content_type: str) -> str:
     """
     Get the markdown output directory for a specific content type.
     Uses the new root-level structure: data/md/{content_type}/
-    
+
     Args:
         content_type: Type of content (e.g., "journal", "stories", etc.)
     Returns:
         Absolute path to the markdown output directory
     """
-    return os.path.join(PROJECT_ROOT, "data", "md", content_type)
+    return str(get_data_subdir() / "md" / content_type)
 
 def ensure_markdown_output_dir(content_type: str):
     """Ensure the markdown output directory exists."""

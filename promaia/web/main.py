@@ -2,14 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from promaia.web.routers import chat as chat_router
 import uvicorn
-import os # For dotenv
+import os
 from dotenv import load_dotenv
+from promaia.utils.env_writer import get_env_path
 
-# Load environment variables from .env file in the project root
-# This assumes your .env file is in the root of the 'maia' project directory
-# (i.e., parent of the 'maia' package directory)
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-dotenv_path = os.path.join(PROJECT_ROOT, '.env')
+dotenv_path = str(get_env_path())
 load_dotenv(dotenv_path=dotenv_path)
 
 app = FastAPI(

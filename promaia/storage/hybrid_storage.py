@@ -1212,7 +1212,8 @@ class HybridContentRegistry:
             # Check if vector search is enabled
             import json
             import os
-            config_path = "promaia.config.json"
+            from promaia.utils.env_writer import get_config_path
+            config_path = str(get_config_path())
             with open(config_path, 'r') as f:
                 config = json.load(f)
             vector_config = config.get('global', {}).get('vector_search', {})
@@ -1363,7 +1364,8 @@ class HybridContentRegistry:
 
             # Check if vector search is enabled - load from main config file
             import json
-            config_path = "promaia.config.json"
+            from promaia.utils.env_writer import get_config_path
+            config_path = str(get_config_path())
             with open(config_path, 'r') as f:
                 config = json.load(f)
             vector_config = config.get('global', {}).get('vector_search', {})
@@ -2466,7 +2468,8 @@ class HybridContentRegistry:
                 if removed_props:
                     try:
                         # Load vector config to check if embeddings are enabled
-                        config_path = "promaia.config.json"
+                        from promaia.utils.env_writer import get_config_path
+                        config_path = str(get_config_path())
                         with open(config_path, 'r') as f:
                             config = json.load(f)
                         vector_config = config.get('global', {}).get('vector_search', {})
@@ -2493,7 +2496,8 @@ class HybridContentRegistry:
                 if type_changed:
                     try:
                         # Load vector config to check if embeddings are enabled
-                        config_path = "promaia.config.json"
+                        from promaia.utils.env_writer import get_config_path
+                        config_path = str(get_config_path())
                         with open(config_path, 'r') as f:
                             config = json.load(f)
                         vector_config = config.get('global', {}).get('vector_search', {})
