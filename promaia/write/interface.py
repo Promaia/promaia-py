@@ -431,7 +431,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
         if api_type == "anthropic":
             # Anthropic sync client used here
             from anthropic import Anthropic
-            client = Anthropic()
+            client = Anthropic(max_retries=5)
             response = client.messages.create(
                 model=ANTHROPIC_MODELS.get("sonnet", "claude-sonnet-4-6"),
                 max_tokens=4000,

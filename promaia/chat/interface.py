@@ -105,8 +105,8 @@ def _resolve_host_path(path: str) -> str:
 def _shell_unescape(path: str) -> str:
     """Remove shell escape backslashes from a file path.
 
-    Handles escaped spaces (\ ), equals (\=), parentheses, etc.
-    Example: 'foo_ref_\\=bar.png' → 'foo_ref_=bar.png'
+    Handles escaped spaces (\\ ), equals (\\=), parentheses, etc.
+    Example: 'foo_ref_\\\\=bar.png' -> 'foo_ref_=bar.png'
     """
     return re.sub(r'\\(.)', r'\1', path)
 
@@ -217,7 +217,7 @@ def save_browser_selection(sources):
 
 anthropic_client = None
 if os.getenv("ANTHROPIC_API_KEY"):
-    anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), max_retries=5)
 
 openai_client = None
 if os.getenv("OPENAI_API_KEY"):
@@ -699,17 +699,17 @@ async def push_chat_to_notion(messages):
     await asyncio.sleep(1) # Simulate async operation
     return "Successfully pushed chat to Notion."
 
-def call_anthropic_with_retry(client, system_prompt, messages, max_tokens=4096, temperature=0.7, max_retries=3):
-    """Calls the Anthropic API with retry logic."""
+def call_anthropic(client, system_prompt, messages, max_tokens=4096, temperature=0.7, max_retries=3):
+    """Call the Anthropic API with automatic model selection.
+
+    Retries are handled by the SDK client (max_retries on the Anthropic constructor).
+    """
     from promaia.nlq.models import ANTHROPIC_MODELS
 
-    # Determine which model to use based on current selection
-    # Check if a specific model ID was selected
     selected_model_id = os.getenv("SELECTED_MODEL_ID")
     if selected_model_id and "claude" in selected_model_id.lower():
         model_to_use = selected_model_id
     else:
-        # Fallback to checking display name
         current_model_name = get_current_model_name()
         if "Opus" in current_model_name:
             model_to_use = ANTHROPIC_MODELS.get("opus", "claude-opus-4-5")
@@ -717,33 +717,15 @@ def call_anthropic_with_retry(client, system_prompt, messages, max_tokens=4096, 
             model_to_use = ANTHROPIC_MODELS.get("sonnet", "claude-sonnet-4-5")
 
     debug_print(f"Using Anthropic model: {model_to_use}")
-    
-    for attempt in range(max_retries):
-        try:
-            response = client.messages.create(
-                model=model_to_use,
-                system=system_prompt,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-            return response
-        except Exception as e:
-            # Check if this is a connection error - don't retry these
-            error_str = str(e).lower()
-            is_connection_error = any(keyword in error_str for keyword in ['connection', 'network', 'timeout', 'unreachable', 'failed to connect'])
 
-            debug_print(f"Anthropic API call failed on attempt {attempt + 1}: {e}")
-
-            if is_connection_error:
-                # Don't retry connection errors - fail fast
-                debug_print("Connection error detected - not retrying")
-                raise
-
-            if attempt + 1 == max_retries:
-                return None
-            time.sleep(2) # Wait before retrying
-    return None
+    response = client.messages.create(
+        model=model_to_use,
+        system=system_prompt,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    return response
 
 def run_non_interactive_chat(messages: List[Dict[str, Any]], system_prompt: str, for_api: str):
     """Handles a single, non-interactive chat exchange."""
@@ -5486,13 +5468,13 @@ The user will type `/send` to trigger the actual sending process.
 
                     if current_message_images:
                         formatted_messages = _format_anthropic_with_images(messages, current_message_images)
-                        response = call_anthropic_with_retry(anthropic_client, current_system_prompt, formatted_messages, temperature=current_temperature)
+                        response = call_anthropic(anthropic_client, current_system_prompt, formatted_messages, temperature=current_temperature)
                     else:
                         clean_messages = []
                         for msg in messages:
                             clean_msg = {"role": msg["role"], "content": msg["content"]}
                             clean_messages.append(clean_msg)
-                        response = call_anthropic_with_retry(anthropic_client, current_system_prompt, clean_messages, temperature=current_temperature)
+                        response = call_anthropic(anthropic_client, current_system_prompt, clean_messages, temperature=current_temperature)
 
                     if response and response.content:
                         response_text = response.content[0].text
@@ -7933,7 +7915,7 @@ The user will type `/send` when ready to send the email.
 
                             if current_message_images:
                                 formatted_messages = _format_anthropic_with_images(messages, current_message_images)
-                                regen_response = call_anthropic_with_retry(anthropic_client, updated_system_prompt, formatted_messages, temperature=current_temperature)
+                                regen_response = call_anthropic(anthropic_client, updated_system_prompt, formatted_messages, temperature=current_temperature)
                             else:
                                 clean_messages = []
                                 for msg in messages:
@@ -7947,7 +7929,7 @@ The user will type `/send` when ready to send the email.
                                     print_text("⚠️  Cannot regenerate response with invalid message history", style="yellow")
                                     return None
 
-                                regen_response = call_anthropic_with_retry(anthropic_client, updated_system_prompt, clean_messages, temperature=current_temperature)
+                                regen_response = call_anthropic(anthropic_client, updated_system_prompt, clean_messages, temperature=current_temperature)
 
                             if regen_response and regen_response.content:
                                 return regen_response.content[0].text
@@ -7966,14 +7948,14 @@ The user will type `/send` when ready to send the email.
                     if current_message_images:
                         # Handle images with Anthropic
                         formatted_messages = _format_anthropic_with_images(messages_for_api, current_message_images)
-                        response = call_anthropic_with_retry(anthropic_client, current_system_prompt, formatted_messages, temperature=current_temperature)
+                        response = call_anthropic(anthropic_client, current_system_prompt, formatted_messages, temperature=current_temperature)
                     else:
                         # Regular text-only message - clean messages to remove extra fields
                         clean_messages = []
                         for msg in messages_for_api:
                             clean_msg = {"role": msg["role"], "content": msg["content"]}
                             clean_messages.append(clean_msg)
-                        response = call_anthropic_with_retry(anthropic_client, current_system_prompt, clean_messages, temperature=current_temperature)
+                        response = call_anthropic(anthropic_client, current_system_prompt, clean_messages, temperature=current_temperature)
                     if response and response.content:
                         response_text = response.content[0].text
 
@@ -8171,7 +8153,7 @@ The user will type `/send` when ready to send the email.
                                 debug_print("Attempting fallback to Anthropic due to Gemini 500 error")
                                 try:
                                     fallback_messages = [{"role": "user", "content": formatted_prompt}]
-                                    fallback_response = call_anthropic_with_retry(anthropic_client, "", fallback_messages)
+                                    fallback_response = call_anthropic(anthropic_client, "", fallback_messages)
                                     if fallback_response and fallback_response.content and len(fallback_response.content) > 0:
                                         response_text_with_tools = fallback_response.content[0].text
                                         debug_print("Successfully fell back to Anthropic")

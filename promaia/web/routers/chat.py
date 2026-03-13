@@ -4,7 +4,7 @@ from promaia.web.models import ChatMessageInput, ChatMessageOutput, InitialMessa
 from promaia.utils.env_writer import get_prompts_dir
 
 from promaia.nlq.prompts import create_system_prompt
-from promaia.utils.ai import debug_print, call_anthropic_with_retry
+from promaia.utils.ai import debug_print, call_anthropic
 from promaia.utils.image_processing import (
     encode_image_from_bytes, format_image_for_openai, format_image_for_anthropic, 
     format_image_for_gemini, format_image_for_llama, is_vision_supported, get_model_image_limits
@@ -50,7 +50,7 @@ else:
 # Initialize Anthropic
 if os.getenv("ANTHROPIC_API_KEY"):
     try:
-        anthropix_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        anthropix_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), max_retries=5)
         debug_print("Anthropic API configured.")
     except Exception as e:
         debug_print(f"Error configuring Anthropic API: {e}. Anthropic features will be unavailable.")
@@ -511,7 +511,7 @@ async def _handle_anthropic(user_message: str, images: List[ImageData], message_
         model_id = ANTHROPIC_MODELS.get("sonnet", "claude-sonnet-4-5")
 
     debug_print(f"Using Anthropic model: {model_id}")
-    response_content = await call_anthropic_with_retry(
+    response_content = await call_anthropic(
         anthropix_client,
         system_prompt,
         anthropic_messages,

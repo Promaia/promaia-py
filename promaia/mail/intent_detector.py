@@ -83,7 +83,7 @@ Response: {{"has_intent": true, "confidence": 0.9, "intent_type": "compose_new",
 
         # Try Anthropic first (preferred)
         if os.getenv("ANTHROPIC_API_KEY"):
-            self.ai_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            self.ai_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), max_retries=5)
             self.model_type = "anthropic"
             logger.debug("Using Anthropic for intent detection")
             return self.ai_client
