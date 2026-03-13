@@ -52,15 +52,15 @@ def load_environment():
             available_optional.append(f"{service} ({key})")
     
     if missing_keys:
-        logger.warning("The following API keys are not set in your .env file:")
+        logger.debug("The following API keys are not set in your .env file:")
         for key in missing_keys:
-            logger.warning(f"  - {key}")
-        logger.warning("Some features may not work without these keys.")
-    
+            logger.debug(f"  - {key}")
+        logger.debug("Some features may not work without these keys.")
+
     if available_optional:
-        logger.info("Optional AI services available:")
+        logger.debug("Optional AI services available:")
         for key in available_optional:
-            logger.info(f"  - {key}")
+            logger.debug(f"  - {key}")
     
     return len(missing_keys) == 0
 

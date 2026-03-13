@@ -32,7 +32,10 @@ from .query_strategies import QueryStrategy, SQLQueryStrategy, VectorQueryStrate
 # LLM Adapter (copied to avoid langchain dependencies)
 from anthropic import Anthropic
 from openai import OpenAI
-import google.generativeai as genai
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", FutureWarning)
+    import google.generativeai as genai
 
 
 class MockResponse:
