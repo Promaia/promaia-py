@@ -311,7 +311,7 @@ def _(event):
     event.app.exit(result='/browser-inline')
 
 session = PromptSession(
-    history=MessageOnlyHistory('.chat_history'),
+    history=MessageOnlyHistory(str(_get_data_dir() / ".chat_history")),
     multiline=True,  # Keep multiline for editing capabilities
     key_bindings=bindings
 )
