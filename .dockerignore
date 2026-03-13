@@ -1,0 +1,78 @@
+# Git
+.git
+.gitignore
+
+# Python artifacts
+__pycache__
+*.py[cod]
+*.egg-info
+build/
+dist/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Data and databases (live in a volume, not the image)
+data/
+maia-data/
+*.db
+*.sqlite
+*.sqlite3
+chroma_db/
+
+# Secrets
+.env
+.env.*
+!.env.example
+credentials/
+*credentials*.json
+*token*.json
+*secret*.json
+promaia.config.json
+
+# IDE / OS
+.idea/
+.vscode/
+.vs/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Logs and debug
+*.log
+logs/
+context_logs/
+debug/
+
+# Docs (not needed in image)
+docs/
+
+# CI / deployment
+.github/
+render.yaml
+Procfile
+
+# Claude / AI tool files
+.claude/
+.anthropic/
+.aider*
+
+# Node (MCP servers — not included in base image)
+node_modules/
+
+# Tests
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Misc
+temp/
+tmp/
+*.backup
+*.bak

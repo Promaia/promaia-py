@@ -1,0 +1,386 @@
+# ============================================================================
+# MISC
+# ============================================================================
+docs/rose/**
+.claude/settings.local.json
+BUSINESS_STRATEGY.md
+
+# ============================================================================
+# SECURITY - API Keys, Credentials & Secrets
+# ============================================================================
+.env
+.env.*
+!.env.example
+!.env.template
+config.json
+credentials.json
+*credentials*.json
+*token*.json
+*secret*.json
+*key*.json
+
+# Main config file (contains workspace API keys)
+promaia.config.json
+promaia.config.json.*
+!promaia.config.template.json
+!promaia.config.template*.json
+
+# Gmail/OAuth specific credentials
+credentials/*/gmail_credentials.json
+**/gmail_credentials.json
+gmail_token.json
+credentials/*/gmail_token.json
+**/gmail_token.json
+
+# AI API Keys
+openai_key.txt
+anthropic_key.txt
+google_api_key.txt
+
+# MCP server configuration (may contain API keys)
+mcp_servers.json
+!mcp_servers.json.template
+
+# ============================================================================
+# DATABASES & DATA FILES
+# ============================================================================
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Project specific databases
+promaia_meta.db
+maia_content.db
+data/*.db
+data/*.sqlite*
+
+# ============================================================================
+# PYTHON
+# ============================================================================
+# Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# ============================================================================
+# NODE.JS / JAVASCRIPT
+# ============================================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+*.lcov
+
+# nyc test coverage
+.nyc_output
+
+# Dependency directories
+jspm_packages/
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Microbundle cache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# parcel-bundler cache (https://parceljs.org/)
+.cache
+.parcel-cache
+
+# Next.js build output
+.next
+
+# Nuxt.js build / generate output
+.nuxt
+dist
+
+# Gatsby files
+.cache/
+public
+
+# Storybook build outputs
+.out
+.storybook-out
+
+# ============================================================================
+# IDE & EDITOR FILES
+# ============================================================================
+.idea/
+.vscode/
+.obsidian/
+*.swp
+*.swo
+*~
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+.vimrc.local
+.viminfo
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# Visual Studio
+.vs/
+
+# ============================================================================
+# OPERATING SYSTEM FILES
+# ============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.tmp
+*.temp
+*.lnk
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.exe
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ============================================================================
+# BACKUP & TEMPORARY FILES
+# ============================================================================
+*.backup
+*.bak
+*.old
+*.orig
+*.rej
+*.tmp
+*.temp
+*~
+.#*
+#*#
+
+# Backup files with timestamps
+*.backup.*
+*_backup_*
+*-backup-*
+
+# ============================================================================
+# LOGS & DEBUG FILES
+# ============================================================================
+*.log
+*.log.*
+logs/
+log/
+
+# Debug files
+debug/
+*.debug
+*debug*.txt
+*debug*.json
+
+# Context logs (saved AI contexts for debugging)
+# All context logs are now organized under context_logs/ directory
+context_logs/
+_create_system_prompt_debug.txt
+
+# Error files
+*.err
+*.error
+
+# ============================================================================
+# CACHE DIRECTORIES
+# ============================================================================
+.cache/
+.sass-cache/
+.pytest_cache/
+
+# Notion cache
+.notion-cache/
+
+# WebP conversion cache
+data/webp_conversion_cache.json
+
+# Anthropic project files
+.anthropic/
+
+# Aider files
+.aider*
+
+# ============================================================================
+# TEMPORARY & REFERENCE FILES
+# ============================================================================
+temp/
+tmp/
+*.tmp
+*.temp
+
+# Reference files
+*reference*.txt
+*reference*.css
+*reference*.html
+*reference*.json
+
+# ============================================================================
+# PROJECT SPECIFIC
+# ============================================================================
+# Vector database (ChromaDB)
+chroma_db/
+
+# Chat history and context files
+.chat_history
+claude_project_id.txt
+sync_config.json
+
+# Notion specific
+notion-journal/
+
+# Data directories (ignore all by default, selectively include what's needed)
+data/*/
+maia-data/
+maia-data-*/
+!data/koii_cms/
+
+# Scratchpaces
+scratchspace*
+
+# Session summaries and documentation (optional - uncomment if you don't want these)
+# SESSION_SUMMARY_*.md
+
+# ============================================================================
+# DEPLOYMENT & BUILD FILES
+# ============================================================================
+# Build outputs
+build/
+dist/
+out/
+
+# Deployment configs with secrets
+deploy.json
+deployment.json
+*deploy*.json
+
+# Docker
+Dockerfile.local
+docker-compose.override.yml
+
+# ============================================================================
+# SECURITY SCAN RESULTS
+# ============================================================================
+# Security audit results
+audit-results.json
+security-scan.json
+vulnerability-report.*
+
+# prosecheck
+.prosecheck/working/
+.prosecheck/output.*
+.prosecheck/config.local.json

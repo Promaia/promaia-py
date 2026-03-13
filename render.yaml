@@ -1,0 +1,18 @@
+# STALE: This Render config predates the unified auth module.
+# Notion credentials are now stored in maia-data/credentials/notion/token.json
+# and managed via `maia auth configure notion`. The NOTION_TOKEN env var below
+# is picked up by the one-time migration shim but should not be relied on.
+services:
+  - type: worker
+    name: maia-journal-processor
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m maia.scripts.process_journals
+    schedule: "0 0 * * *"  # Run at midnight every day
+    envVars:
+      - key: NOTION_TOKEN  # legacy — see comment above
+        sync: false
+      - key: NOTION_JOURNAL_DATABASE_ID
+        sync: false
+      - key: MAIA_DEBUG
+        value: "0" 
