@@ -2119,9 +2119,9 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                     # No applicable filters, add source as-is
                     # Note: Discord filters with __COMPLEX_EXPR__ are handled separately below
                     # and should not be added here to avoid duplication
-                    # Extract database name (before : or .) for deduplication
-                    source_db_name = source.split(':')[0].split('.')[0]
-                    existing_db_names = [s.split(':')[0].split('.')[0] for s in processed_sources]
+                    # Extract qualified database name (before :) for deduplication
+                    source_db_name = source.split(':')[0]
+                    existing_db_names = [s.split(':')[0] for s in processed_sources]
                     if source_db_name not in existing_db_names:
                         processed_sources.append(source)
                         debug_print(f"Using unfiltered source: {source}")
