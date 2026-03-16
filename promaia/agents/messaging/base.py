@@ -74,19 +74,6 @@ class BaseMessagingPlatform(ABC):
         pass
     
     @abstractmethod
-    async def get_channel_info(self, channel_id: str) -> Dict[str, Any]:
-        """
-        Get information about a channel.
-        
-        Args:
-            channel_id: Platform-specific channel identifier
-        
-        Returns:
-            Dictionary with channel metadata (name, type, etc.)
-        """
-        pass
-    
-    @abstractmethod
     async def get_user_info(self, user_id: str) -> Dict[str, Any]:
         """
         Get information about a user.

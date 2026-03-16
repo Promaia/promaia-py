@@ -317,11 +317,22 @@ class SlackConnector(BaseConnector):
         }
     
     async def _get_channel_name(self, channel_id: str) -> str:
-        """Get channel name from ID."""
+        """Get display name for a conversation.
+
+        For channels: returns the channel name.
+        For group DMs (mpim): returns the auto-generated name.
+        For direct messages (im): resolves the other user's name.
+        """
         try:
             response = self.client.conversations_info(channel=channel_id)
             if response['ok']:
-                return response['channel']['name']
+                channel = response['channel']
+                # Channels and mpim have a name field
+                if channel.get('name'):
+                    return channel['name']
+                # im conversations have a user field instead
+                if channel.get('user'):
+                    return await self._get_username(channel['user'])
         except:
             pass
         return channel_id
@@ -373,11 +384,21 @@ class SlackConnector(BaseConnector):
     ) -> List[Dict[str, Any]]:
         """Query messages from all accessible channels."""
         try:
-            # Get all channels
-            response = self.client.conversations_list(types="public_channel,private_channel")
-            channels = response['channels']
-            
-            self.logger.info(f"Found {len(channels)} channels to sync")
+            # Get all conversations including group DMs (mpim) and direct messages (im)
+            channels = []
+            for conv_types in ["public_channel,private_channel", "mpim", "im"]:
+                cursor = None
+                while True:
+                    kwargs = dict(types=conv_types, limit=200)
+                    if cursor:
+                        kwargs["cursor"] = cursor
+                    response = self.client.conversations_list(**kwargs)
+                    channels.extend(response['channels'])
+                    cursor = response.get("response_metadata", {}).get("next_cursor")
+                    if not cursor:
+                        break
+
+            self.logger.info(f"Found {len(channels)} conversations to sync")
             
             oldest = None
             latest = None
@@ -407,14 +428,16 @@ class SlackConnector(BaseConnector):
                     )
                     
                     if messages:
-                        self.logger.info(f"Found {len(messages)} messages in #{channel['name']}")
+                        channel_label = channel.get('name') or channel_id
+                        self.logger.info(f"Found {len(messages)} messages in {channel_label}")
                         all_messages.extend(messages)
-                
+
                 except SlackApiError as e:
+                    channel_label = channel.get('name') or channel_id
                     if e.response['error'] == 'not_in_channel':
-                        self.logger.debug(f"Bot not in channel #{channel['name']}")
+                        self.logger.debug(f"Bot not in {channel_label}")
                     else:
-                        self.logger.warning(f"Error fetching from #{channel['name']}: {e}")
+                        self.logger.warning(f"Error fetching from {channel_label}: {e}")
                     continue
             
             # Sort
@@ -441,18 +464,32 @@ class SlackConnector(BaseConnector):
         try:
             self.logger.info("Discovering accessible Slack channels...")
             
-            response = self.client.conversations_list(
-                types="public_channel,private_channel",
-                exclude_archived=True
-            )
-            
-            channels = response['channels']
+            channels = []
+            for conv_types in ["public_channel,private_channel", "mpim", "im"]:
+                cursor = None
+                while True:
+                    kwargs = dict(types=conv_types, limit=200, exclude_archived=True)
+                    if cursor:
+                        kwargs["cursor"] = cursor
+                    response = self.client.conversations_list(**kwargs)
+                    channels.extend(response['channels'])
+                    cursor = response.get("response_metadata", {}).get("next_cursor")
+                    if not cursor:
+                        break
+
             accessible_channels = []
-            
+
             for channel in channels:
+                # Resolve display name: channels/mpim have 'name', im has 'user'
+                name = channel.get('name')
+                if not name and channel.get('user'):
+                    name = await self._get_username(channel['user'])
+                if not name:
+                    name = channel['id']
+
                 accessible_channels.append({
                     'id': channel['id'],
-                    'name': channel['name'],
+                    'name': name,
                     'is_private': channel.get('is_private', False),
                     'is_member': channel.get('is_member', False),
                     'discovered_at': datetime.now().isoformat()
