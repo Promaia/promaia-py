@@ -651,7 +651,7 @@ class ConversationManager:
                     client.messages.create,
                     model="claude-sonnet-4-6",
                     max_tokens=2048,
-                    system=system_prompt,
+                    system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
                     messages=messages,
                 )
                 output = response.content[0].text if response.content else ""

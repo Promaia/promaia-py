@@ -720,7 +720,7 @@ def call_anthropic(client, system_prompt, messages, max_tokens=4096, temperature
 
     response = client.messages.create(
         model=model_to_use,
-        system=system_prompt,
+        system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
         messages=messages,
         max_tokens=max_tokens,
         temperature=temperature,

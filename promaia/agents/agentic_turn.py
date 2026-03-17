@@ -3737,10 +3737,10 @@ async def agentic_turn(
             effective_prompt + budget_note, internal_messages, tools=tools
         )
 
-        # Build API call kwargs
+        # Build API call kwargs (system as content block for prompt caching)
         api_kwargs = dict(
             model="claude-sonnet-4-6",
-            system=trimmed_system,
+            system=[{"type": "text", "text": trimmed_system, "cache_control": {"type": "ephemeral"}}],
             messages=internal_messages,
             max_tokens=4096,
         )

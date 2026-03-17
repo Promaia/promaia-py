@@ -436,7 +436,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
                 model=ANTHROPIC_MODELS.get("sonnet", "claude-sonnet-4-6"),
                 max_tokens=4000,
                 temperature=0.7,
-                system=system_prompt,
+                system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
                 messages=[
                     {"role": "user", "content": "Please write a blog post based on the journal entries and webflow content provided."}
                 ]

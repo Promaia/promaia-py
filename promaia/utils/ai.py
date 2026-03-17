@@ -280,7 +280,7 @@ async def call_anthropic(
     response = await client.messages.create(
         model=model_name,
         max_tokens=max_tokens,
-        system=system_prompt,
+        system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
         messages=messages,
         temperature=temperature,
     )
