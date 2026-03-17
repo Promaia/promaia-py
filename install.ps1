@@ -70,7 +70,7 @@ if ((Test-Path "Dockerfile") -and (Test-Path "promaia" -PathType Container)) {
     } else {
         Write-Host ""
         Write-Host "Pulling pre-built image..." -ForegroundColor Magenta
-        docker pull ghcr.io/promaia/promaia:latest
+        docker pull ghcr.io/promaia/promaia-py:latest
         if ($LASTEXITCODE -ne 0) {
             Write-Host "  Pull failed." -ForegroundColor Red
             exit 1
@@ -78,7 +78,7 @@ if ((Test-Path "Dockerfile") -and (Test-Path "promaia" -PathType Container)) {
     }
 } else {
     Write-Host "Pulling pre-built image..." -ForegroundColor Magenta
-    docker pull ghcr.io/promaia/promaia:latest
+    docker pull ghcr.io/promaia/promaia-py:latest
     if ($LASTEXITCODE -ne 0) {
         Write-Host "  Pull failed." -ForegroundColor Red
         exit 1
