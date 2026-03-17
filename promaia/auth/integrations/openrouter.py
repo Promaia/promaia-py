@@ -10,7 +10,7 @@ class OpenRouterIntegration(Integration):
     def __init__(self):
         super().__init__(
             name="openrouter",
-            display_name="OpenRouter",
+            display_name="Anthropic via OpenRouter",
             auth_modes=[AuthMode.OAUTH, AuthMode.API_KEY],
             env_key="OPENROUTER_API_KEY",
             oauth_provider="openrouter",
@@ -22,7 +22,7 @@ class OpenRouterIntegration(Integration):
                 "  2. Click 'Create Key'",
                 "  3. Copy the key (starts with sk-or-)",
             ],
-            recommended=False,
+            recommended=True,
         )
 
     async def validate_credential(self, value: str) -> tuple[bool, str]:

@@ -27,7 +27,15 @@ def load_environment():
 
     # Load environment variables
     load_dotenv(dotenv_path=dotenv_path)
-    
+
+    # Temporary OpenRouter shim: if OpenRouter key is set but Anthropic isn't,
+    # use OpenRouter as the Anthropic backend via base_url redirect.
+    # TODO: replace with proper multi-provider routing
+    if os.getenv("OPENROUTER_API_KEY") and not os.getenv("ANTHROPIC_API_KEY"):
+        os.environ["ANTHROPIC_API_KEY"] = os.environ["OPENROUTER_API_KEY"]
+        os.environ["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api"
+        logger.info("Using OpenRouter as Anthropic backend (temporary shim)")
+
     # Validate required API keys
     required_keys = {
         "OPENAI_API_KEY": "OpenAI",

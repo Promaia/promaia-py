@@ -50,7 +50,7 @@ else:
 # Initialize Anthropic
 if os.getenv("ANTHROPIC_API_KEY"):
     try:
-        anthropix_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), max_retries=5)
+        anthropix_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
         debug_print("Anthropic API configured.")
     except Exception as e:
         debug_print(f"Error configuring Anthropic API: {e}. Anthropic features will be unavailable.")

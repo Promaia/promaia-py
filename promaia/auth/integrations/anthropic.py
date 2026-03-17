@@ -21,7 +21,7 @@ class AnthropicIntegration(Integration):
                 "  2. Click 'Create Key'",
                 "  3. Copy the key (starts with sk-ant-)",
             ],
-            recommended=True,
+            recommended=False,
         )
 
     async def validate_credential(self, value: str) -> tuple[bool, str]:

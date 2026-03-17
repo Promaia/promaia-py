@@ -217,7 +217,7 @@ def save_browser_selection(sources):
 
 anthropic_client = None
 if os.getenv("ANTHROPIC_API_KEY"):
-    anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), max_retries=5)
+    anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
 
 openai_client = None
 if os.getenv("OPENAI_API_KEY"):

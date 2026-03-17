@@ -646,7 +646,7 @@ class ConversationManager:
                     logger.error("ANTHROPIC_API_KEY not set")
                     return "I'm sorry, I couldn't generate a response (missing API key)."
 
-                client = Anthropic(api_key=api_key, max_retries=5)
+                client = Anthropic(api_key=api_key, base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
                 response = await asyncio.to_thread(
                     client.messages.create,
                     model="claude-sonnet-4-6",

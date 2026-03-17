@@ -54,10 +54,10 @@ def _ensure_loaded() -> None:
     from promaia.auth.integrations.perplexity import PerplexityIntegration
     from promaia.auth.integrations.openrouter import OpenRouterIntegration
 
+    register(OpenRouterIntegration())
     register(AnthropicIntegration())
     register(OpenAIIntegration())
     register(GoogleAIIntegration())
-    register(OpenRouterIntegration())
     register(GoogleIntegration())
     register(NotionIntegration())
     register(DiscordIntegration())

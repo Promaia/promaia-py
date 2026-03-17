@@ -28,9 +28,10 @@ DEBUG_MODE = os.getenv("MAIA_DEBUG", "0") == "1"
 anthropic_client: Optional[AsyncAnthropic] = None
 anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
 if anthropic_api_key:
-    anthropic_client = AsyncAnthropic(api_key=anthropic_api_key, max_retries=5)
+    anthropic_client = AsyncAnthropic(api_key=anthropic_api_key, base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
 else:
-    logger.warning("ANTHROPIC_API_KEY not found. Anthropic AI calls will fail.")
+    if not os.getenv("OPENROUTER_API_KEY"):
+        logger.warning("ANTHROPIC_API_KEY not found. Anthropic AI calls will fail.")
 
 from promaia.utils.env_writer import get_data_dir
 DEBUG_LOGS_DIR = str(get_data_dir() / "debug_logs" / "ai_calls")
@@ -358,7 +359,7 @@ if __name__ == "__main__":
     # Re-initialize client here if running as script, as global might not be set if .env wasn't loaded initially
     api_key_main = os.getenv("ANTHROPIC_API_KEY")
     if api_key_main:
-        anthropic_client_main = AsyncAnthropic(api_key=api_key_main, max_retries=5)
+        anthropic_client_main = AsyncAnthropic(api_key=api_key_main, base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
         
         # Monkey patch the global client for the test function if it wasn't set
         if anthropic_client is None:

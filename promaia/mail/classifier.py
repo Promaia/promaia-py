@@ -82,7 +82,7 @@ class EmailClassifier:
         
         # Try Anthropic first (preferred)
         if os.getenv("ANTHROPIC_API_KEY"):
-            self.ai_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), max_retries=5)
+            self.ai_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
             self.model_type = "anthropic"
             logger.info("Using Anthropic for email classification")
             return self.ai_client

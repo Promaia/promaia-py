@@ -70,7 +70,7 @@ class PromaiLLMAdapter:
                             return
                         elif client_type == "anthropic":
                             self.client_type = "anthropic"
-                            self.client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), max_retries=5)
+                            self.client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
                             return
                         elif client_type == "gemini":
                             self.client_type = "gemini"

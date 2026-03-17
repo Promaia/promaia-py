@@ -3602,7 +3602,7 @@ Example:
 
 Return ONLY the JSON array, no other text."""
 
-        client = Anthropic(api_key=api_key, max_retries=5)
+        client = Anthropic(api_key=api_key, base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
         response = await asyncio.to_thread(
             client.messages.create,
             model="claude-haiku-4-5-20251001",
@@ -3683,7 +3683,7 @@ async def agentic_turn(
             response_text="I'm sorry, I couldn't generate a response (missing API key).",
         )
 
-    client = Anthropic(api_key=api_key, max_retries=5)
+    client = Anthropic(api_key=api_key, base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
 
     # Inject plan into system prompt if provided
     if plan:
