@@ -398,8 +398,10 @@ class SlackConnector(BaseConnector):
                     if not cursor:
                         break
 
-            self.logger.info(f"Found {len(channels)} conversations to sync")
-            
+            # Only attempt to fetch messages from channels the bot is a member of
+            member_channels = [ch for ch in channels if ch.get('is_member', False)]
+            self.logger.info(f"Found {len(channels)} conversations, {len(member_channels)} with membership")
+
             oldest = None
             latest = None
             if date_filter:
@@ -410,13 +412,13 @@ class SlackConnector(BaseConnector):
             
             all_messages = []
             
-            for channel in channels:
+            for channel in member_channels:
                 channel_id = channel['id']
-                
+
                 try:
                     await self._rate_limit()
-                    
-                    channel_limit = limit // len(channels) if limit else 100
+
+                    channel_limit = limit // len(member_channels) if limit else 100
                     if channel_limit < 10:
                         channel_limit = 10
                     
