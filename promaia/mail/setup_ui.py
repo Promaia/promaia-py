@@ -644,6 +644,12 @@ async def _edit_prompt_file(filename: str, prompt_type: str) -> bool:
         "",
     ]
 
+    # AI editor needs Anthropic key
+    has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+    if has_anthropic:
+        edit_rows.append({"label": "Iterate with AI", "indent": 0, "action": "ai_editor"})
+
     if has_secret:
         edit_rows.append({"label": "Open in web editor (browser-based)", "indent": 0, "action": "web"})
         edit_rows.append({"label": "Edit file manually (shows path)", "indent": 0, "action": "manual"})
@@ -663,7 +669,16 @@ async def _edit_prompt_file(filename: str, prompt_type: str) -> bool:
         return False
 
     action = selected['action']
-    if action == 'web':
+    if action == 'ai_editor':
+        from promaia.mail.prompt_editor import edit_prompt_with_ai
+        result = await edit_prompt_with_ai(filepath, content, prompt_type)
+        if result is not None:
+            filepath.write_text(result, encoding="utf-8")
+            word_count = len(result.split())
+            print_text(f"  ✓ Prompt saved ({word_count} words)\n", style="green")
+            return True
+        return False
+    elif action == 'web':
         return await _do_web_edit(filepath, content, filename, created_new)
     elif action == 'manual':
         return _do_manual_edit(filepath, content, filename, created_new)
