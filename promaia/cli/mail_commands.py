@@ -34,6 +34,12 @@ async def handle_mail(args):
         logging.getLogger('promaia').setLevel(logging.DEBUG)
     
     try:
+        # Handle 'maia mail setup' subcommand
+        if hasattr(args, 'subcommand') and args.subcommand == 'setup':
+            from promaia.mail.setup_ui import launch_setup
+            await launch_setup()
+            return
+
         # Check if user wants to open a specific draft directly
         if hasattr(args, 'draft') and args.draft:
             from promaia.mail.draft_chat import DraftChatInterface
@@ -74,13 +80,21 @@ async def handle_mail(args):
             workspaces = args.workspaces
 
         else:
-            # Process all workspaces
+            # Process all mail-enabled workspaces
             workspace_list = workspace_manager.list_workspaces()
             if not workspace_list:
                 print_text("❌ No workspaces configured", style="red")
                 print_text("Use maia workspace add to add workspace", style="dim")
                 return
-            workspaces = workspace_list
+            # Filter to mail-enabled workspaces only
+            workspaces = [
+                ws for ws in workspace_list
+                if getattr(workspace_manager.get_workspace(ws), 'mail_enabled', False)
+            ]
+            if not workspaces:
+                print_text("❌ No workspaces have mail enabled", style="red")
+                print_text("Use 'maia mail setup' to enable mail for a workspace", style="dim")
+                return
         
         # Validate workspaces
         for workspace in workspaces:
@@ -298,6 +312,13 @@ def add_mail_commands(subparsers):
         '--flush',
         action='store_true',
         help='Archive old skipped drafts (manual cleanup) and exit'
+    )
+
+    mail_parser.add_argument(
+        'subcommand',
+        nargs='?',
+        choices=['setup'],
+        help='Subcommand: "setup" to configure maia mail'
     )
 
     mail_parser.set_defaults(func=handle_mail)

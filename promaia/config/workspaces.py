@@ -32,6 +32,7 @@ class WorkspaceConfig:
         self.promaia_page_id = config_data.get("promaia_page_id")  # The main Promaia page (template root)
         self.main_prompt_page_id = config_data.get("main_prompt_page_id")  # The Main prompt subpage
         self.prompts_database_id = config_data.get("prompts_database_id")  # The Prompts inline database
+        self.mail_enabled = config_data.get("mail_enabled", False)  # Whether maia mail daemon processes this workspace
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert workspace config to dictionary."""
@@ -69,6 +70,10 @@ class WorkspaceConfig:
         # Include prompts_database_id if set
         if self.prompts_database_id:
             result["prompts_database_id"] = self.prompts_database_id
+
+        # Only include mail_enabled if explicitly enabled (default is False)
+        if self.mail_enabled:
+            result["mail_enabled"] = True
 
         return result
 

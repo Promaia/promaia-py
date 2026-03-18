@@ -48,8 +48,9 @@ class EmailClassifier:
         workspace_prompt_file = str(get_prompts_dir() / f"maia_mail_classification_prompt_{workspace}.md")
 
         try:
+            from promaia.mail.prompt_builder import strip_prompt_comments
             with open(workspace_prompt_file, 'r') as f:
-                prompt = f.read()
+                prompt = strip_prompt_comments(f.read())
                 self._prompt_cache[workspace] = prompt
                 logger.info(f"Loaded workspace-specific classification prompt for '{workspace}'")
                 return prompt
@@ -59,8 +60,9 @@ class EmailClassifier:
         # Fall back to generic prompt
         generic_prompt_file = str(get_prompts_dir() / "maia_mail_classification_prompt.md")
         try:
+            from promaia.mail.prompt_builder import strip_prompt_comments
             with open(generic_prompt_file, 'r') as f:
-                prompt = f.read()
+                prompt = strip_prompt_comments(f.read())
                 self._prompt_cache[workspace] = prompt
                 logger.warning(f"Using generic classification prompt for workspace '{workspace}' (no workspace-specific prompt found)")
                 return prompt
