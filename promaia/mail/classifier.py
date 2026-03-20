@@ -68,6 +68,7 @@ class EmailClassifier:
                 return prompt
         except FileNotFoundError:
             logger.error(f"Classification prompt file not found: {generic_prompt_file}")
+            logger.error("Run 'maia mail setup' to configure prompts, or ensure default prompts are installed")
             raise
         except Exception as e:
             logger.error(f"Error loading classification prompt: {e}")

@@ -270,14 +270,29 @@ class DraftMode(ChatMode):
             print_text("❌ Could not extract email body from artifact", style="red")
             return False
 
+        # Check for routing overrides from persona prompt
+        target_action = self.draft_data.get('target_action', 'reply') or 'reply'
+        target_to = self.draft_data.get('target_to')
+        target_cc = self.draft_data.get('target_cc')
+
+        # Pre-populate recipients if routing specifies a target
+        default_recipients = None
+        if target_to:
+            default_recipients = [r.strip() for r in target_to.split(',')]
+
+        default_cc = None
+        if target_cc:
+            default_cc = [r.strip() for r in target_cc.split(',')]
+
         # Show recipient selector
-        # Use inbound_to/inbound_cc from draft_data (updated by artifact sync)
         selector = RecipientSelector(
             from_addr=self.draft_data.get('inbound_from', ''),
             to_addr=self.draft_data.get('inbound_to', ''),
             cc_addr=self.draft_data.get('inbound_cc', ''),
             thread_context=self.draft_data.get('thread_context', ''),
-            user_email=self.user_email
+            user_email=self.user_email,
+            default_recipients=default_recipients,
+            default_cc=default_cc,
         )
 
         print_text("\n📧 Select recipients for this email...", style="cyan")
@@ -331,15 +346,24 @@ class DraftMode(ChatMode):
 
         print_text("\n📤 Sending email...", style="cyan")
 
-        # Send email
+        # Send email — branch on action type
         sender = GmailSender(self.workspace, self.user_email)
-        success = await sender.send_reply(
-            thread_id=self.draft_data['thread_id'],
-            message_id=self.draft_data['message_id'],
-            subject=self.draft_data['draft_subject'],
-            body_text=draft_to_send,
-            recipients=recipients
-        )
+        if target_action == 'new':
+            # New email — no thread association
+            success = await sender.send_email(
+                to=', '.join(recipients),
+                subject=self.draft_data['draft_subject'],
+                body_text=draft_to_send,
+            )
+        else:
+            # Both 'reply' and 'forward' use send_reply (threaded)
+            success = await sender.send_reply(
+                thread_id=self.draft_data['thread_id'],
+                message_id=self.draft_data['message_id'],
+                subject=self.draft_data['draft_subject'],
+                body_text=draft_to_send,
+                recipients=recipients,
+            )
 
         if success:
             print_text("✅ Email sent!", style="green")

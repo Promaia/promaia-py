@@ -149,6 +149,10 @@ class DraftManager:
                 self._migrate_recipient_columns(cursor)
                 # Migrate to add chat_messages column if missing
                 self._migrate_chat_messages_column(cursor)
+                # Migrate to add routing columns if missing
+                self._migrate_routing_columns(cursor)
+                # Migrate to add generation_type column if missing
+                self._migrate_generation_type_column(cursor)
                 conn.commit()
                 
                 logger.info("✅ Email drafts table initialized")
@@ -247,6 +251,36 @@ class DraftManager:
         except Exception as e:
             logger.warning(f"⚠️  Chat messages migration: {e}")
     
+    def _migrate_routing_columns(self, cursor):
+        """Add target_action, target_to, target_cc columns for mail routing."""
+        try:
+            cursor.execute("PRAGMA table_info(email_drafts)")
+            columns = [col[1] for col in cursor.fetchall()]
+
+            for col in ['target_action', 'target_to', 'target_cc']:
+                if col not in columns:
+                    logger.info(f"🔄 Migrating email_drafts table to add {col} column...")
+                    if col == 'target_action':
+                        cursor.execute(f"ALTER TABLE email_drafts ADD COLUMN {col} TEXT DEFAULT 'reply'")
+                    else:
+                        cursor.execute(f"ALTER TABLE email_drafts ADD COLUMN {col} TEXT")
+                    logger.info(f"✅ Added {col} column")
+        except Exception as e:
+            logger.warning(f"⚠️  Routing columns migration: {e}")
+
+    def _migrate_generation_type_column(self, cursor):
+        """Add generation_type column to track how the draft was created."""
+        try:
+            cursor.execute("PRAGMA table_info(email_drafts)")
+            columns = [col[1] for col in cursor.fetchall()]
+
+            if 'generation_type' not in columns:
+                logger.info("🔄 Migrating email_drafts table to add generation_type column...")
+                cursor.execute("ALTER TABLE email_drafts ADD COLUMN generation_type TEXT DEFAULT 'standard'")
+                logger.info("✅ Added generation_type column")
+        except Exception as e:
+            logger.warning(f"⚠️  Generation type migration: {e}")
+
     def save_draft(self, draft: Dict[str, Any]) -> str:
         """
         Save a new draft, return draft_id.
@@ -259,9 +293,16 @@ class DraftManager:
         """
         draft_id = draft.get('draft_id') or str(uuid.uuid4())
 
-        # Generate safety string from recipient email
-        recipient = draft.get('inbound_from', '')  # The person we're replying to
-        safety_string = get_safety_string_from_recipient(recipient)
+        # Generate safety string from the actual target recipient
+        # If routing overrides the recipient, use that; otherwise use inbound sender
+        target_to = draft.get('target_to')
+        if target_to:
+            # Use the first target recipient for safety string
+            first_recipient = target_to.split(',')[0].strip()
+            safety_string = get_safety_string_from_recipient(first_recipient)
+        else:
+            recipient = draft.get('inbound_from', '')  # The person we're replying to
+            safety_string = get_safety_string_from_recipient(recipient)
         
         # Initialize draft history with first version
         initial_history = {1: draft.get('draft_body', '')}
@@ -279,8 +320,9 @@ class DraftManager:
                         draft_subject, draft_body, draft_body_html,
                         response_context, system_prompt, ai_model,
                         draft_number, chat_session_id, previous_draft_id, version, draft_history,
-                        status, created_time, safety_string, thread_context, message_count
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        status, created_time, safety_string, thread_context, message_count,
+                        target_action, target_to, target_cc, generation_type
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     draft_id,
                     draft.get('workspace'),
@@ -312,7 +354,11 @@ class DraftManager:
                     draft.get('created_time', datetime.now(timezone.utc).isoformat()),
                     safety_string,
                     draft.get('thread_context'),
-                    draft.get('message_count', 1)
+                    draft.get('message_count', 1),
+                    draft.get('target_action', 'reply'),
+                    draft.get('target_to'),
+                    draft.get('target_cc'),
+                    draft.get('generation_type', 'standard'),
                 ))
                 
                 conn.commit()

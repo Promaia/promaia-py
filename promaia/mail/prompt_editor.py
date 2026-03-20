@@ -119,7 +119,7 @@ _patch_prompt_toolkit_keys()
 
 TOOL_NAMES = {"rewrite_prompt", "replace_text", "save_and_exit", "exit_without_saving"}
 
-TOOLS_DESCRIPTION = """
+TOOLS_DESCRIPTION_SINGLE = """
 You have the following tools available. Call them using XML tags in your response.
 You may include commentary text before or after the tool call.
 
@@ -144,6 +144,48 @@ Find and replace a specific string in the prompt (literal match, not regex).
 
 ## save_and_exit
 Save the current prompt and exit the editor. Call this when the user is satisfied.
+<tool_call>
+  <tool_name>save_and_exit</tool_name>
+  <parameters></parameters>
+</tool_call>
+
+## exit_without_saving
+Discard all changes and exit. Call this when the user wants to cancel.
+<tool_call>
+  <tool_name>exit_without_saving</tool_name>
+  <parameters></parameters>
+</tool_call>
+"""
+
+TOOLS_DESCRIPTION_DUAL = """
+You have the following tools available. Call them using XML tags in your response.
+You may include commentary text before or after the tool call.
+You may call multiple tools in a single response to update both prompts together.
+
+## rewrite_prompt
+Replace the entire content of a prompt. The `target` must be "classification" or "generation".
+<tool_call>
+  <tool_name>rewrite_prompt</tool_name>
+  <parameters>
+    <target>classification</target>
+    <content>...the full new prompt text...</content>
+  </parameters>
+</tool_call>
+
+## replace_text
+Find and replace a specific string in a prompt (literal match, not regex).
+The `target` must be "classification" or "generation".
+<tool_call>
+  <tool_name>replace_text</tool_name>
+  <parameters>
+    <target>classification</target>
+    <find>exact text to find</find>
+    <replace>replacement text</replace>
+  </parameters>
+</tool_call>
+
+## save_and_exit
+Save both prompts and exit the editor. Call this when the user is satisfied.
 <tool_call>
   <tool_name>save_and_exit</tool_name>
   <parameters></parameters>
@@ -244,9 +286,53 @@ NOT part of this prompt file):
 
 ## Expected output
 
-The AI should produce an email body — no subject line (added automatically).
-The prompt should define the user's communication style, any standard sign-offs,
-and rules for different email types.
+By default, the AI produces just an email body — the subject line is derived
+automatically as "RE: {original subject}".
+
+### Email routing headers (optional)
+
+The generation prompt can instruct the AI to include **routing headers** at the
+very top of its response to control who receives the email and how it's sent.
+Headers go before the email body, separated by a blank line:
+
+```
+ACTION: forward
+TO: accounting@company.com
+CC: manager@company.com
+SUBJECT: FW: Invoice #4521
+
+Hi accounting team,
+
+Forwarding this invoice for processing...
+```
+
+| Header    | Default if absent | Meaning |
+|-----------|-------------------|---------|
+| `ACTION`  | `reply`           | `reply` = threaded reply to sender. `forward` = threaded but to different recipients. `new` = fresh email, no thread. |
+| `TO`      | original sender   | Override recipient(s). Comma-separate for multiple. |
+| `CC`      | none              | Add CC recipients. Comma-separate for multiple. |
+| `SUBJECT` | `RE: {original}`  | Override subject. Useful for `FW:` or custom subjects. |
+
+All headers are optional — if none are present, the email is a normal reply to
+the sender (existing behavior). The user always has final control over recipients
+via an interactive selector before sending.
+
+**Example prompt instructions that use routing:**
+
+```
+When the email is an invoice or payment request:
+- Set ACTION: forward
+- Set TO: accounting@company.com
+- Draft a forwarding message that includes invoice number, amount, and due date
+```
+
+```
+When asked to introduce someone to a contact:
+- Set ACTION: new
+- Set TO: [the contact's email from context]
+- Set SUBJECT: Introduction: [names]
+- Draft an introduction email (not a reply to the original thread)
+```
 
 ## How this prompt is used
 
@@ -260,27 +346,75 @@ needs minor edits, not rewrites. Common things users customize:
 - Rules for specific email types (e.g., "keep scheduling replies to one sentence")
 - Context about their role or responsibilities that affects how they'd reply
 - Things to avoid (e.g., "never use exclamation marks", "don't apologize unnecessarily")
+- **Email routing** — forwarding invoices, CC'ing team members, sending new emails to third parties
+- **Multi-draft and tool use** — the agentic responder can create multiple drafts per email,
+  query the knowledge base, search Gmail, read Google Sheets, and send Slack messages.
+  Instructions in this prompt about when to use these capabilities are respected.
+
+## Agentic responder
+
+This persona prompt is also used by the **agentic mail responder**, which processes
+emails using an AI tool-use loop. The agent has access to:
+
+- `add_to_maia_mail_review_queue` — create drafts in the maia mail review queue
+- `create_email_draft` — create drafts in Gmail's Drafts folder
+- `query_sql` / `query_vector` / `query_source` — search the knowledge base
+- `search_emails` / `get_email_thread` — search Gmail
+- `sheets_read_range` — read Google Sheets
+- `send_message` — send Slack/Discord messages
+
+You can include instructions in the persona prompt that guide when the agent should
+use these tools. For example:
+
+```
+When you receive an invoice, search for the vendor in the knowledge base first,
+then forward the invoice to accounting@company.com.
+```
 """
 
 
-def _build_system_prompt(prompt_type: str) -> str:
-    """Build the system prompt for the editor AI."""
-    type_context = CLASSIFICATION_CONTEXT if prompt_type == "classification" else GENERATION_CONTEXT
+def _build_system_prompt(prompt_type: str = None, dual: bool = False) -> str:
+    """Build the system prompt for the editor AI.
 
-    return f"""You are a prompt engineering assistant helping the user iterate on a maia mail prompt.
+    Args:
+        prompt_type: "classification" or "generation" (single-prompt mode)
+        dual: If True, build a system prompt for editing both prompts at once
+    """
+    if dual:
+        type_context = f"""## The two prompts
 
-Your job is to understand what the user wants and modify the prompt accordingly using the
+You are editing **both** the classification and generation prompts together.
+This lets you make coordinated changes — for example, if the user wants emails
+from a certain sender to always get a formal reply, you'd update the classification
+prompt to flag those emails AND the generation prompt to use formal tone for them.
+
+Always specify the `target` parameter ("classification" or "generation") in your
+tool calls so the system knows which prompt to update.
+
+### Classification prompt
+{CLASSIFICATION_CONTEXT}
+
+### Generation prompt
+{GENERATION_CONTEXT}"""
+        tools = TOOLS_DESCRIPTION_DUAL
+    else:
+        type_context = CLASSIFICATION_CONTEXT if prompt_type == "classification" else GENERATION_CONTEXT
+        tools = TOOLS_DESCRIPTION_SINGLE
+
+    return f"""You are a prompt engineering assistant helping the user iterate on maia mail prompts.
+
+Your job is to understand what the user wants and modify the prompt(s) accordingly using the
 tools provided. After each modification, briefly explain what you changed and ask if they
 want further adjustments.
 
 {type_context}
 
-{TOOLS_DESCRIPTION}
+{tools}
 
 ## Guidelines
 
-- When you first see the prompt, briefly acknowledge what it does and ask what the user
-  wants to change. If it's clearly a starter template, mention that and suggest what
+- When you first see the prompt(s), briefly acknowledge what they do and ask what the user
+  wants to change. If they're clearly starter templates, mention that and suggest what
   they might want to customize.
 - Always preserve the template variables — they are required for the system to work.
 - For classification prompts: always ensure the output format instruction (JSON with the
@@ -332,13 +466,13 @@ def _strip_tool_calls(response: str) -> str:
     return cleaned.strip()
 
 
-def _display_prompt(content: str, label: str = "Current Prompt"):
-    """Display the prompt content in a grey panel."""
+def _display_prompt(content: str, label: str = "Current Prompt", border_style: str = "grey50"):
+    """Display the prompt content in a panel."""
     panel = Panel(
         Markdown(content),
         title=f"[bold]{label}[/bold]",
         title_align="left",
-        border_style="grey50",
+        border_style=border_style,
         box=box.ROUNDED,
         padding=(1, 2),
     )
@@ -404,8 +538,33 @@ def _get_ai_client():
     )
 
 
+def _make_session():
+    """Create a prompt_toolkit PromptSession with custom key bindings."""
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.key_binding import KeyBindings
+
+    kb = KeyBindings()
+
+    @kb.add('enter')
+    def _submit(event):
+        event.current_buffer.validate_and_handle()
+
+    try:
+        @kb.add(_NEWLINE_KEY)
+        def _newline_modified(event):
+            event.current_buffer.insert_text('\n')
+    except ValueError:
+        pass
+
+    @kb.add('c-j')
+    def _newline_fallback(event):
+        event.current_buffer.insert_text('\n')
+
+    return PromptSession(key_bindings=kb, multiline=True)
+
+
 async def edit_prompt_with_ai(filepath: Path, content: str, prompt_type: str) -> Optional[str]:
-    """Run the AI-assisted prompt editor chat loop.
+    """Run the AI-assisted prompt editor chat loop (single prompt).
 
     Args:
         filepath: Path to the prompt file
@@ -415,53 +574,91 @@ async def edit_prompt_with_ai(filepath: Path, content: str, prompt_type: str) ->
     Returns:
         Updated prompt content if saved, None if cancelled
     """
-    from prompt_toolkit import PromptSession
-    from prompt_toolkit.formatted_text import HTML
-    from prompt_toolkit.key_binding import KeyBindings
-
-    # Key bindings: Enter sends, Shift+Enter / Ctrl+Enter / Ctrl+J for newline
-    kb = KeyBindings()
-
-    @kb.add('enter')
-    def _submit(event):
-        event.current_buffer.validate_and_handle()
-
-    try:
-        @kb.add(_NEWLINE_KEY)  # Shift+Enter / Ctrl+Enter (patched sequences)
-        def _newline_modified(event):
-            event.current_buffer.insert_text('\n')
-    except ValueError:
-        pass  # _parse_key patch didn't take — Ctrl+J fallback still works
-
-    @kb.add('c-j')  # Ctrl+J — universal fallback for newline
-    def _newline_fallback(event):
-        event.current_buffer.insert_text('\n')
-
-    session = PromptSession(key_bindings=kb, multiline=True)
+    session = _make_session()
     client = _get_ai_client()
-    system_prompt = _build_system_prompt(prompt_type)
-    current_content = content
+    system_prompt = _build_system_prompt(prompt_type=prompt_type)
 
-    # Build initial message showing the current prompt
     initial_message = f"Here is the current {prompt_type} prompt:\n\n```\n{content}\n```\n\nWhat would you like to change?"
-
     messages = [{"role": "user", "content": initial_message}]
 
     _console.print()
     _console.rule(f"[bold cyan]Prompt Editor — {filepath.name}[/bold cyan]")
     _console.print("[dim]  Ctrl+C to exit at any time.[/dim]")
+    _display_prompt(content)
 
-    _display_prompt(current_content)
+    prompts = {"single": content}
 
     _activate_kitty_protocol()
     try:
-        return await _editor_loop(session, client, system_prompt, messages, current_content)
+        result = await _editor_loop(session, client, system_prompt, messages, prompts, dual=False)
+    finally:
+        _deactivate_kitty_protocol()
+
+    if result is None:
+        return None
+    return result["single"]
+
+
+async def edit_prompts_with_ai(
+    cls_filepath: Path, cls_content: str,
+    gen_filepath: Path, gen_content: str,
+) -> Optional[Dict[str, str]]:
+    """Run the AI-assisted prompt editor for both prompts simultaneously.
+
+    Args:
+        cls_filepath: Path to the classification prompt file
+        cls_content: Current classification prompt content
+        gen_filepath: Path to the generation prompt file
+        gen_content: Current generation prompt content
+
+    Returns:
+        Dict with "classification" and "generation" keys if saved, None if cancelled
+    """
+    session = _make_session()
+    client = _get_ai_client()
+    system_prompt = _build_system_prompt(dual=True)
+
+    initial_message = (
+        f"Here are the current prompts:\n\n"
+        f"## Classification prompt ({cls_filepath.name})\n\n```\n{cls_content}\n```\n\n"
+        f"## Generation prompt ({gen_filepath.name})\n\n```\n{gen_content}\n```\n\n"
+        f"What would you like to change?"
+    )
+    messages = [{"role": "user", "content": initial_message}]
+
+    _console.print()
+    _console.rule("[bold cyan]Prompt Editor — Classification + Generation[/bold cyan]")
+    _console.print("[dim]  Ctrl+C to exit at any time.[/dim]")
+    _display_prompt(cls_content, f"Classification Prompt — {cls_filepath.name}", border_style="steel_blue")
+    _display_prompt(gen_content, f"Generation Prompt — {gen_filepath.name}", border_style="dark_sea_green")
+
+    prompts = {"classification": cls_content, "generation": gen_content}
+
+    _activate_kitty_protocol()
+    try:
+        return await _editor_loop(session, client, system_prompt, messages, prompts, dual=True)
     finally:
         _deactivate_kitty_protocol()
 
 
-async def _editor_loop(session, client, system_prompt, messages, current_content):
-    """Inner chat loop for the prompt editor."""
+# Display styles for each prompt type in dual mode
+_PROMPT_STYLES = {
+    "classification": ("Classification Prompt", "steel_blue"),
+    "generation": ("Generation Prompt", "dark_sea_green"),
+}
+
+
+async def _editor_loop(session, client, system_prompt, messages, prompts, dual=False):
+    """Inner chat loop for the prompt editor.
+
+    Args:
+        prompts: Dict of current prompt contents. Keys are "single" (single mode)
+                 or "classification"/"generation" (dual mode).
+        dual: Whether we're editing both prompts.
+
+    Returns:
+        The prompts dict if saved, None if cancelled.
+    """
     while True:
         # ── AI turn (with typing indicator) ─────────────────────
         _console.print()
@@ -481,7 +678,6 @@ async def _editor_loop(session, client, system_prompt, messages, current_content
                 ai_text = response.content[0].text
                 tool_calls = _parse_tool_calls(ai_text)
                 commentary = _strip_tool_calls(ai_text)
-                # Clear typing indicator before rendering results
                 live.update(Text(""))
         except Exception as e:
             _console.print(f"\n  [red]Error calling AI: {e}[/red]\n")
@@ -496,21 +692,29 @@ async def _editor_loop(session, client, system_prompt, messages, current_content
             params = tc["parameters"]
 
             if name == "rewrite_prompt":
+                target = params.get("target", "single") if dual else "single"
                 new_content = params.get("content", "")
-                if new_content:
-                    current_content = new_content
-                    _display_prompt(current_content, "Updated Prompt")
+                if target not in prompts:
+                    _console.print(f"  [yellow](rewrite_prompt: unknown target \"{target}\" — skipped)[/yellow]")
+                elif new_content:
+                    prompts[target] = new_content
+                    label, style = _PROMPT_STYLES.get(target, ("Updated Prompt", "grey50"))
+                    _display_prompt(new_content, f"Updated {label}", border_style=style)
                 else:
                     _console.print("  [yellow](rewrite_prompt called with empty content — skipped)[/yellow]")
 
             elif name == "replace_text":
+                target = params.get("target", "single") if dual else "single"
                 find = params.get("find", "")
                 replace = params.get("replace", "")
-                if find and find in current_content:
-                    current_content = current_content.replace(find, replace)
-                    _display_prompt(current_content, "Updated Prompt")
+                if target not in prompts:
+                    _console.print(f"  [yellow](replace_text: unknown target \"{target}\" — skipped)[/yellow]")
+                elif find and find in prompts[target]:
+                    prompts[target] = prompts[target].replace(find, replace)
+                    label, style = _PROMPT_STYLES.get(target, ("Updated Prompt", "grey50"))
+                    _display_prompt(prompts[target], f"Updated {label}", border_style=style)
                 elif find:
-                    _console.print(f"  [yellow](replace_text: \"{find[:50]}...\" not found in prompt)[/yellow]")
+                    _console.print(f"  [yellow](replace_text: \"{find[:50]}...\" not found in {target} prompt)[/yellow]")
 
             elif name == "save_and_exit":
                 saved = True
@@ -525,8 +729,8 @@ async def _editor_loop(session, client, system_prompt, messages, current_content
 
         if should_exit:
             if saved:
-                _console.print("  [green]Saving prompt...[/green]")
-                return current_content
+                _console.print("  [green]Saving prompt(s)...[/green]")
+                return prompts
             else:
                 _console.print("  [dim]Changes discarded.[/dim]")
                 return None

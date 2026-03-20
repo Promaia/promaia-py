@@ -24,12 +24,31 @@ logger = logging.getLogger(__name__)
 class EmailProcessor:
     """Main orchestrator for email processing pipeline."""
     
-    def __init__(self):
-        """Initialize email processor."""
+    def __init__(self, dry_run: bool = False):
+        """Initialize email processor.
+
+        Args:
+            dry_run: If True, process emails without saving drafts or updating sync state.
+                     Read-only operations (fetch, classify, query) still execute normally.
+        """
         self.draft_manager = DraftManager()
         self.classifier = EmailClassifier()
-        self.context_builder = ResponseContextBuilder()
-        self.response_generator = ResponseGenerator()
+        # Lazy-init: only needed by the refresh path, not the agentic processing path
+        self._context_builder = None
+        self._response_generator = None
+        self.dry_run = dry_run
+
+    @property
+    def context_builder(self):
+        if self._context_builder is None:
+            self._context_builder = ResponseContextBuilder()
+        return self._context_builder
+
+    @property
+    def response_generator(self):
+        if self._response_generator is None:
+            self._response_generator = ResponseGenerator()
+        return self._response_generator
     
     async def process_new_emails(self, workspaces: List[str], hours_back: int = 72) -> int:
         """
@@ -61,8 +80,9 @@ class EmailProcessor:
                 drafts_count = await self._process_workspace(workspace, last_sync)
                 total_drafts += drafts_count
 
-                # Update last sync time after successful processing
-                self.draft_manager.update_last_sync_time(workspace, sync_start_time)
+                # Update last sync time after successful processing (skip in dry-run)
+                if not self.dry_run:
+                    self.draft_manager.update_last_sync_time(workspace, sync_start_time)
 
                 logger.info(f"✅ Generated {drafts_count} draft(s) for {workspace}")
 
@@ -178,7 +198,7 @@ class EmailProcessor:
                 message_ids = thread.get('message_ids', [])
                 last_message_id = message_ids[-1] if message_ids else thread_id
 
-                if self.draft_manager.message_has_draft(thread_id, last_message_id, workspace):
+                if not self.dry_run and self.draft_manager.message_has_draft(thread_id, last_message_id, workspace):
                     logger.debug(f"Skipping message {last_message_id} - already processed")
                     continue
 
@@ -230,6 +250,10 @@ class EmailProcessor:
         
         # Check if we should generate a draft
         if not self.classifier.should_generate_draft(classification):
+            if self.dry_run:
+                logger.info(f"  ⏭️  [DRY RUN] Would skip: {subject} (reason: {classification['reasoning'][:80]})")
+                return True
+
             logger.info(f"  → No response needed - creating skipped draft for review")
             # Create a "skipped" draft (no AI generation, no context loading)
             # User can override by entering draft chat and using /mc to load context
@@ -256,95 +280,22 @@ class EmailProcessor:
                 'status': draft_status,
                 'addressed_to_user': classification.get('addressed_to_user', 'unknown')
             }
-            
+
             draft_id = self.draft_manager.save_draft(draft_data)
             logger.info(f"  ⏭️  Skipped draft saved: {draft_id}")
             return True  # Count as created so it shows in review queue
         
-        # Step 2: Build context (for both "pending" and "unsure")
-        logger.debug("  → Building context...")
-        context = await self.context_builder.build_context(thread, workspace)
-        logger.info(f"  → Found {context.total_sources} relevant sources")
-
-        # Build structured context for EmailPromptBuilder (same format as draft_chat)
-        # Separate email vs non-email documents
-        email_docs = []
-        non_email_docs = []
-
-        for doc in context.relevant_docs:
-            db_name = doc.get('database', 'unknown')
-
-            # Create page dict
-            page = {
-                'title': doc.get('title', 'Untitled'),
-                'content': doc.get('content_snippet', ''),
-                'metadata': doc.get('metadata', {}),
-                'database': db_name,
-                'similarity': doc.get('similarity', 0),
-            }
-
-            # Separate by type
-            if db_name == 'gmail' or db_name.endswith('.gmail'):
-                email_docs.append(page)
-            else:
-                non_email_docs.append(page)
-
-        # Build structured context dict
-        structured_context = {
-            'thread_email': {
-                'from': thread.get('from', ''),
-                'to': thread.get('to', ''),
-                'cc': thread.get('cc', ''),
-                'date': thread.get('date', ''),
-                'subject': subject,
-                'body': thread.get('conversation_body', ''),
-            },
-            'thread_conversation': thread.get('conversation_body', ''),
-            'message_count': thread.get('message_count', 1),
-            'non_email_docs': non_email_docs,
-            'email_docs': email_docs,
-        }
-
-        # Step 3: Generate response (for both "pending" and "unsure")
-        logger.debug("  → Generating response...")
-        response = await self.response_generator.generate_response(thread, workspace, structured_context)
-        logger.info(f"  → Generated {len(response['body'].split())} word response")
-        
-        # Step 4: Save draft
-        logger.debug("  → Saving draft...")
-        status_emoji = "🤷‍♀️" if draft_status == "unsure" else "✅"
-        logger.info(f"  {status_emoji} Draft status: {draft_status}")
-        
-        draft_data = {
-            'workspace': workspace,
-            'thread_id': thread_id,
-            'message_id': thread.get('message_ids', [])[-1] if thread.get('message_ids') else thread_id,
-            'inbound_subject': subject,
-            'inbound_from': thread.get('from'),
-            'inbound_to': thread.get('to', ''),
-            'inbound_cc': thread.get('cc', ''),
-            'inbound_snippet': thread.get('snippet', ''),
-            'inbound_date': thread.get('date'),
-            'inbound_body': thread.get('conversation_body', ''),
-            'pertains_to_me': classification['pertains_to_me'],
-            'is_spam': classification['is_spam'],
-            'requires_response': classification['requires_response'],
-            'classification_reasoning': classification['reasoning'],
-            'draft_subject': response['subject'],
-            'draft_body': response['body'],
-            'response_context': self.context_builder.serialize_context_for_storage(context),
-            'system_prompt': response.get('prompt'),
-            'ai_model': response['model'],
-            'thread_context': context.thread_history[:500],  # Store snippet
-            'message_count': thread.get('message_count', 1),
-            'status': draft_status,
-            'addressed_to_user': classification.get('addressed_to_user', True)
-        }
-        
-        draft_id = self.draft_manager.save_draft(draft_data)
-        logger.info(f"  ✅ Draft saved: {draft_id}")
-        
-        return True
+        # Step 2: Run agentic responder (replaces context building + generation + saving)
+        from promaia.mail.agentic_responder import respond as agentic_respond
+        drafts_created = await agentic_respond(
+            thread=thread,
+            classification=classification,
+            workspace=workspace,
+            email=email,
+            draft_manager=self.draft_manager,
+            dry_run=self.dry_run,
+        )
+        return drafts_created > 0
     
     async def refresh_drafts(self, workspaces: List[str], days_back: int = 7) -> int:
         """

@@ -189,6 +189,7 @@ def _build_overview_rows() -> List:
     ws_manager = get_workspace_manager()
     db_manager = get_database_manager()
     google_int = get_integration("google")
+    has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
 
     rows: List = []
 
@@ -289,25 +290,28 @@ def _build_overview_rows() -> List:
             cls_exists, cls_words = _get_prompt_status(cls_file)
             gen_exists, gen_words = _get_prompt_status(gen_file)
 
-            if cls_exists:
-                cls_label = f"📝 Classification prompt: \033[32mconfigured\033[0m \033[2m({cls_words} words)\033[0m"
-            else:
-                cls_label = f"📝 Classification prompt: \033[33mnot configured\033[0m"
+            if has_anthropic:
+                rows.append({
+                    "label": "✨ Iterate prompts with AI",
+                    "indent": 4,
+                    "action": "ai_editor_dual",
+                    "cls_file": cls_file,
+                    "gen_file": gen_file,
+                })
+
+            cls_status = f"\033[32mconfigured\033[0m \033[2m({cls_words} words)\033[0m" if cls_exists else "\033[33mnot configured\033[0m"
             rows.append({
-                "label": cls_label,
-                "indent": 4,
+                "label": f"📝 Classification: {cls_status}",
+                "indent": 6,
                 "action": "edit_prompt",
                 "filename": cls_file,
                 "prompt_type": "classification",
             })
 
-            if gen_exists:
-                gen_label = f"📝 Generation prompt: \033[32mconfigured\033[0m \033[2m({gen_words} words)\033[0m"
-            else:
-                gen_label = f"📝 Generation prompt: \033[33mnot configured\033[0m"
+            gen_status = f"\033[32mconfigured\033[0m \033[2m({gen_words} words)\033[0m" if gen_exists else "\033[33mnot configured\033[0m"
             rows.append({
-                "label": gen_label,
-                "indent": 4,
+                "label": f"📝 Generation: {gen_status}",
+                "indent": 6,
                 "action": "edit_prompt",
                 "filename": gen_file,
                 "prompt_type": "generation",
@@ -330,25 +334,28 @@ def _build_overview_rows() -> List:
     cls_exists, cls_words = _get_prompt_status(cls_file)
     gen_exists, gen_words = _get_prompt_status(gen_file)
 
-    if cls_exists:
-        cls_fb_label = f"📝 Classification: \033[32mconfigured\033[0m \033[2m({cls_words} words)\033[0m"
-    else:
-        cls_fb_label = f"📝 Classification: \033[33mnot configured\033[0m"
+    if has_anthropic:
+        rows.append({
+            "label": "✨ Iterate prompts with AI",
+            "indent": 2,
+            "action": "ai_editor_dual",
+            "cls_file": cls_file,
+            "gen_file": gen_file,
+        })
+
+    cls_fb_status = f"\033[32mconfigured\033[0m \033[2m({cls_words} words)\033[0m" if cls_exists else "\033[33mnot configured\033[0m"
     rows.append({
-        "label": cls_fb_label,
-        "indent": 2,
+        "label": f"📝 Classification: {cls_fb_status}",
+        "indent": 4,
         "action": "edit_prompt",
         "filename": cls_file,
         "prompt_type": "classification",
     })
 
-    if gen_exists:
-        gen_fb_label = f"📝 Generation: \033[32mconfigured\033[0m \033[2m({gen_words} words)\033[0m"
-    else:
-        gen_fb_label = f"📝 Generation: \033[33mnot configured\033[0m"
+    gen_fb_status = f"\033[32mconfigured\033[0m \033[2m({gen_words} words)\033[0m" if gen_exists else "\033[33mnot configured\033[0m"
     rows.append({
-        "label": gen_fb_label,
-        "indent": 2,
+        "label": f"📝 Generation: {gen_fb_status}",
+        "indent": 4,
         "action": "edit_prompt",
         "filename": gen_file,
         "prompt_type": "generation",
@@ -648,7 +655,17 @@ async def _edit_prompt_file(filename: str, prompt_type: str) -> bool:
     has_anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
 
     if has_anthropic:
-        edit_rows.append({"label": "Iterate with AI", "indent": 0, "action": "ai_editor"})
+        # Derive sibling filename for dual-prompt editing
+        if prompt_type == "classification":
+            cls_file = filename
+            gen_file = filename.replace("classification_prompt", "prompt")
+        else:
+            cls_file = filename.replace("maia_mail_prompt", "maia_mail_classification_prompt")
+            gen_file = filename
+
+        edit_rows.append({"label": "✨ Iterate both prompts with AI", "indent": 0, "action": "ai_editor_dual",
+                          "cls_file": cls_file, "gen_file": gen_file})
+        edit_rows.append({"label": "Iterate this prompt with AI", "indent": 0, "action": "ai_editor"})
 
     if has_secret:
         edit_rows.append({"label": "Open in web editor (browser-based)", "indent": 0, "action": "web"})
@@ -669,7 +686,9 @@ async def _edit_prompt_file(filename: str, prompt_type: str) -> bool:
         return False
 
     action = selected['action']
-    if action == 'ai_editor':
+    if action == 'ai_editor_dual':
+        return await _edit_both_prompts_with_ai(selected["cls_file"], selected["gen_file"])
+    elif action == 'ai_editor':
         from promaia.mail.prompt_editor import edit_prompt_with_ai
         result = await edit_prompt_with_ai(filepath, content, prompt_type)
         if result is not None:
@@ -691,6 +710,32 @@ async def _edit_prompt_file(filename: str, prompt_type: str) -> bool:
         return False
 
     return False
+
+
+async def _edit_both_prompts_with_ai(cls_file: str, gen_file: str) -> bool:
+    """Launch the AI editor for both classification and generation prompts."""
+    from promaia.mail.prompt_editor import edit_prompts_with_ai
+
+    prompts_dir = get_prompts_dir()
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+
+    cls_path = prompts_dir / cls_file
+    gen_path = prompts_dir / gen_file
+
+    cls_content = cls_path.read_text(encoding="utf-8") if cls_path.exists() else _get_starter_template("classification", cls_file)
+    gen_content = gen_path.read_text(encoding="utf-8") if gen_path.exists() else _get_starter_template("generation", gen_file)
+
+    result = await edit_prompts_with_ai(cls_path, cls_content, gen_path, gen_content)
+    if result is None:
+        return False
+
+    cls_path.write_text(result["classification"], encoding="utf-8")
+    gen_path.write_text(result["generation"], encoding="utf-8")
+    cls_words = len(result["classification"].split())
+    gen_words = len(result["generation"].split())
+    print_text(f"  ✓ Classification prompt saved ({cls_words} words)", style="green")
+    print_text(f"  ✓ Generation prompt saved ({gen_words} words)\n", style="green")
+    return True
 
 
 async def _do_web_edit(filepath: Path, content: str, filename: str, created_new: bool) -> bool:
@@ -1143,6 +1188,10 @@ async def launch_setup():
 
         elif action == "edit_prompt":
             await _edit_prompt_file(selected["filename"], selected["prompt_type"])
+            input("  Press Enter to continue...")
+
+        elif action == "ai_editor_dual":
+            await _edit_both_prompts_with_ai(selected["cls_file"], selected["gen_file"])
             input("  Press Enter to continue...")
 
         elif action == "add_gmail":

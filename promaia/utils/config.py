@@ -28,6 +28,10 @@ def load_environment():
     # Load environment variables
     load_dotenv(dotenv_path=dotenv_path)
 
+    # Ensure default prompt files exist
+    from promaia.utils.env_writer import ensure_default_prompts
+    ensure_default_prompts()
+
     # Temporary OpenRouter shim: if OpenRouter key is set but Anthropic isn't,
     # use OpenRouter as the Anthropic backend via base_url redirect.
     # TODO: replace with proper multi-provider routing

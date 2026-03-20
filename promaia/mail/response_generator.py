@@ -53,14 +53,22 @@ class ResponseGenerator:
     # REMOVED: _load_user_persona() - now handled by EmailPromptBuilder
     
     def _load_refinement_prompt(self) -> str:
-        """Load refinement prompt template from file."""
+        """Load refinement prompt template from file.
+
+        Returns a sensible default if the file doesn't exist yet —
+        the refinement prompt is only used by DraftMode chat, not
+        by the agentic responder or batch processing.
+        """
         prompt_file = str(get_prompts_dir() / "maia_mail_refinement_prompt.md")
         try:
             with open(prompt_file, 'r') as f:
                 return f.read()
         except FileNotFoundError:
-            logger.error(f"Refinement prompt file not found: {prompt_file}")
-            raise
+            logger.warning(f"Refinement prompt not found: {prompt_file} — using default")
+            return (
+                "You are helping the user refine an email draft. "
+                "Make edits based on their feedback while preserving their voice and intent."
+            )
         except Exception as e:
             logger.error(f"Error loading refinement prompt: {e}")
             raise
@@ -137,6 +145,56 @@ class ResponseGenerator:
         except Exception as e:
             logger.error(f"Failed to save mail context log: {e}")
     
+    def _parse_routing_headers(self, response_text: str) -> tuple:
+        """
+        Parse optional routing headers from AI response.
+
+        Headers are lines at the top matching KEY: value where KEY is one of
+        ACTION, TO, CC, SUBJECT. Parsing stops at the first blank line or
+        non-header line.
+
+        Returns:
+            (routing_dict, body_text)
+            routing_dict may contain: target_action, target_to, target_cc, subject
+            body_text is the response with headers stripped
+        """
+        VALID_HEADERS = {'ACTION', 'TO', 'CC', 'SUBJECT'}
+        routing = {}
+        lines = response_text.split('\n')
+        body_start = 0
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                # Blank line ends header section
+                body_start = i + 1
+                break
+
+            # Check for HEADER: value pattern
+            colon_pos = stripped.find(':')
+            if colon_pos > 0:
+                key = stripped[:colon_pos].strip().upper()
+                if key in VALID_HEADERS:
+                    value = stripped[colon_pos + 1:].strip()
+                    if key == 'ACTION':
+                        if value.lower() in ('reply', 'forward', 'new'):
+                            routing['target_action'] = value.lower()
+                    elif key == 'TO':
+                        routing['target_to'] = value
+                    elif key == 'CC':
+                        routing['target_cc'] = value
+                    elif key == 'SUBJECT':
+                        routing['subject'] = value
+                    body_start = i + 1
+                    continue
+
+            # Not a recognized header — everything from here is body
+            body_start = i
+            break
+
+        body = '\n'.join(lines[body_start:]).strip()
+        return routing, body
+
     def _format_email_body(self, text: str) -> str:
         """
         Remove unnecessary hard line breaks from email body while preserving intentional formatting.
@@ -321,22 +379,40 @@ class ResponseGenerator:
             else:
                 raise ValueError(f"Unknown model type: {self.model_type}")
             
+            # Parse optional routing headers from AI response
+            routing, clean_body = self._parse_routing_headers(response_body)
+
             # Format the email body to remove hard line breaks
-            response_body = self._format_email_body(response_body)
-            
-            # Prepare response subject (add RE: if not present)
-            response_subject = subject
-            if not response_subject.upper().startswith('RE:'):
-                response_subject = f"RE: {response_subject}"
-            
-            logger.info(f"✅ Generated response ({len(response_body.split())} words)")
-            
-            return {
-                'body': response_body,
+            clean_body = self._format_email_body(clean_body)
+
+            # Prepare response subject — use routing override if present
+            if 'subject' in routing:
+                response_subject = routing['subject']
+            else:
+                response_subject = subject
+                if not response_subject.upper().startswith('RE:'):
+                    response_subject = f"RE: {response_subject}"
+
+            logger.info(f"✅ Generated response ({len(clean_body.split())} words)")
+            if routing:
+                logger.info(f"  → Routing headers: {routing}")
+
+            result = {
+                'body': clean_body,
                 'subject': response_subject,
                 'model': model_used,
                 'prompt': prompt  # Store for debugging/refinement
             }
+
+            # Include routing fields only if explicitly set by AI
+            if 'target_action' in routing:
+                result['target_action'] = routing['target_action']
+            if 'target_to' in routing:
+                result['target_to'] = routing['target_to']
+            if 'target_cc' in routing:
+                result['target_cc'] = routing['target_cc']
+
+            return result
             
         except Exception as e:
             logger.error(f"❌ Failed to generate response: {e}")
