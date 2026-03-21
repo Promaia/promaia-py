@@ -11,3 +11,7 @@ Always use `promaia.auth` to read credentials — e.g. `get_integration("notion"
 ## Use uv for all Python commands
 
 Always use `uv` to run Python tooling: `uv pip install`, `uv run`, `uv venv`. Never use bare `pip`, `python`, or `py` directly.
+
+## CLI help commands must reflect actual available commands
+
+The maia chat CLI must not display hardcoded command lists in welcome/startup messages. Available commands should be shown when the user types `/` or `?` and presses enter, similar to how Claude Code displays its slash commands. The help output must accurately reflect the commands that are actually implemented and available.

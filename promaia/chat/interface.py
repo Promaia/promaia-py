@@ -1532,6 +1532,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
         'agentic_mode': True,  # Agentic loop mode (multi-tool autonomous execution) — on by default
         'agentic_tools': [],  # Detected MCP tools for agentic mode
         'agentic_databases': [],  # Databases available for agentic mode
+        'active_workflow': None,  # Active interview workflow name (e.g. "database_add")
     }
     
     # Detect agentic tools and databases (agent mode is on by default for Anthropic)
@@ -5369,7 +5370,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
 
                 if isinstance(mode, DraftMode):
                     # Create log directory if it doesn't exist
-                    log_dir = '/Users/kb20250422/Documents/dev/promaia/context_logs/mail_draft_logs'
+                    log_dir = str(_get_data_dir() / 'context_logs' / 'mail_draft_logs')
                     os.makedirs(log_dir, exist_ok=True)
 
                     # Generate filename with timestamp and draft subject
@@ -5881,6 +5882,16 @@ The user will type `/send` to trigger the actual sending process.
                 context_state['browse_selections'] = []
                 total_pages_loaded = 0
                 print_text("✅ Context cleared. You're now in a blank slate.", style="green")
+                continue
+
+            # /done - Exit active interview workflow
+            if user_input.strip().lower() == '/done':
+                if context_state.get('active_workflow'):
+                    wf_name = context_state['active_workflow']
+                    context_state['active_workflow'] = None
+                    print_text(f"Exited {wf_name} interview.", style="yellow")
+                else:
+                    print_text("No active interview to exit.", style="dim")
                 continue
 
             # /mute - Mute context (temporarily hide but keep loaded)
@@ -7634,7 +7645,7 @@ The user will type `/send` to trigger the actual sending process.
 
                         # Known command prefixes
                         known_commands = {'quit', 'debug', 'push', 's', 'e', 'help', 'm', 'artifact',
-                                        'edit', 'image', 'model', 'temp', 'save', 'mcp'}
+                                        'edit', 'image', 'model', 'temp', 'save', 'mcp', 'done'}
                         # Check if it matches any known command
                         if command_part.lower() in known_commands:
                             is_command = True
@@ -7943,6 +7954,18 @@ The user will type `/send` when ready to send the email.
                                 cm["images"] = msg["images"]
                             clean_msgs.append(cm)
 
+                        # Get active workflow prompt if in an interview
+                        _workflow_prompt = None
+                        _active_wf = context_state.get('active_workflow')
+                        if _active_wf:
+                            try:
+                                from promaia.chat.workflows import get_workflow
+                                wf = get_workflow(_active_wf)
+                                if wf:
+                                    _workflow_prompt = wf["system_prompt_insert"]
+                            except Exception:
+                                pass
+
                         result = asyncio.run(run_agentic_turn(
                             system_prompt=current_system_prompt,
                             messages=clean_msgs,
@@ -7950,7 +7973,100 @@ The user will type `/send` when ready to send the email.
                             mcp_tools=context_state.get('agentic_tools', []),
                             databases=context_state.get('agentic_databases', []),
                             print_text_fn=print_text,
+                            workflow_prompt=_workflow_prompt,
                         ))
+
+                        # Handle signals in a loop (signals can chain: interview_start → show_selection)
+                        from promaia.chat.workflows import get_workflow as _get_wf
+                        _signal_iterations = 0
+                        while result.signal and _signal_iterations < 5:
+                            _signal_iterations += 1
+                            sig_type = result.signal.get("type")
+
+                            if sig_type == "interview_start":
+                                wf_name = result.signal.get("workflow", "")
+                                context_state['active_workflow'] = wf_name
+                                logger.info(f"Interview started: {wf_name}")
+                                wf = _get_wf(wf_name)
+                                _workflow_prompt = wf["system_prompt_insert"] if wf else None
+                                # Re-run with the interview prompt active
+                                result = asyncio.run(run_agentic_turn(
+                                    system_prompt=current_system_prompt,
+                                    messages=clean_msgs,
+                                    workspace=context_state.get('workspace') or context_state.get('resolved_workspace') or "",
+                                    mcp_tools=context_state.get('agentic_tools', []),
+                                    databases=context_state.get('agentic_databases', []),
+                                    print_text_fn=print_text,
+                                    workflow_prompt=_workflow_prompt,
+                                ))
+                                continue  # Check new result for signals
+
+                            elif sig_type == "show_selection":
+                                try:
+                                    from promaia.chat.inline_selector import show_inline_selection
+                                    payload = result.signal.get("payload", {})
+                                    logger.info(f"Rendering show_selection: {payload.get('title')}, {len(payload.get('items', []))} items")
+                                    print_text("")  # blank line before widget
+                                    sel_result = asyncio.run(show_inline_selection(
+                                        title=payload.get("title", "Select"),
+                                        items=payload.get("items", []),
+                                        multi_select=payload.get("multi_select", False),
+                                        pre_selected=payload.get("pre_selected"),
+                                    ))
+                                    logger.info(f"Selection result: cancelled={sel_result.cancelled}, selected={sel_result.selected}")
+                                    if sel_result.cancelled:
+                                        messages.append({
+                                            "role": "user",
+                                            "content": "[Selection cancelled by user. Do not show the selection again.]"
+                                        })
+                                    else:
+                                        # Map IDs back to labels for clarity
+                                        id_to_label = {
+                                            item.get("id", str(i)): item.get("label", item.get("id", str(i)))
+                                            for i, item in enumerate(payload.get("items", []))
+                                        }
+                                        selected_labels = [id_to_label.get(sid, sid) for sid in sel_result.selected]
+                                        selected_ids_str = ", ".join(sel_result.selected)
+                                        selected_names_str = ", ".join(selected_labels)
+                                        messages.append({
+                                            "role": "user",
+                                            "content": (
+                                                f"[Selection complete. User selected {len(sel_result.selected)} items: "
+                                                f"{selected_names_str}. "
+                                                f"IDs: {selected_ids_str}. "
+                                                f"Proceed with saving this selection. Do NOT show the selection widget again.]"
+                                            )
+                                        })
+                                    # Rebuild clean_msgs and re-run
+                                    clean_msgs = []
+                                    for msg in messages:
+                                        cm = {"role": msg["role"], "content": msg["content"]}
+                                        if msg.get("images"):
+                                            cm["images"] = msg["images"]
+                                        clean_msgs.append(cm)
+                                    result = asyncio.run(run_agentic_turn(
+                                        system_prompt=current_system_prompt,
+                                        messages=clean_msgs,
+                                        workspace=context_state.get('workspace') or context_state.get('resolved_workspace') or "",
+                                        mcp_tools=context_state.get('agentic_tools', []),
+                                        databases=context_state.get('agentic_databases', []),
+                                        print_text_fn=print_text,
+                                        workflow_prompt=_workflow_prompt,
+                                    ))
+                                    continue  # Check new result for signals
+                                except Exception as sel_err:
+                                    logger.error(f"Inline selector error: {sel_err}", exc_info=True)
+                                    print_text(f"\n⚠️  Selection widget error: {sel_err}", style="bold red")
+                                    print_text("   Falling back — please type your selection manually.\n", style="dim yellow")
+                                    break
+
+                            elif sig_type == "interview_end":
+                                logger.info(f"Interview completed: {context_state.get('active_workflow')}")
+                                context_state['active_workflow'] = None
+                                break
+
+                            else:
+                                break
 
                         response_text = result.response_text
                         total_tokens = result.input_tokens + result.output_tokens

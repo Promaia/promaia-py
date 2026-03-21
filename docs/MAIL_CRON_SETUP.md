@@ -15,8 +15,8 @@ crontab -l
 You should see:
 
 ```bash
-*/30 * * * * /Users/kb20250422/Documents/dev/promaia/sync_all_databases.py >> /Users/kb20250422/Documents/dev/promaia/sync_cron.log 2>&1
-*/30 * * * * /Users/kb20250422/Documents/dev/promaia/process_mail.py >> /Users/kb20250422/Documents/dev/promaia/mail_cron.log 2>&1
+*/30 * * * * /Users/kb20250422/Documents/dev/promaia-py/sync_all_databases.py >> /Users/kb20250422/Documents/dev/promaia-py/sync_cron.log 2>&1
+*/30 * * * * /Users/kb20250422/Documents/dev/promaia-py/process_mail.py >> /Users/kb20250422/Documents/dev/promaia-py/mail_cron.log 2>&1
 ```
 
 ### 2. Monitor the mail processing
@@ -24,7 +24,7 @@ You should see:
 Check the mail processing log to see when processing runs and the results:
 
 ```bash
-tail -f /Users/kb20250422/Documents/dev/promaia/mail_cron.log
+tail -f /Users/kb20250422/Documents/dev/promaia-py/mail_cron.log
 ```
 
 ## What It Does
@@ -59,16 +59,16 @@ If you want different processing intervals, modify the cron expression:
 crontab -e
 
 # Every 15 minutes
-*/15 * * * * /Users/kb20250422/Documents/dev/promaia/process_mail.py >> /Users/kb20250422/Documents/dev/promaia/mail_cron.log 2>&1
+*/15 * * * * /Users/kb20250422/Documents/dev/promaia-py/process_mail.py >> /Users/kb20250422/Documents/dev/promaia-py/mail_cron.log 2>&1
 
 # Every hour
-0 * * * * /Users/kb20250422/Documents/dev/promaia/process_mail.py >> /Users/kb20250422/Documents/dev/promaia/mail_cron.log 2>&1
+0 * * * * /Users/kb20250422/Documents/dev/promaia-py/process_mail.py >> /Users/kb20250422/Documents/dev/promaia-py/mail_cron.log 2>&1
 
 # Every 2 hours
-0 */2 * * * /Users/kb20250422/Documents/dev/promaia/process_mail.py >> /Users/kb20250422/Documents/dev/promaia/mail_cron.log 2>&1
+0 */2 * * * /Users/kb20250422/Documents/dev/promaia-py/process_mail.py >> /Users/kb20250422/Documents/dev/promaia-py/mail_cron.log 2>&1
 
 # Only during work hours (9 AM to 6 PM), every 30 minutes
-*/30 9-18 * * * /Users/kb20250422/Documents/dev/promaia/process_mail.py >> /Users/kb20250422/Documents/dev/promaia/mail_cron.log 2>&1
+*/30 9-18 * * * /Users/kb20250422/Documents/dev/promaia-py/process_mail.py >> /Users/kb20250422/Documents/dev/promaia-py/mail_cron.log 2>&1
 ```
 
 ## Testing
@@ -83,7 +83,7 @@ cd /Users/kb20250422/Documents/dev/promaia
 ### Check for errors:
 
 ```bash
-tail -20 /Users/kb20250422/Documents/dev/promaia/mail_cron.log
+tail -20 /Users/kb20250422/Documents/dev/promaia-py/mail_cron.log
 ```
 
 ### View recent drafts:
@@ -103,7 +103,7 @@ crontab -e
 Comment out the line by adding `#` at the beginning:
 
 ```bash
-# */30 * * * * /Users/kb20250422/Documents/dev/promaia/process_mail.py >> /Users/kb20250422/Documents/dev/promaia/mail_cron.log 2>&1
+# */30 * * * * /Users/kb20250422/Documents/dev/promaia-py/process_mail.py >> /Users/kb20250422/Documents/dev/promaia-py/mail_cron.log 2>&1
 ```
 
 Or remove the line entirely and save.
@@ -139,8 +139,8 @@ macOS may require permission for cron to access certain directories. If you get 
 
 ## Log File Locations
 
-- **Mail Processing**: `/Users/kb20250422/Documents/dev/promaia/mail_cron.log`
-- **Database Sync**: `/Users/kb20250422/Documents/dev/promaia/sync_cron.log`
+- **Mail Processing**: `/Users/kb20250422/Documents/dev/promaia-py/mail_cron.log`
+- **Database Sync**: `/Users/kb20250422/Documents/dev/promaia-py/sync_cron.log`
 
 ## Features
 

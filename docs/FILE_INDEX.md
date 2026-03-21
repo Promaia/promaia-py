@@ -3,13 +3,13 @@
 ## Architecture & Patterns
 
 **Foundation - The Connector Pattern:**
-- `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/base.py` (242 lines)
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/base.py` (242 lines)
   - BaseConnector abstract class (all connectors extend this)
   - QueryFilter, DateRangeFilter, SyncResult classes
   - ConnectorRegistry plugin system for registering content types
 
 **Connector Registration:**
-- `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/__init__.py` (39 lines)
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/__init__.py` (39 lines)
   - Registers "notion", "gmail", "discord" content types
   - Where you add: `ConnectorRegistry.register("conversation", ConversationConnector)`
 
@@ -18,7 +18,7 @@
 ## Content Type Implementations (EXAMPLES TO FOLLOW)
 
 ### Notion Connector
-- `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/notion_connector.py` (1087 lines)
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/notion_connector.py` (1087 lines)
   - Schema synchronization with hybrid storage
   - Dynamic property table creation
   - Batch processing (12 items, 0.08s delay)
@@ -26,7 +26,7 @@
   - Query building with filter translation
 
 ### Gmail Connector
-- `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/gmail_connector.py` (1597 lines)
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/gmail_connector.py` (1597 lines)
   - OAuth2 authentication flow
   - Intelligent date range chunking (15-day chunks)
   - Thread deduplication
@@ -35,7 +35,7 @@
   - Quote detection and stripping
 
 ### Discord Connector
-- `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/discord_connector.py` (1141 lines)
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/discord_connector.py` (1141 lines)
   - Multi-channel support
   - Channel discovery and caching
   - Per-channel directory organization
@@ -47,7 +47,7 @@
 ## Storage & Database
 
 **Hybrid Storage - Type-Specific Tables:**
-- `/Users/kb20250422/Documents/dev/promaia/promaia/storage/hybrid_storage.py`
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/hybrid_storage.py`
   - gmail_content table (Gmail messages/threads)
   - notion_journal, notion_stories tables (Notion databases)
   - generic_content table (Fallback for any type)
@@ -56,20 +56,20 @@
   - `sync_table_schema_with_properties()` for dynamic column creation
 
 **Unified Storage - File Saving:**
-- `/Users/kb20250422/Documents/dev/promaia/promaia/storage/unified_storage.py`
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/unified_storage.py`
   - `save_content()` - Save markdown + register in SQLite
   - Directory organization: data/md/{source}/{workspace}/{database}/
   - Hybrid registry integration
 
 **Unified Query Interface:**
-- `/Users/kb20250422/Documents/dev/promaia/promaia/storage/unified_query.py`
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/unified_query.py`
   - `query_content_for_chat()` - Cross-type search
   - Gmail thread consolidation logic
   - Date filtering and source filtering
   - Property-based filtering
 
 **Content Search:**
-- `/Users/kb20250422/Documents/dev/promaia/promaia/storage/content_search.py`
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/content_search.py`
   - `search_content()` - Full-text search through files
   - Metadata extraction and previews
 
@@ -78,13 +78,13 @@
 ## Vector Search (Embeddings)
 
 **ChromaDB Integration:**
-- `/Users/kb20250422/Documents/dev/promaia/promaia/storage/vector_db.py`
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/vector_db.py`
   - Two collections: promaia_content (full pages) + promaia_properties
   - OpenAI text-embedding-3-small (or sentence-transformers fallback)
   - Cosine similarity
 
 **Page Chunking (for large documents):**
-- `/Users/kb20250422/Documents/dev/promaia/promaia/storage/page_chunker.py`
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/page_chunker.py`
   - Splits large pages into ~1000-token chunks
   - Links chunks back to original page_id
 
@@ -93,7 +93,7 @@
 ## Markdown Conversion
 
 **Content → Markdown:**
-- `/Users/kb20250422/Documents/dev/promaia/promaia/markdown/converter.py`
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/markdown/converter.py`
   - `page_to_markdown()` - Notion pages
   - Add `conversation_to_markdown()` for your type
 
@@ -102,14 +102,14 @@
 ## CLI & Commands
 
 **Sync Commands:**
-- `/Users/kb20250422/Documents/dev/promaia/promaia/cli/database_commands.py`
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/cli/database_commands.py`
   - `handle_database_sync()` - Main sync entry point
   - Uses ConnectorRegistry to get connector
   - Applies filters and date ranges
   - Calls `connector.sync_to_local_unified()`
 
 **Main CLI:**
-- `/Users/kb20250422/Documents/dev/promaia/promaia/cli.py`
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/cli.py`
   - Entry point for `maia database sync` command
   - Gets database config and creates connector
 
@@ -118,7 +118,7 @@
 ## Configuration
 
 **Database Configuration:**
-- `/Users/kb20250422/Documents/dev/promaia/promaia/config/databases.py`
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/config/databases.py`
   - DatabaseConfig class with properties like:
     - nickname (e.g., "journal", "conversations")
     - source_type (e.g., "notion", "gmail", "conversation")

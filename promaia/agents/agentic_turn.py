@@ -26,6 +26,7 @@ class AgenticTurnResult:
     input_tokens: int = 0
     output_tokens: int = 0
     plan: Optional[List[str]] = None  # Plan steps if planning was used
+    signal: Optional[Dict[str, Any]] = None  # Workflow signals (interview_start, interview_end, show_selection)
 
 
 # ── Tool definitions (Anthropic native format) ──────────────────────────
@@ -1133,6 +1134,465 @@ TASK_QUEUE_TOOL_DEFINITIONS = [
 ]
 
 
+# ── Config tools (always available) ─────────────────────────────────────
+
+CONFIG_TOOL_DEFINITIONS = [
+    {
+        "name": "list_source_types",
+        "description": (
+            "List available data source types that can be added to Promaia. "
+            "Returns each type with its description and what identifier is needed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "list_workspaces",
+        "description": (
+            "List all configured workspaces and which is the default. "
+            "Use to help the user pick a workspace when adding databases or configuring sources."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "add_workspace",
+        "description": "Create a new workspace.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Workspace name (lowercase, no spaces)"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional description of the workspace"
+                },
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "discover_source_name",
+        "description": (
+            "Fetch the human-readable name of a data source from its API. "
+            "For example, fetches the Notion database title, Discord server name, etc. "
+            "Requires valid credentials for the source type."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_type": {
+                    "type": "string",
+                    "description": "Source type (notion, discord, gmail, slack, shopify, google_sheets)"
+                },
+                "database_id": {
+                    "type": "string",
+                    "description": "Source identifier (Notion DB ID, Discord server ID, email address, etc.)"
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace name to use for credential lookup"
+                },
+            },
+            "required": ["source_type", "database_id", "workspace"]
+        }
+    },
+    {
+        "name": "check_credential",
+        "description": (
+            "Check whether credentials exist for a given integration and workspace. "
+            "Returns whether the credential is configured and what to do if not."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "integration": {
+                    "type": "string",
+                    "description": "Integration name: notion, google, discord, slack, shopify, anthropic, openai"
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace name (some credentials are workspace-scoped)"
+                },
+            },
+            "required": ["integration"]
+        }
+    },
+    {
+        "name": "register_database",
+        "description": (
+            "Register a new data source in Promaia's configuration. "
+            "Creates the database entry in promaia.config.json. "
+            "The user should confirm the details before you call this."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Database nickname (e.g., 'journal', 'team-updates')"
+                },
+                "source_type": {
+                    "type": "string",
+                    "description": "Source type (notion, discord, gmail, slack, shopify, google_sheets)"
+                },
+                "database_id": {
+                    "type": "string",
+                    "description": "Source identifier (Notion DB ID, Discord server ID, email address, etc.)"
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace to add this database to"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional description of what this source contains"
+                },
+            },
+            "required": ["name", "source_type", "database_id", "workspace"]
+        }
+    },
+    {
+        "name": "test_connection",
+        "description": (
+            "Test the connection to a registered database source. "
+            "Verifies that credentials work and the source is reachable."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Database nickname"
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace the database belongs to"
+                },
+            },
+            "required": ["name", "workspace"]
+        }
+    },
+]
+
+
+SHOW_SELECTION_TOOL_DEFINITION = {
+    "name": "show_selection",
+    "description": (
+        "Render an interactive selection menu for the user in the terminal. "
+        "Use for lists with 4+ items or when multi-select is needed. "
+        "For 2-3 simple options, just ask in text instead. "
+        "This tool pauses the conversation — the user's selection will "
+        "appear in the next message."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "Menu title displayed at the top"
+            },
+            "items": {
+                "type": "array",
+                "description": "Items to select from",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Unique identifier for this item"},
+                        "label": {"type": "string", "description": "Display text"},
+                        "description": {"type": "string", "description": "Optional description shown next to label"},
+                        "group": {"type": "string", "description": "Optional group header for categorization"},
+                    },
+                    "required": ["id", "label"]
+                }
+            },
+            "multi_select": {
+                "type": "boolean",
+                "description": "Allow multiple selections (default: false)",
+                "default": False
+            },
+            "pre_selected": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of item IDs to pre-select (show as already checked)"
+            },
+        },
+        "required": ["title", "items"]
+    }
+}
+
+SYNC_DATABASE_TOOL_DEFINITION = {
+    "name": "sync_database",
+    "description": (
+        "Sync a database source to pull latest data from the remote service. "
+        "Use after registering a new database or when the user wants fresh data. "
+        "Equivalent to running `maia database sync <name>`."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Database nickname to sync (or 'all' to sync everything)"
+            },
+            "workspace": {
+                "type": "string",
+                "description": "Workspace the database belongs to"
+            },
+            "days": {
+                "type": "integer",
+                "description": "Number of days of data to sync (default: 7)",
+                "default": 7
+            },
+        },
+        "required": ["name"]
+    }
+}
+
+LIST_DATABASES_TOOL_DEFINITION = {
+    "name": "list_databases",
+    "description": (
+        "List all configured database sources with their sync status. "
+        "Equivalent to `maia database list`."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "workspace": {
+                "type": "string",
+                "description": "Filter by workspace (optional)"
+            },
+        },
+        "required": []
+    }
+}
+
+RENAME_DATABASE_TOOL_DEFINITION = {
+    "name": "rename_database",
+    "description": (
+        "Rename a database source (change its nickname). "
+        "Preserves all configuration, channels, and sync state."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "old_name": {"type": "string", "description": "Current database nickname"},
+            "new_name": {"type": "string", "description": "New nickname"},
+            "workspace": {"type": "string", "description": "Workspace name"},
+        },
+        "required": ["old_name", "new_name"]
+    }
+}
+
+AGENT_TOOL_DEFINITIONS = [
+    {
+        "name": "list_agents",
+        "description": "List all scheduled agents with their status, schedule, and databases.",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "agent_info",
+        "description": "Show detailed information about a specific scheduled agent.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Agent name"},
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "enable_agent",
+        "description": "Enable a scheduled agent so it runs on its schedule.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Agent name"},
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "disable_agent",
+        "description": "Disable a scheduled agent (stops it from running on schedule).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Agent name"},
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "rename_agent",
+        "description": "Rename a scheduled agent. Updates the agent's name and agent_id.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "old_name": {"type": "string", "description": "Current agent name"},
+                "new_name": {"type": "string", "description": "New agent name"},
+            },
+            "required": ["old_name", "new_name"]
+        }
+    },
+    {
+        "name": "update_agent",
+        "description": (
+            "Update fields on a scheduled agent. Only provided fields are changed. "
+            "Use for editing description, databases, mcp_tools, interval, max_iterations, etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Agent name"},
+                "description": {"type": "string", "description": "New description"},
+                "databases": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Database sources (e.g. ['journal:7', 'gmail:3'])"
+                },
+                "mcp_tools": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "MCP tools to enable (e.g. ['gmail', 'calendar', 'notion'])"
+                },
+                "interval_minutes": {"type": "integer", "description": "Run interval in minutes"},
+                "max_iterations": {"type": "integer", "description": "Max query iterations per run"},
+                "prompt": {"type": "string", "description": "New system prompt text"},
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "remove_agent",
+        "description": (
+            "Remove a scheduled agent and clean up its resources. "
+            "This is destructive — always confirm with the user first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Agent name to remove"},
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "run_agent",
+        "description": "Trigger an immediate run of a scheduled agent.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Agent name to run"},
+            },
+            "required": ["name"]
+        }
+    },
+]
+
+CHANNEL_TOOL_DEFINITIONS = [
+    {
+        "name": "list_channels",
+        "description": (
+            "Fetch all available channels from a Discord or Slack source. "
+            "Returns channel IDs and names that the bot has access to. "
+            "Use this before show_selection to let the user pick channels."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Database nickname"},
+                "workspace": {"type": "string", "description": "Workspace name"},
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "get_configured_channels",
+        "description": (
+            "Show which channels are currently configured (selected) for a "
+            "Discord or Slack database source."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Database nickname"},
+                "workspace": {"type": "string", "description": "Workspace name"},
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "update_channels",
+        "description": (
+            "Update the channel selection for a Discord or Slack database source. "
+            "Replaces the current channel list with the provided one. "
+            "Always confirm with the user before calling this."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Database nickname"},
+                "workspace": {"type": "string", "description": "Workspace name"},
+                "channel_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of channel IDs to configure"
+                },
+                "channel_names": {
+                    "type": "object",
+                    "description": "Mapping of channel ID to channel name",
+                    "additionalProperties": {"type": "string"}
+                },
+            },
+            "required": ["name", "channel_ids", "channel_names"]
+        }
+    },
+]
+
+INTERVIEW_TOOL_DEFINITIONS = [
+    {
+        "name": "start_interview",
+        "description": (
+            "Start a guided interview workflow to walk the user through a "
+            "configuration process. Use when the user wants to set up or "
+            "configure something (add a database, create a workspace, etc.). "
+            "This activates a specialized mode with step-by-step guidance."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "workflow": {
+                    "type": "string",
+                    "description": "The workflow to start",
+                    "enum": ["database_add", "edit_channels"],
+                },
+            },
+            "required": ["workflow"]
+        }
+    },
+    {
+        "name": "complete_interview",
+        "description": (
+            "Signal that the current interview workflow is complete. "
+            "Call this when all required steps have been finished and "
+            "the user's configuration task is done."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+]
+
+
 def _resolve_spreadsheet_id(identifier: str, workspace: str) -> str:
     """Resolve a spreadsheet name, URL, or ID to a Google Sheets spreadsheet ID.
 
@@ -1272,6 +1732,26 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     # Context compact — always available
     tools.append(COMPACT_CONTEXT_TOOL_DEFINITION)
 
+    # Config tools — always available
+    tools.extend(CONFIG_TOOL_DEFINITIONS)
+
+    # Agent management tools — always available
+    tools.extend(AGENT_TOOL_DEFINITIONS)
+
+    # Channel tools — always available
+    tools.extend(CHANNEL_TOOL_DEFINITIONS)
+
+    # Interview tools — always available
+    tools.extend(INTERVIEW_TOOL_DEFINITIONS)
+
+    # UI tools — always available
+    tools.append(SHOW_SELECTION_TOOL_DEFINITION)
+
+    # CLI action tools — always available
+    tools.append(SYNC_DATABASE_TOOL_DEFINITION)
+    tools.append(LIST_DATABASES_TOOL_DEFINITION)
+    tools.append(RENAME_DATABASE_TOOL_DEFINITION)
+
     return tools
 
 
@@ -1362,6 +1842,62 @@ class ToolExecutor:
                 if not notes:
                     return "Error: provide either 'notes' to compact or 'restore: true' to expand."
                 return f"__CONTEXT_COMPACT__:{notes}"
+            # Config tools
+            elif tool_name == "list_source_types":
+                return await self._list_source_types()
+            elif tool_name == "list_workspaces":
+                return await self._list_workspaces()
+            elif tool_name == "add_workspace":
+                return await self._add_workspace(tool_input)
+            elif tool_name == "discover_source_name":
+                return await self._discover_source_name(tool_input)
+            elif tool_name == "check_credential":
+                return await self._check_credential(tool_input)
+            elif tool_name == "register_database":
+                return await self._register_database(tool_input)
+            elif tool_name == "test_connection":
+                return await self._test_connection(tool_input)
+            # Agent tools
+            elif tool_name == "list_agents":
+                return await self._list_agents()
+            elif tool_name == "agent_info":
+                return await self._agent_info(tool_input)
+            elif tool_name == "enable_agent":
+                return await self._enable_agent(tool_input)
+            elif tool_name == "disable_agent":
+                return await self._disable_agent(tool_input)
+            elif tool_name == "rename_agent":
+                return await self._rename_agent(tool_input)
+            elif tool_name == "update_agent":
+                return await self._update_agent(tool_input)
+            elif tool_name == "remove_agent":
+                return await self._remove_agent(tool_input)
+            elif tool_name == "run_agent":
+                return await self._run_agent(tool_input)
+            # Channel tools
+            elif tool_name == "list_channels":
+                return await self._list_channels(tool_input)
+            elif tool_name == "get_configured_channels":
+                return await self._get_configured_channels(tool_input)
+            elif tool_name == "update_channels":
+                return await self._update_channels(tool_input)
+            # Interview tools (sentinels — handled by the agentic loop)
+            elif tool_name == "start_interview":
+                workflow = tool_input.get("workflow", "")
+                return f"__INTERVIEW_START__:{workflow}"
+            elif tool_name == "complete_interview":
+                return "__INTERVIEW_END__"
+            # UI tools (sentinels — handled by interface.py)
+            elif tool_name == "show_selection":
+                import json as _json
+                return f"__SHOW_SELECTION__:{_json.dumps(tool_input)}"
+            # CLI action tools
+            elif tool_name == "sync_database":
+                return await self._sync_database(tool_input)
+            elif tool_name == "list_databases":
+                return await self._list_databases(tool_input)
+            elif tool_name == "rename_database":
+                return await self._rename_database(tool_input)
             else:
                 return f"Unknown tool: {tool_name}"
         except Exception as e:
@@ -3200,6 +3736,758 @@ class ToolExecutor:
         except Exception as e:
             return f"Error appending blocks: {e}"
 
+    # ── Config tools ────────────────────────────────────────────────────
+
+    async def _list_source_types(self) -> str:
+        source_types = [
+            {"type": "notion", "description": "Notion databases and pages", "id_format": "Database ID (from the URL)"},
+            {"type": "discord", "description": "Discord server channels", "id_format": "Server ID (right-click server → Copy Server ID)"},
+            {"type": "gmail", "description": "Gmail email threads", "id_format": "Gmail address (e.g. user@gmail.com)"},
+            {"type": "slack", "description": "Slack workspace channels", "id_format": "Auto-generated (no ID needed)"},
+            {"type": "shopify", "description": "Shopify store data", "id_format": "Shop domain (e.g. my-store.myshopify.com)"},
+            {"type": "google_sheets", "description": "Google Sheets spreadsheets", "id_format": "Sheet/Folder ID or 'root' for all"},
+            {"type": "google_calendar", "description": "Google Calendar events", "id_format": "Calendar ID or 'primary'"},
+        ]
+        lines = ["Available source types:\n"]
+        for st in source_types:
+            lines.append(f"- **{st['type']}**: {st['description']}")
+            lines.append(f"  ID format: {st['id_format']}")
+        return "\n".join(lines)
+
+    async def _list_workspaces(self) -> str:
+        try:
+            from promaia.config.workspaces import WorkspaceManager
+            wm = WorkspaceManager()
+            workspaces = wm.list_workspaces()
+            default_ws = wm.get_default_workspace()
+            if not workspaces:
+                return "No workspaces configured. Use add_workspace to create one."
+            lines = ["Configured workspaces:\n"]
+            for ws in workspaces:
+                marker = " (default)" if ws == default_ws else ""
+                lines.append(f"- {ws}{marker}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error listing workspaces: {e}"
+
+    async def _add_workspace(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip().lower()
+        if not name:
+            return "Error: workspace name is required."
+        description = tool_input.get("description", "")
+        try:
+            from promaia.config.workspaces import WorkspaceManager
+            wm = WorkspaceManager()
+            success = wm.add_workspace(name, description=description)
+            if success:
+                return f"Workspace '{name}' created successfully."
+            else:
+                return f"Workspace '{name}' already exists."
+        except Exception as e:
+            return f"Error creating workspace: {e}"
+
+    async def _discover_source_name(self, tool_input: Dict) -> str:
+        source_type = tool_input.get("source_type", "")
+        database_id = tool_input.get("database_id", "")
+        workspace = tool_input.get("workspace", self.workspace)
+        if not source_type or not database_id:
+            return "Error: source_type and database_id are required."
+        try:
+            from promaia.cli.database_commands import _discover_source_name as discover
+            name = await discover(source_type, database_id, workspace)
+            if name:
+                return f"Discovered source name: {name}"
+            else:
+                return "Could not discover source name (API unreachable or credentials missing). Ask the user for a nickname."
+        except Exception as e:
+            return f"Error discovering source name: {e}"
+
+    async def _check_credential(self, tool_input: Dict) -> str:
+        integration_name = tool_input.get("integration", "")
+        workspace = tool_input.get("workspace", self.workspace)
+        if not integration_name:
+            return "Error: integration name is required."
+        try:
+            from promaia.auth.registry import get_integration
+            integration = get_integration(integration_name)
+            if integration is None:
+                return f"Unknown integration: {integration_name}. Available: notion, google, discord, slack, shopify, anthropic, openai"
+
+            # Check for credentials based on integration type
+            if integration_name == "notion":
+                cred = integration.get_notion_credentials(workspace)
+            elif integration_name == "google":
+                cred = integration.get_default_credential()
+            elif integration_name == "discord":
+                cred = integration.get_discord_token(workspace) if hasattr(integration, 'get_discord_token') else integration.get_default_credential()
+            else:
+                cred = integration.get_default_credential()
+
+            if cred:
+                return f"Credentials for '{integration_name}' are configured and available."
+            else:
+                return (
+                    f"No credentials found for '{integration_name}'. "
+                    f"The user needs to run: maia auth configure {integration_name}"
+                )
+        except Exception as e:
+            return f"Error checking credential: {e}"
+
+    async def _register_database(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip()
+        source_type = tool_input.get("source_type", "").strip()
+        database_id = tool_input.get("database_id", "").strip()
+        workspace = tool_input.get("workspace", self.workspace).strip()
+        description = tool_input.get("description", "")
+
+        if not all([name, source_type, database_id, workspace]):
+            return "Error: name, source_type, database_id, and workspace are all required."
+
+        valid_types = {"notion", "discord", "gmail", "slack", "shopify", "google_sheets", "google_calendar"}
+        if source_type not in valid_types:
+            return f"Error: invalid source_type '{source_type}'. Must be one of: {', '.join(sorted(valid_types))}"
+
+        config = {
+            "source_type": source_type,
+            "database_id": database_id,
+            "description": description,
+            "workspace": workspace,
+            "sync_enabled": True,
+            "include_properties": True,
+            "default_days": 30 if source_type == "shopify" else 7,
+            "save_markdown": source_type != "shopify",
+        }
+
+        try:
+            from promaia.config.databases import DatabaseManager
+            db_manager = DatabaseManager()
+            success = db_manager.add_database(name, config, workspace)
+            if success:
+                return (
+                    f"Database '{name}' registered successfully.\n"
+                    f"  Source type: {source_type}\n"
+                    f"  ID: {database_id}\n"
+                    f"  Workspace: {workspace}\n"
+                    f"You can now run `maia database sync {name}` to sync it."
+                )
+            else:
+                return f"Database '{name}' already exists in workspace '{workspace}'. Choose a different name."
+        except Exception as e:
+            return f"Error registering database: {e}"
+
+    async def _test_connection(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip()
+        workspace = tool_input.get("workspace", self.workspace).strip()
+        if not name:
+            return "Error: database name is required."
+
+        try:
+            from promaia.config.databases import DatabaseManager
+            db_manager = DatabaseManager()
+            db_config = db_manager.get_database(name, workspace)
+            if not db_config:
+                return f"Database '{name}' not found in workspace '{workspace}'."
+
+            from promaia.connectors.base import ConnectorRegistry
+            source_type = db_config.source_type
+
+            # Build connector config
+            connector_config = {
+                "database_id": db_config.database_id,
+                "workspace": workspace,
+                "nickname": name,
+            }
+
+            # Add credentials for connector
+            if source_type == "notion":
+                from promaia.auth.registry import get_integration
+                token = get_integration("notion").get_notion_credentials(workspace)
+                if token:
+                    connector_config["api_key"] = token
+            elif source_type == "discord":
+                from promaia.auth.registry import get_integration
+                discord_int = get_integration("discord")
+                if hasattr(discord_int, 'get_discord_token'):
+                    token = discord_int.get_discord_token(workspace)
+                    if token:
+                        connector_config["bot_token"] = token
+
+            connector = ConnectorRegistry.get_connector(source_type, connector_config)
+            if connector is None:
+                return f"No connector available for source type '{source_type}'. The required package may not be installed."
+
+            result = await connector.test_connection()
+            if result:
+                return f"Connection test PASSED for '{name}' ({source_type})."
+            else:
+                return f"Connection test FAILED for '{name}' ({source_type}). Check credentials and source ID."
+        except ImportError as e:
+            return f"Connector for '{name}' not available (missing dependency): {e}"
+        except Exception as e:
+            return f"Connection test error for '{name}': {e}"
+
+    async def _sync_database(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip()
+        workspace = tool_input.get("workspace", self.workspace).strip()
+        days = tool_input.get("days", 7)
+        if not name:
+            return "Error: database name is required."
+
+        try:
+            from promaia.config.databases import DatabaseManager
+            db_manager = DatabaseManager()
+
+            if name.lower() == "all":
+                # Sync all databases in workspace
+                db_names = db_manager.list_databases(workspace=workspace)
+                if not db_names:
+                    return f"No databases found in workspace '{workspace}'."
+                results = []
+                for db_name in db_names:
+                    result = await self._sync_single_database(db_manager, db_name, workspace, days)
+                    results.append(f"- {db_name}: {result}")
+                return f"Sync results:\n" + "\n".join(results)
+            else:
+                result = await self._sync_single_database(db_manager, name, workspace, days)
+                return result
+        except Exception as e:
+            return f"Error syncing database: {e}"
+
+    async def _sync_single_database(self, db_manager, name: str, workspace: str, days: int) -> str:
+        """Sync a single database source."""
+        db_config = db_manager.get_database(name, workspace)
+        if not db_config:
+            return f"Database '{name}' not found in workspace '{workspace}'."
+
+        source_type = db_config.source_type
+        database_id = db_config.database_id
+
+        try:
+            from promaia.connectors.base import ConnectorRegistry
+
+            # Build connector config
+            connector_config = {
+                "database_id": database_id,
+                "workspace": workspace,
+                "nickname": name,
+                "default_days": days,
+            }
+
+            # Add credentials
+            from promaia.auth.registry import get_integration
+            if source_type == "notion":
+                token = get_integration("notion").get_notion_credentials(workspace)
+                if token:
+                    connector_config["api_key"] = token
+                else:
+                    return f"No Notion credentials for workspace '{workspace}'. Run: maia auth configure notion"
+            elif source_type in ("gmail", "google_sheets", "google_calendar"):
+                cred = get_integration("google").get_default_credential()
+                if not cred:
+                    return f"No Google credentials found. Run: maia auth configure google"
+            elif source_type == "discord":
+                discord_int = get_integration("discord")
+                if hasattr(discord_int, 'get_discord_token'):
+                    token = discord_int.get_discord_token(workspace)
+                    if token:
+                        connector_config["bot_token"] = token
+
+            connector = ConnectorRegistry.get_connector(source_type, connector_config)
+            if connector is None:
+                return f"No connector available for '{source_type}'."
+
+            # Run the sync
+            from datetime import datetime, timedelta
+            start_date = datetime.now() - timedelta(days=days)
+            sync_result = await connector.sync(start_date=start_date)
+
+            if sync_result:
+                pages_synced = getattr(sync_result, 'pages_synced', None)
+                if pages_synced is not None:
+                    return f"Synced '{name}' ({source_type}): {pages_synced} pages"
+                return f"Synced '{name}' ({source_type}) successfully."
+            else:
+                return f"Sync of '{name}' returned no result (may have completed with warnings)."
+        except Exception as e:
+            return f"Sync failed for '{name}': {e}"
+
+    async def _list_databases(self, tool_input: Dict) -> str:
+        workspace = tool_input.get("workspace", self.workspace).strip() or None
+        try:
+            from promaia.config.databases import DatabaseManager
+            db_manager = DatabaseManager()
+            all_dbs = db_manager.databases
+
+            if not all_dbs:
+                return "No databases configured."
+
+            lines = ["Configured databases:\n"]
+            for qualified_name, db_config in sorted(all_dbs.items()):
+                if workspace and db_config.workspace != workspace:
+                    continue
+                sync_status = "enabled" if db_config.sync_enabled else "disabled"
+                last_sync = getattr(db_config, 'last_sync_time', None)
+                sync_info = f", last sync: {last_sync}" if last_sync else ""
+                lines.append(
+                    f"- **{qualified_name}** ({db_config.source_type}) "
+                    f"[{sync_status}{sync_info}]"
+                )
+
+            if len(lines) == 1:
+                return f"No databases found for workspace '{workspace}'." if workspace else "No databases configured."
+
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error listing databases: {e}"
+
+    async def _rename_database(self, tool_input: Dict) -> str:
+        old_name = tool_input.get("old_name", "").strip()
+        new_name = tool_input.get("new_name", "").strip()
+        workspace = tool_input.get("workspace", self.workspace).strip()
+        if not old_name or not new_name:
+            return "Error: old_name and new_name are required."
+
+        try:
+            from promaia.config.databases import DatabaseManager
+            db_manager = DatabaseManager()
+            db_config = db_manager.get_database(old_name, workspace)
+            if not db_config:
+                return f"Database '{old_name}' not found in workspace '{workspace}'."
+
+            # Check new name doesn't exist
+            existing = db_manager.get_database(new_name, workspace)
+            if existing:
+                return f"Database '{new_name}' already exists in workspace '{workspace}'."
+
+            # Build config dict from existing config
+            config_data = {
+                "source_type": db_config.source_type,
+                "database_id": db_config.database_id,
+                "description": db_config.description or "",
+                "workspace": db_config.workspace,
+                "sync_enabled": db_config.sync_enabled,
+                "include_properties": db_config.include_properties,
+                "default_days": db_config.default_days,
+                "save_markdown": db_config.save_markdown,
+                "property_filters": db_config.property_filters or {},
+                "date_filters": db_config.date_filters or {},
+            }
+
+            # Add new, remove old
+            success = db_manager.add_database(new_name, config_data, workspace)
+            if not success:
+                return f"Failed to create '{new_name}'."
+
+            db_manager.remove_database(old_name, workspace)
+            return f"Renamed '{old_name}' to '{new_name}' in workspace '{workspace}'."
+        except Exception as e:
+            return f"Error renaming database: {e}"
+
+    # ── Agent tools ─────────────────────────────────────────────────────
+
+    async def _list_agents(self) -> str:
+        try:
+            from promaia.agents.agent_config import load_agents
+            agents = load_agents()
+            if not agents:
+                return "No scheduled agents configured."
+            lines = ["Scheduled agents:\n"]
+            for a in agents:
+                status = "enabled" if a.enabled else "disabled"
+                schedule = f"every {a.interval_minutes}min" if a.interval_minutes else "grid schedule"
+                dbs = ", ".join(a.databases[:3]) if a.databases else "none"
+                if len(a.databases) > 3:
+                    dbs += f" (+{len(a.databases) - 3} more)"
+                last_run = a.last_run_at or "never"
+                lines.append(
+                    f"- **{a.name}** [{status}] — {schedule}\n"
+                    f"  Workspace: {a.workspace} | Sources: {dbs} | Last run: {last_run}"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error listing agents: {e}"
+
+    async def _agent_info(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip()
+        if not name:
+            return "Error: agent name is required."
+        try:
+            from promaia.agents.agent_config import get_agent
+            agent = get_agent(name)
+            if not agent:
+                return f"Agent '{name}' not found."
+            lines = [
+                f"**{agent.name}**",
+                f"  ID: {agent.agent_id}",
+                f"  Workspace: {agent.workspace}",
+                f"  Status: {'enabled' if agent.enabled else 'disabled'}",
+                f"  Databases: {', '.join(agent.databases) if agent.databases else 'none'}",
+                f"  MCP tools: {', '.join(agent.mcp_tools) if agent.mcp_tools else 'none'}",
+                f"  Max iterations: {agent.max_iterations}",
+            ]
+            if agent.interval_minutes:
+                lines.append(f"  Interval: every {agent.interval_minutes} minutes")
+            if agent.schedule:
+                lines.append(f"  Schedule: {agent.schedule}")
+            if agent.description:
+                lines.append(f"  Description: {agent.description}")
+            if agent.last_run_at:
+                lines.append(f"  Last run: {agent.last_run_at}")
+            if agent.calendar_id:
+                lines.append(f"  Calendar: {agent.calendar_id}")
+            if agent.prompt_file:
+                prompt_preview = agent.prompt_file[:200]
+                if len(agent.prompt_file) > 200:
+                    prompt_preview += "..."
+                lines.append(f"  Prompt: {prompt_preview}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error getting agent info: {e}"
+
+    async def _enable_agent(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip()
+        if not name:
+            return "Error: agent name is required."
+        try:
+            from promaia.agents.agent_config import get_agent, save_agent
+            agent = get_agent(name)
+            if not agent:
+                return f"Agent '{name}' not found."
+            if agent.enabled:
+                return f"Agent '{name}' is already enabled."
+            agent.enabled = True
+            save_agent(agent)
+            return f"Agent '{name}' enabled."
+        except Exception as e:
+            return f"Error enabling agent: {e}"
+
+    async def _disable_agent(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip()
+        if not name:
+            return "Error: agent name is required."
+        try:
+            from promaia.agents.agent_config import get_agent, save_agent
+            agent = get_agent(name)
+            if not agent:
+                return f"Agent '{name}' not found."
+            if not agent.enabled:
+                return f"Agent '{name}' is already disabled."
+            agent.enabled = False
+            save_agent(agent)
+            return f"Agent '{name}' disabled."
+        except Exception as e:
+            return f"Error disabling agent: {e}"
+
+    async def _rename_agent(self, tool_input: Dict) -> str:
+        old_name = tool_input.get("old_name", "").strip()
+        new_name = tool_input.get("new_name", "").strip()
+        if not old_name or not new_name:
+            return "Error: old_name and new_name are required."
+        try:
+            from promaia.agents.agent_config import get_agent, save_agent, load_agents
+            agent = get_agent(old_name)
+            if not agent:
+                return f"Agent '{old_name}' not found."
+            existing = get_agent(new_name)
+            if existing:
+                return f"Agent '{new_name}' already exists."
+
+            # agent_id stays the same (UUID or legacy) — only display name changes
+            old_display = agent.name
+            agent.name = new_name
+
+            # Save updated config (save_agent matches by name, so we need to
+            # remove old entry and add new one)
+            import json as _json
+            from promaia.agents.agent_config import _get_agents_file, load_config, save_config
+
+            # Update agents.json
+            agents_file = _get_agents_file()
+            if agents_file.exists():
+                with open(agents_file, 'r') as f:
+                    agents_data = _json.load(f)
+                agents_list = agents_data.get('agents', [])
+                for i, a in enumerate(agents_list):
+                    if a.get('name') == old_display:
+                        agents_list[i] = agent.to_dict()
+                        break
+                with open(agents_file, 'w') as f:
+                    _json.dump(agents_data, f, indent=2)
+
+            # Update promaia.config.json
+            config = load_config()
+            for i, a in enumerate(config.get('agents', [])):
+                if a.get('name') == old_display:
+                    config['agents'][i] = agent.to_dict()
+                    break
+            save_config(config)
+
+            updates = [f"Config: '{old_display}' → '{new_name}'"]
+
+            # Update Notion page title if we have a page ID
+            if agent.notion_page_id:
+                try:
+                    from promaia.notion.client import get_client
+                    client = get_client(agent.workspace)
+                    await client.pages.update(
+                        page_id=agent.notion_page_id,
+                        properties={
+                            "Name": {"title": [{"text": {"content": new_name}}]},
+                        }
+                    )
+                    updates.append("Notion page title updated")
+                except Exception as e:
+                    updates.append(f"Notion update failed: {e}")
+
+            # Update Google Calendar name if we have a calendar
+            if agent.calendar_id:
+                try:
+                    from promaia.gcal.google_calendar import GoogleCalendarManager
+                    gcal = GoogleCalendarManager()
+                    if gcal.authenticate():
+                        gcal.service.calendars().patch(
+                            calendarId=agent.calendar_id,
+                            body={
+                                'summary': new_name,
+                                'description': f"Automated schedule for {new_name} agent",
+                            }
+                        ).execute()
+                        updates.append("Google Calendar renamed")
+                except Exception as e:
+                    updates.append(f"Calendar rename failed: {e}")
+
+            return f"Agent renamed: {old_display} → {new_name}\n" + "\n".join(f"  - {u}" for u in updates)
+        except Exception as e:
+            return f"Error renaming agent: {e}"
+
+    async def _update_agent(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip()
+        if not name:
+            return "Error: agent name is required."
+        try:
+            from promaia.agents.agent_config import get_agent, save_agent
+            agent = get_agent(name)
+            if not agent:
+                return f"Agent '{name}' not found."
+
+            changes = []
+            if "description" in tool_input:
+                agent.description = tool_input["description"]
+                changes.append("description")
+            if "databases" in tool_input:
+                agent.databases = tool_input["databases"]
+                changes.append("databases")
+            if "mcp_tools" in tool_input:
+                agent.mcp_tools = tool_input["mcp_tools"]
+                changes.append("mcp_tools")
+            if "interval_minutes" in tool_input:
+                agent.interval_minutes = tool_input["interval_minutes"]
+                changes.append("interval")
+            if "max_iterations" in tool_input:
+                agent.max_iterations = tool_input["max_iterations"]
+                changes.append("max_iterations")
+            if "prompt" in tool_input:
+                agent.prompt_file = tool_input["prompt"]
+                changes.append("prompt")
+
+            if not changes:
+                return "No fields to update were provided."
+
+            save_agent(agent)
+            return f"Agent '{name}' updated: {', '.join(changes)}"
+        except Exception as e:
+            return f"Error updating agent: {e}"
+
+    async def _remove_agent(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip()
+        if not name:
+            return "Error: agent name is required."
+        try:
+            from promaia.agents.agent_config import get_agent, delete_agent
+            agent = get_agent(name)
+            if not agent:
+                return f"Agent '{name}' not found."
+            deleted = delete_agent(name)
+            if deleted:
+                return f"Agent '{name}' removed and resources cleaned up."
+            else:
+                return f"Failed to remove agent '{name}'."
+        except Exception as e:
+            return f"Error removing agent: {e}"
+
+    async def _run_agent(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip()
+        if not name:
+            return "Error: agent name is required."
+        try:
+            from promaia.agents.agent_config import get_agent
+            agent = get_agent(name)
+            if not agent:
+                return f"Agent '{name}' not found."
+
+            from promaia.agents.executor import AgentExecutor
+            executor = AgentExecutor(agent)
+            result = await executor.execute()
+
+            if result.get("success"):
+                metrics = result.get("metrics", {})
+                return (
+                    f"Agent '{name}' ran successfully.\n"
+                    f"  Iterations: {metrics.get('iterations_used', '?')}\n"
+                    f"  Tokens: {metrics.get('tokens_used', '?')}\n"
+                    f"  Duration: {metrics.get('duration_seconds', '?')}s"
+                )
+            else:
+                return f"Agent '{name}' run failed: {result.get('output', 'unknown error')}"
+        except Exception as e:
+            return f"Error running agent: {e}"
+
+    # ── Channel tools ───────────────────────────────────────────────────
+
+    async def _list_channels(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip()
+        workspace = tool_input.get("workspace", self.workspace).strip()
+        if not name:
+            return "Error: database name is required."
+
+        try:
+            from promaia.config.databases import DatabaseManager
+            db_manager = DatabaseManager()
+            db_config = db_manager.get_database(name, workspace)
+            if not db_config:
+                return f"Database '{name}' not found in workspace '{workspace}'."
+
+            source_type = db_config.source_type
+            if source_type not in ("discord", "slack"):
+                return f"Channel listing is only available for Discord and Slack sources (this is {source_type})."
+
+            if source_type == "discord":
+                return await self._list_discord_channels(db_config, workspace)
+            else:
+                return await self._list_slack_channels(db_config, workspace)
+        except Exception as e:
+            return f"Error listing channels: {e}"
+
+    async def _list_discord_channels(self, db_config, workspace: str) -> str:
+        try:
+            from promaia.auth.registry import get_integration
+            discord_int = get_integration("discord")
+            bot_token = discord_int.get_discord_token(workspace) if hasattr(discord_int, 'get_discord_token') else None
+            if not bot_token:
+                return "No Discord bot token found. Run: maia auth configure discord"
+
+            from promaia.connectors.discord_connector import DiscordConnector
+            connector = DiscordConnector({
+                "database_id": db_config.database_id,
+                "workspace": workspace,
+                "bot_token": bot_token,
+            })
+            channel_data = await connector.get_cached_accessible_channels()
+            channels = channel_data.get("channels", [])
+            server_name = channel_data.get("server_name", "Unknown")
+
+            if not channels:
+                return f"No accessible channels found in {server_name}."
+
+            import json
+            result = {
+                "server_name": server_name,
+                "channels": [{"id": ch["id"], "name": ch["name"]} for ch in channels]
+            }
+            return json.dumps(result, indent=2)
+        except Exception as e:
+            return f"Error fetching Discord channels: {e}"
+
+    async def _list_slack_channels(self, db_config, workspace: str) -> str:
+        try:
+            from promaia.connectors.slack_connector import SlackConnector
+            connector = SlackConnector({
+                "database_id": db_config.database_id,
+                "workspace": workspace,
+            })
+            channel_data = await connector.discover_accessible_channels()
+            channels = channel_data.get("channels", [])
+
+            if not channels:
+                return "No accessible channels found."
+
+            import json
+            result = {
+                "channels": [
+                    {"id": ch["id"], "name": ch["name"], "is_private": ch.get("is_private", False)}
+                    for ch in channels
+                ]
+            }
+            return json.dumps(result, indent=2)
+        except Exception as e:
+            return f"Error fetching Slack channels: {e}"
+
+    async def _get_configured_channels(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip()
+        workspace = tool_input.get("workspace", self.workspace).strip()
+        if not name:
+            return "Error: database name is required."
+
+        try:
+            from promaia.config.databases import DatabaseManager
+            db_manager = DatabaseManager()
+            db_config = db_manager.get_database(name, workspace)
+            if not db_config:
+                return f"Database '{name}' not found in workspace '{workspace}'."
+
+            filters = db_config.property_filters or {}
+            channel_ids = filters.get("channel_id", [])
+            channel_names = filters.get("channel_names", {})
+
+            if not channel_ids:
+                return f"No channels configured for '{name}'. All channels will be synced."
+
+            lines = [f"Configured channels for '{name}':\n"]
+            for cid in channel_ids:
+                cname = channel_names.get(cid, cid)
+                lines.append(f"- #{cname} ({cid})")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error reading channel config: {e}"
+
+    async def _update_channels(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip()
+        workspace = tool_input.get("workspace", self.workspace).strip()
+        channel_ids = tool_input.get("channel_ids", [])
+        channel_names = tool_input.get("channel_names", {})
+
+        if not name:
+            return "Error: database name is required."
+        if not channel_ids:
+            return "Error: channel_ids list is required."
+
+        try:
+            from promaia.config.databases import DatabaseManager
+            db_manager = DatabaseManager()
+            db_config = db_manager.get_database(name, workspace)
+            if not db_config:
+                return f"Database '{name}' not found in workspace '{workspace}'."
+
+            if db_config.source_type not in ("discord", "slack"):
+                return f"Channel configuration is only for Discord/Slack (this is {db_config.source_type})."
+
+            # Update property_filters
+            if not db_config.property_filters:
+                db_config.property_filters = {}
+            db_config.property_filters["channel_id"] = channel_ids
+            db_config.property_filters["channel_names"] = channel_names
+
+            # Persist
+            db_manager.save_database_field(db_config, "property_filters")
+
+            names_list = [channel_names.get(cid, cid) for cid in channel_ids]
+            return (
+                f"Updated channels for '{name}': {len(channel_ids)} channels configured.\n"
+                f"Channels: {', '.join(names_list)}"
+            )
+        except Exception as e:
+            return f"Error updating channels: {e}"
+
 
 def _extract_block_text(block: Dict) -> str:
     """Extract plain text from a Notion block."""
@@ -3896,6 +5184,41 @@ async def agentic_turn(
             elif result_text == "__CONTEXT_RESTORE__":
                 context_notes = None
                 result_text = "Context restored to full loaded data. Query tools still work normally."
+
+            # Handle interview sentinels — break out of loop and return with signal
+            elif result_text.startswith("__INTERVIEW_START__:"):
+                workflow_name = result_text[len("__INTERVIEW_START__:"):]
+                return AgenticTurnResult(
+                    response_text="\n".join(text_parts),
+                    tool_calls_made=all_tool_calls,
+                    iterations_used=iteration + 1,
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    plan=plan,
+                    signal={"type": "interview_start", "workflow": workflow_name},
+                )
+            elif result_text == "__INTERVIEW_END__":
+                return AgenticTurnResult(
+                    response_text="\n".join(text_parts),
+                    tool_calls_made=all_tool_calls,
+                    iterations_used=iteration + 1,
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    plan=plan,
+                    signal={"type": "interview_end"},
+                )
+            elif result_text.startswith("__SHOW_SELECTION__:"):
+                import json as _json
+                payload = _json.loads(result_text[len("__SHOW_SELECTION__:"):])
+                return AgenticTurnResult(
+                    response_text="\n".join(text_parts),
+                    tool_calls_made=all_tool_calls,
+                    iterations_used=iteration + 1,
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    plan=plan,
+                    signal={"type": "show_selection", "payload": payload},
+                )
 
             # Build summary for logging and UX
             summary = _summarize_tool_result(

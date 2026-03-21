@@ -15,7 +15,7 @@ crontab -e
 Add this line to sync every 30 minutes:
 
 ```bash
-*/30 * * * * /Users/kb20250422/Documents/dev/promaia/sync_all_databases.py >> /Users/kb20250422/Documents/dev/promaia/sync_cron.log 2>&1
+*/30 * * * * /Users/kb20250422/Documents/dev/promaia-py/sync_all_databases.py >> /Users/kb20250422/Documents/dev/promaia-py/sync_cron.log 2>&1
 ```
 
 Save and exit the editor (in vi/vim: press `ESC`, then type `:wq` and press Enter).
@@ -35,7 +35,7 @@ You should see your sync job listed.
 Check the sync log to see when syncs run and their results:
 
 ```bash
-tail -f /Users/kb20250422/Documents/dev/promaia/sync_cron.log
+tail -f /Users/kb20250422/Documents/dev/promaia-py/sync_cron.log
 ```
 
 ## Cron Schedule Explained
@@ -49,16 +49,16 @@ If you want different sync intervals, modify the cron expression:
 
 ```bash
 # Every 15 minutes
-*/15 * * * * /Users/kb20250422/Documents/dev/promaia/sync_all_databases.py
+*/15 * * * * /Users/kb20250422/Documents/dev/promaia-py/sync_all_databases.py
 
 # Every hour
-0 * * * * /Users/kb20250422/Documents/dev/promaia/sync_all_databases.py
+0 * * * * /Users/kb20250422/Documents/dev/promaia-py/sync_all_databases.py
 
 # Every 2 hours
-0 */2 * * * /Users/kb20250422/Documents/dev/promaia/sync_all_databases.py
+0 */2 * * * /Users/kb20250422/Documents/dev/promaia-py/sync_all_databases.py
 
 # Only during work hours (9 AM to 6 PM), every 30 minutes
-*/30 9-18 * * * /Users/kb20250422/Documents/dev/promaia/sync_all_databases.py
+*/30 9-18 * * * /Users/kb20250422/Documents/dev/promaia-py/sync_all_databases.py
 ```
 
 ## Testing
@@ -73,7 +73,7 @@ cd /Users/kb20250422/Documents/dev/promaia
 ### Check for errors:
 
 ```bash
-tail -20 /Users/kb20250422/Documents/dev/promaia/sync_cron.log
+tail -20 /Users/kb20250422/Documents/dev/promaia-py/sync_cron.log
 ```
 
 ## Stopping the Cron Job
@@ -87,7 +87,7 @@ crontab -e
 Comment out the line by adding `#` at the beginning:
 
 ```bash
-# */30 * * * * /Users/kb20250422/Documents/dev/promaia/sync_all_databases.py
+# */30 * * * * /Users/kb20250422/Documents/dev/promaia-py/sync_all_databases.py
 ```
 
 Or remove the line entirely and save.

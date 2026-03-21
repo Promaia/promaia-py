@@ -16,7 +16,7 @@ This guide explains how Notion, Discord, and Gmail are integrated as content typ
 
 ### 1.1 Where Content Types Are Defined
 
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/__init__.py`
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/__init__.py`
 
 ```python
 ConnectorRegistry.register("notion", NotionConnector)
@@ -47,7 +47,7 @@ ConnectorRegistry.register("discord", DiscordConnector)
 
 ### 2.1 Base Connector Abstract Class
 
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/base.py`
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/base.py`
 
 Every content type must implement these core methods:
 
@@ -130,7 +130,7 @@ class SyncResult:
 
 ### 2.3 Connector Registration Pattern
 
-**Location:** `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/__init__.py`
+**Location:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/__init__.py`
 
 ```python
 class ConnectorRegistry:
@@ -156,7 +156,7 @@ class ConnectorRegistry:
 
 ### 3.1 Notion Connector Pattern
 
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/notion_connector.py` (1087 lines)
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/notion_connector.py` (1087 lines)
 
 **Key Patterns:**
 
@@ -191,7 +191,7 @@ class ConnectorRegistry:
 
 ### 3.2 Discord Connector Pattern
 
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/discord_connector.py` (1141 lines)
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/discord_connector.py` (1141 lines)
 
 **Key Patterns:**
 
@@ -227,7 +227,7 @@ class ConnectorRegistry:
 
 ### 3.3 Gmail Connector Pattern
 
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/gmail_connector.py` (1597 lines)
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/gmail_connector.py` (1597 lines)
 
 **Key Patterns:**
 
@@ -284,7 +284,7 @@ class ConnectorRegistry:
 
 ### 4.1 Hybrid Storage Architecture
 
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/storage/hybrid_storage.py`
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/hybrid_storage.py`
 
 **Key Concept:** Separate optimized table per content type instead of generic table
 
@@ -381,7 +381,7 @@ CREATE TABLE generic_content (
 
 ### 4.2 Dynamic Property Tables
 
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/storage/hybrid_storage.py` (Line 300+)
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/hybrid_storage.py` (Line 300+)
 
 Notion databases create dynamic tables for custom properties:
 
@@ -405,7 +405,7 @@ def sync_table_schema_with_properties(self, database_id, database_name,
 
 ### 4.3 Unified Content View
 
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/storage/hybrid_storage.py`
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/hybrid_storage.py`
 
 Creates a virtual unified view across all tables:
 
@@ -432,7 +432,7 @@ FROM (
 
 ### 5.1 ChromaDB Collections
 
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/storage/vector_db.py`
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/vector_db.py`
 
 **Two separate collections:**
 
@@ -453,7 +453,7 @@ FROM (
 
 ### 5.2 Content Chunking
 
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/storage/page_chunker.py`
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/page_chunker.py`
 
 **Purpose:** Break large documents into searchable chunks
 
@@ -471,7 +471,7 @@ FROM (
 
 ### 6.1 Hybrid Query Interface
 
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/storage/unified_query.py`
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/unified_query.py`
 
 **Query Pattern - Chat Integration:**
 
@@ -519,7 +519,7 @@ filters = {
 
 **Triggered by:** `maia database sync --source {database_id}`
 
-**Location:** `/Users/kb20250422/Documents/dev/promaia/promaia/cli/database_commands.py`
+**Location:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/cli/database_commands.py`
 
 **Steps:**
 
@@ -591,7 +591,7 @@ result.duration_seconds = 45.2
 Follow these steps to add conversation history support:
 
 #### Step 1: Create Connector Class
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/conversation_connector.py`
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/conversation_connector.py`
 
 ```python
 from .base import BaseConnector, QueryFilter, DateRangeFilter, SyncResult
@@ -718,7 +718,7 @@ class ConversationConnector(BaseConnector):
 
 #### Step 2: Register Connector
 
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/__init__.py`
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/__init__.py`
 
 Add:
 ```python
@@ -735,7 +735,7 @@ if conversation_available:
 
 #### Step 3: Create SQL Table
 
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/storage/hybrid_storage.py`
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/hybrid_storage.py`
 
 Add table in `init_database()`:
 
@@ -776,7 +776,7 @@ cursor.execute("""
 
 #### Step 4: Create Markdown Converter
 
-**File:** `/Users/kb20250422/Documents/dev/promaia/promaia/markdown/converter.py` (add function)
+**File:** `/Users/kb20250422/Documents/dev/promaia-py/promaia/markdown/converter.py` (add function)
 
 ```python
 def conversation_to_markdown(conversation: Dict[str, Any], 
@@ -953,29 +953,29 @@ def apply_property_filters(self, pages: List[Dict],
 ## 10. KEY FILES SUMMARY
 
 ### Core Architecture
-- `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/base.py` - 242 lines
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/base.py` - 242 lines
   - BaseConnector abstract class
   - QueryFilter, DateRangeFilter, SyncResult classes
   - ConnectorRegistry plugin system
 
 ### Content Type Implementations
-- `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/notion_connector.py` - 1087 lines
-- `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/gmail_connector.py` - 1597 lines
-- `/Users/kb20250422/Documents/dev/promaia/promaia/connectors/discord_connector.py` - 1141 lines
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/notion_connector.py` - 1087 lines
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/gmail_connector.py` - 1597 lines
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/connectors/discord_connector.py` - 1141 lines
 
 ### Storage
-- `/Users/kb20250422/Documents/dev/promaia/promaia/storage/hybrid_storage.py` - Central SQL registry
-- `/Users/kb20250422/Documents/dev/promaia/promaia/storage/unified_storage.py` - File saving logic
-- `/Users/kb20250422/Documents/dev/promaia/promaia/storage/unified_query.py` - Cross-type querying
-- `/Users/kb20250422/Documents/dev/promaia/promaia/storage/vector_db.py` - ChromaDB embeddings
-- `/Users/kb20250422/Documents/dev/promaia/promaia/storage/content_search.py` - Full-text search
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/hybrid_storage.py` - Central SQL registry
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/unified_storage.py` - File saving logic
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/unified_query.py` - Cross-type querying
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/vector_db.py` - ChromaDB embeddings
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/storage/content_search.py` - Full-text search
 
 ### CLI & Orchestration
-- `/Users/kb20250422/Documents/dev/promaia/promaia/cli/database_commands.py` - Sync commands
-- `/Users/kb20250422/Documents/dev/promaia/promaia/cli.py` - CLI entry point
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/cli/database_commands.py` - Sync commands
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/cli.py` - CLI entry point
 
 ### Markdown Conversion
-- `/Users/kb20250422/Documents/dev/promaia/promaia/markdown/converter.py` - Content → markdown
+- `/Users/kb20250422/Documents/dev/promaia-py/promaia/markdown/converter.py` - Content → markdown
 
 ---
 

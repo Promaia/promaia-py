@@ -463,6 +463,6 @@ pip install rich inquirer
 ## Contact
 
 For questions or issues, see:
-- Main README: `/Users/kb20250422/Documents/dev/promaia/README.md`
-- Daemon Setup: `/Users/kb20250422/Documents/dev/promaia/docs/DAEMON_SETUP.md`
-- Messaging Setup: `/Users/kb20250422/Documents/dev/promaia/docs/MESSAGING_SETUP.md`
+- Main README: `/Users/kb20250422/Documents/dev/promaia-py/README.md`
+- Daemon Setup: `/Users/kb20250422/Documents/dev/promaia-py/docs/DAEMON_SETUP.md`
+- Messaging Setup: `/Users/kb20250422/Documents/dev/promaia-py/docs/MESSAGING_SETUP.md`

@@ -46,7 +46,7 @@ This implementation addresses the key issues from the previous DuckDuckGo-based 
 
 ### 2. Run Setup Script
 ```bash
-cd /Users/kb20250422/Documents/dev/promaia/mcp_servers/search_server/
+cd /Users/kb20250422/Documents/dev/promaia-py/mcp_servers/search_server/
 python3 setup.py
 ```
 

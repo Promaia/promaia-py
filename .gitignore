@@ -337,6 +337,7 @@ chroma_db/
 
 # Chat history and context files
 .chat_history
+.database
 claude_project_id.txt
 sync_config.json
 

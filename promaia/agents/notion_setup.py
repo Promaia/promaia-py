@@ -465,31 +465,18 @@ async def setup_promaia_page(workspace: str) -> tuple[str, str]:
 
 def generate_agent_id(name: str, existing_agents: List[Any]) -> str:
     """
-    Generate unique agent ID from name.
+    Generate a stable UUID-based agent ID.
+
+    Agent IDs are random UUIDs so they never need to change when the
+    agent's display name is updated. This keeps file paths, SQLite
+    tables, and other derived identifiers stable across renames.
 
     Args:
-        name: Agent name (e.g., "Grace", "Daily Summary")
-        existing_agents: List of existing AgentConfig objects
+        name: Agent name (unused, kept for backwards compatibility)
+        existing_agents: List of existing AgentConfig objects (unused)
 
     Returns:
-        Unique agent ID (e.g., "grace", "daily-summary", "grace-2")
+        Random UUID string (e.g., "a1b2c3d4-e5f6-7890-abcd-ef1234567890")
     """
-    # Convert to lowercase, replace spaces/underscores with hyphens
-    agent_id = name.lower().replace(' ', '-').replace('_', '-')
-    # Remove any non-alphanumeric except hyphens
-    import re
-    agent_id = re.sub(r'[^a-z0-9-]', '', agent_id)
-
-    # Get existing IDs
-    existing_ids = {a.agent_id for a in existing_agents if hasattr(a, 'agent_id') and a.agent_id}
-
-    # Check uniqueness
-    if agent_id not in existing_ids:
-        return agent_id
-
-    # Add numeric suffix
-    suffix = 2
-    while f"{agent_id}-{suffix}" in existing_ids:
-        suffix += 1
-
-    return f"{agent_id}-{suffix}"
+    import uuid
+    return str(uuid.uuid4())
