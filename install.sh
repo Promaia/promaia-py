@@ -55,22 +55,25 @@ fi
 printf "  ${BLUE}OK${NC} docker daemon running\n\n"
 
 # ── Step 2: Image source detection ───────────────────────────────────
-if [ -f "Dockerfile" ] && [ -d "promaia" ]; then
-    printf "${YELLOW}Local source code detected.${NC}\n"
-    printf "Build the image locally? (y/n) [y]: "
-    read -r BUILD_LOCAL
-    BUILD_LOCAL="${BUILD_LOCAL:-y}"
+printf "${MAGENTA}Pulling pre-built image...${NC}\n"
+docker pull ghcr.io/promaia/promaia-py:latest
 
-    if [ "$BUILD_LOCAL" = "y" ] || [ "$BUILD_LOCAL" = "Y" ]; then
-        printf "\n${MAGENTA}Building image from local source...${NC}\n"
-        docker compose build maia
-    else
-        printf "\n${MAGENTA}Pulling pre-built image...${NC}\n"
-        docker pull ghcr.io/promaia/promaia-py:latest
+if [ -f "Dockerfile" ] && [ -d "promaia" ]; then
+    printf "\n${YELLOW}Local source code detected.${NC}\n"
+    printf "Mount local repo into the container (for development)? (y/n) [y]: "
+    read -r USE_LOCAL
+    USE_LOCAL="${USE_LOCAL:-y}"
+
+    if [ "$USE_LOCAL" = "y" ] || [ "$USE_LOCAL" = "Y" ]; then
+        # Set COMPOSE_FILE in root .env so docker compose uses the pilots overlay
+        if [ -f ".env" ] && grep -q '^COMPOSE_FILE=' .env; then
+            sed -i 's|^COMPOSE_FILE=.*|COMPOSE_FILE=docker-compose.pilots.yaml|' .env
+        else
+            echo 'COMPOSE_FILE=docker-compose.pilots.yaml' >> .env
+        fi
+        printf "  ${GREEN}OK${NC} set COMPOSE_FILE=docker-compose.pilots.yaml in .env\n"
+        printf "  Local source will be bind-mounted into containers.\n"
     fi
-else
-    printf "${MAGENTA}Pulling pre-built image...${NC}\n"
-    docker pull ghcr.io/promaia/promaia-py:latest
 fi
 printf "  ${GREEN}OK${NC} image ready\n\n"
 

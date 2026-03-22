@@ -54,34 +54,30 @@ try {
 Write-Host ""
 
 # ── Step 2: Image source detection ───────────────────────────────────
-if ((Test-Path "Dockerfile") -and (Test-Path "promaia" -PathType Container)) {
-    Write-Host "Local source code detected." -ForegroundColor Yellow
-    $buildLocal = Read-Host "Build the image locally? (y/n) [y]"
-    if (-not $buildLocal) { $buildLocal = "y" }
+Write-Host "Pulling pre-built image..." -ForegroundColor Magenta
+docker pull ghcr.io/promaia/promaia-py:latest
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  Pull failed." -ForegroundColor Red
+    exit 1
+}
 
-    if ($buildLocal -eq "y") {
-        Write-Host ""
-        Write-Host "Building image from local source..." -ForegroundColor Magenta
-        docker compose build maia
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "  Build failed." -ForegroundColor Red
-            exit 1
+if ((Test-Path "Dockerfile") -and (Test-Path "promaia" -PathType Container)) {
+    Write-Host ""
+    Write-Host "Local source code detected." -ForegroundColor Yellow
+    $useLocal = Read-Host "Mount local repo into the container (for development)? (y/n) [y]"
+    if (-not $useLocal) { $useLocal = "y" }
+
+    if ($useLocal -eq "y") {
+        # Set COMPOSE_FILE in root .env so docker compose uses the pilots overlay
+        $envFile = ".env"
+        if ((Test-Path $envFile) -and (Select-String -Path $envFile -Pattern '^COMPOSE_FILE=' -Quiet)) {
+            (Get-Content $envFile) -replace '^COMPOSE_FILE=.*', 'COMPOSE_FILE=docker-compose.pilots.yaml' |
+                Set-Content $envFile -Encoding UTF8
+        } else {
+            Add-Content $envFile 'COMPOSE_FILE=docker-compose.pilots.yaml'
         }
-    } else {
-        Write-Host ""
-        Write-Host "Pulling pre-built image..." -ForegroundColor Magenta
-        docker pull ghcr.io/promaia/promaia-py:latest
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "  Pull failed." -ForegroundColor Red
-            exit 1
-        }
-    }
-} else {
-    Write-Host "Pulling pre-built image..." -ForegroundColor Magenta
-    docker pull ghcr.io/promaia/promaia-py:latest
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  Pull failed." -ForegroundColor Red
-        exit 1
+        Write-Host "  OK set COMPOSE_FILE=docker-compose.pilots.yaml in .env" -ForegroundColor Green
+        Write-Host "  Local source will be bind-mounted into containers."
     }
 }
 Write-Host "  OK image ready" -ForegroundColor Green
