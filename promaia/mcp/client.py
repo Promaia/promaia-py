@@ -4,11 +4,8 @@ MCP (Model Context Protocol) client implementation.
 This module provides a client for connecting to MCP servers and retrieving
 their capabilities, tools, and resources for integration into Promaia chat sessions.
 """
-import asyncio
-import json
-import subprocess
 import logging
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from ..config.mcp_servers import McpServerConfig
 from .protocol import McpProtocolClient
@@ -62,13 +59,23 @@ class McpClient:
             # Create protocol client
             protocol_client = McpProtocolClient()
             
-            # Connect to the server with resolved environment variables
-            success = await protocol_client.connect(
-                command=config.command,
-                args=config.args,
-                working_dir=config.working_dir,
-                env=config.get_resolved_env()
-            )
+            # Connect to the server — transport-aware
+            connect_kwargs: Dict[str, Any] = {
+                "transport": config.transport,
+                "timeout": config.timeout,
+            }
+            if config.transport == "streamable_http":
+                connect_kwargs["url"] = config.url
+                # Pass env as headers if present (e.g. API key)
+                if config.env:
+                    connect_kwargs["headers"] = config.get_resolved_env()
+            else:
+                connect_kwargs["command"] = config.command
+                connect_kwargs["args"] = config.args
+                connect_kwargs["working_dir"] = config.working_dir
+                connect_kwargs["env"] = config.get_resolved_env()
+
+            success = await protocol_client.connect(**connect_kwargs)
             
             if success:
                 # Get capabilities from the real server

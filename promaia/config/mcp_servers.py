@@ -19,12 +19,14 @@ class McpServerConfig:
     """Configuration for an MCP server."""
     name: str
     description: str
-    command: List[str]  # Command to start the server
-    args: List[str] = None  # Additional arguments
+    command: List[str]  # Command to start the server (stdio only)
+    args: List[str] = None  # Additional arguments (stdio only)
     env: Dict[str, str] = None  # Environment variables
-    working_dir: str = None  # Working directory
+    working_dir: str = None  # Working directory (stdio only)
     timeout: int = 30  # Connection timeout in seconds
     enabled: bool = True
+    transport: str = "stdio"  # "stdio" or "streamable_http"
+    url: Optional[str] = None  # URL for streamable_http transport
 
     def __post_init__(self):
         """Initialize optional fields."""
@@ -101,7 +103,9 @@ class McpServerManager:
                     env=server_data.get('env', {}),
                     working_dir=server_data.get('working_dir'),
                     timeout=server_data.get('timeout', 30),
-                    enabled=server_data.get('enabled', True)
+                    enabled=server_data.get('enabled', True),
+                    transport=server_data.get('transport', 'stdio'),
+                    url=server_data.get('url'),
                 )
             
             logger.info(f"Loaded {len(self.servers)} MCP server configurations")
@@ -184,22 +188,27 @@ class McpServerManager:
             List of validation errors (empty if valid)
         """
         errors = []
-        
+
         if not config.name:
             errors.append("Server name is required")
-        
-        if not config.command:
-            errors.append("Server command is required")
-        
-        # Check if command exists
-        import shutil
-        if config.command and not shutil.which(config.command[0]):
-            errors.append(f"Command '{config.command[0]}' not found in PATH")
-        
-        # Validate working directory if specified
-        if config.working_dir and not os.path.isdir(config.working_dir):
-            errors.append(f"Working directory '{config.working_dir}' does not exist")
-        
+
+        if config.transport not in ("stdio", "streamable_http"):
+            errors.append(f"Unknown transport '{config.transport}' (expected 'stdio' or 'streamable_http')")
+
+        if config.transport == "streamable_http":
+            if not config.url:
+                errors.append("URL is required for streamable_http transport")
+        else:
+            if not config.command:
+                errors.append("Server command is required for stdio transport")
+
+            import shutil
+            if config.command and not shutil.which(config.command[0]):
+                errors.append(f"Command '{config.command[0]}' not found in PATH")
+
+            if config.working_dir and not os.path.isdir(config.working_dir):
+                errors.append(f"Working directory '{config.working_dir}' does not exist")
+
         return errors
 
 # Global MCP server manager instance
