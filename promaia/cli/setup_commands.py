@@ -146,7 +146,7 @@ async def _run_setup(args):
 
 
 def _auto_create_workspace(notion_integration, c=None):
-    """Create a workspace from the Notion connection, letting the user name it."""
+    """Create or confirm a workspace, letting the user name it."""
     import re
     import shutil as _shutil
     from rich.prompt import Prompt
@@ -160,19 +160,35 @@ def _auto_create_workspace(notion_integration, c=None):
 
     manager = get_workspace_manager()
 
-    # If workspace already exists, just confirm
-    if default_slug in manager.workspaces:
-        c.print(f"  [green]OK[/green] Workspace [bold]{default_slug}[/bold] ready")
+    # If a workspace already exists, show it and offer to rename
+    existing_names = list(manager.workspaces.keys())
+    if existing_names:
+        current = manager.default_workspace or existing_names[0]
+        new_name = Prompt.ask(
+            f"  Workspace name", default=current
+        ).strip().lower()
+        new_name = re.sub(r"[^a-z0-9]+", "-", new_name).strip("-") or current
+
+        if new_name != current:
+            # Rename: create new, move credentials, remove old
+            manager.add_workspace(new_name)
+            old_token = notion_integration._token_path(current)
+            new_token = notion_integration._token_path(new_name)
+            if old_token.exists() and not new_token.exists():
+                new_token.parent.mkdir(parents=True, exist_ok=True)
+                _shutil.copy2(old_token, new_token)
+            manager.remove_workspace(current)
+            manager.set_default_workspace(new_name)
+            c.print(f"  [green]OK[/green] Renamed workspace to [bold]{new_name}[/bold]")
+        else:
+            c.print(f"  [green]OK[/green] Workspace [bold]{current}[/bold] ready")
         return
 
+    # First time: ask for name with Notion workspace as suggestion
     slug = Prompt.ask(
         "  Workspace name", default=default_slug
     ).strip().lower()
     slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-") or default_slug
-
-    if slug in manager.workspaces:
-        c.print(f"  [green]OK[/green] Workspace [bold]{slug}[/bold] already exists")
-        return
 
     if manager.add_workspace(slug):
         # Copy global Notion credential to workspace-specific path
