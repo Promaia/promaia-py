@@ -39,21 +39,21 @@ Promaia provides a powerful CLI interface and Python API for syncing content fro
 ### Installation
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd promaia-py
-
 # macOS / Linux
-sh install.sh
+curl -fsSL https://raw.githubusercontent.com/Promaia/promaia-py/main/install.sh | sh
 
-# Windows (Command Prompt)
-install.bat
+# Windows (PowerShell)
+iwr -useb https://raw.githubusercontent.com/Promaia/promaia-py/main/install.ps1 | iex
 ```
+
+Developers who clone the repo can run the same `install.sh` from the repo root — it auto-detects the dev environment and offers to bind-mount local source.
+
+You can also specify a custom install location: `sh install.sh --location /opt/maia`
 
 The installer will:
 1. Pull the pre-built Docker image
-2. If it detects the local repo, offer to **bind-mount your source tree** into the container (for development — sets `COMPOSE_FILE=docker-compose.pilots.yaml`)
-3. Seed the `maia-data/` directory with default config files
+2. Scaffold config files from the image (or seed them locally if in a dev repo)
+3. If it detects the local repo, offer to **bind-mount your source tree** into the container (for development — sets `COMPOSE_FILE=docker-compose.pilots.yaml`)
 4. Optionally install the `maia` CLI wrapper to your PATH
 5. Launch the interactive **setup wizard** (`maia setup`) to configure API keys and integrations
 
