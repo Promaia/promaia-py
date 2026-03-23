@@ -112,13 +112,7 @@ async def _run_setup(args):
         console.print("\n[yellow]Setup cancelled.[/yellow]")
         return
 
-    # Step 3: Notion workspace (optional)
-    console.print()
-    if await _confirm("Configure a Notion workspace?"):
-        notion = get_integration("notion")
-        await configure_credential(notion, console)
-
-    # Step 4: Ensure config file
+    # Step 3: Ensure config file exists (needed before workspace creation)
     if ensure_config_file():
         console.print("[green]OK[/green] promaia.config.json ready")
     else:
@@ -127,11 +121,50 @@ async def _run_setup(args):
             "skipped config file creation"
         )
 
+    # Step 4: Notion connection + auto-workspace
+    console.print()
+    console.print("Connect a Notion workspace\n")
+    notion = get_integration("notion")
+    notion_success = await configure_credential(notion, console)
+
+    if notion_success:
+        _auto_create_workspace(notion)
+
     # Step 5: Next steps
     console.print()
     from_installer = os.environ.get("PROMAIA_FROM_INSTALLER") == "1"
     maia_installed = os.environ.get("PROMAIA_MAIA_INSTALLED") == "1"
     _print_next_steps(from_installer, maia_installed)
+
+
+def _auto_create_workspace(notion_integration):
+    """Create a workspace automatically from the Notion OAuth connection."""
+    import re
+    import shutil as _shutil
+    from promaia.config.workspaces import get_workspace_manager
+
+    # Get workspace name from validation (set during validate_credential)
+    raw_name = getattr(notion_integration, "_last_validated_name", None)
+    if not raw_name:
+        return
+
+    # Slugify: "Promaia Dev" -> "promaia-dev"
+    slug = re.sub(r"[^a-z0-9]+", "-", raw_name.lower()).strip("-")
+    if not slug:
+        slug = "default"
+
+    manager = get_workspace_manager()
+    if manager.add_workspace(slug, description=f"Notion workspace: {raw_name}"):
+        # Copy global Notion credential to workspace-specific path
+        global_token = notion_integration._token_path()
+        ws_token = notion_integration._token_path(slug)
+        if global_token.exists() and not ws_token.exists():
+            ws_token.parent.mkdir(parents=True, exist_ok=True)
+            _shutil.copy2(global_token, ws_token)
+
+        console.print(f"  [green]OK[/green] Created workspace [bold]{slug}[/bold] (set as default)")
+    elif slug in manager.workspaces:
+        console.print(f"  [dim]Workspace '{slug}' already exists[/dim]")
 
 
 def _print_banner():

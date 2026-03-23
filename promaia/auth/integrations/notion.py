@@ -220,6 +220,8 @@ class NotionIntegration(Integration):
             if resp.status_code == 200:
                 data = resp.json()
                 name = data.get("name", "Unknown")
+                # Store workspace name for callers that need it
+                self._last_validated_name = name
                 return True, f"Connected as {name}"
             elif resp.status_code == 401:
                 return False, "Invalid API key (authentication failed)"

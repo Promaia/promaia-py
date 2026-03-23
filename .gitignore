@@ -346,7 +346,7 @@ notion-journal/
 
 # Data directories (ignore all by default, selectively include what's needed)
 data/*/
-maia-data/
+maia-data
 maia-data-*/
 !data/koii_cms/
 
