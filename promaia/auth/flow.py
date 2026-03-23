@@ -42,6 +42,19 @@ async def configure_credential(
     """
     c = con or console
 
+    # Check for existing credential before prompting for auth mode
+    existing = integration.get_default_credential()
+    if existing:
+        c.print(f"\n[bold]{integration.display_name}[/bold]\n")
+        c.print("  [dim]Validating existing connection...[/dim]")
+        valid, msg = await integration.validate_credential(existing)
+        if valid:
+            c.print(f"  [green]OK[/green] {msg}")
+            return True
+        else:
+            c.print(f"  [yellow]Warning:[/yellow] {msg}")
+            c.print("  [dim]Existing credential invalid — reconfiguring...[/dim]\n")
+
     # Determine auth mode
     modes = integration.auth_modes
     if len(modes) > 1:
