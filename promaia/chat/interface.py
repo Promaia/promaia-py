@@ -36,10 +36,7 @@ from promaia.storage.chat_history import ChatHistoryManager
 from promaia.storage.recents import RecentsManager
 from promaia.utils.query_parsing import parse_vs_queries_with_params
 
-import warnings
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
-    import google.generativeai as genai
+import google.generativeai as genai
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -106,7 +103,7 @@ def _resolve_host_path(path: str) -> str:
 
 
 def _shell_unescape(path: str) -> str:
-    """Remove shell escape backslashes from a file path.
+    r"""Remove shell escape backslashes from a file path.
 
     Handles escaped spaces (\ ), equals (\=), parentheses, etc.
     Example: 'foo_ref_\\=bar.png' → 'foo_ref_=bar.png'

@@ -10,7 +10,7 @@ import re
 import warnings
 
 # Suppress google-generativeai deprecation noise (migration to google-genai tracked separately)
-warnings.filterwarnings("ignore", category=FutureWarning, message=r"google\.generativeai")
+warnings.filterwarnings("ignore", category=FutureWarning, module=r"google\.generativeai")
 # Suppress aiohttp unclosed session warnings (transitive dependency GC timing issue)
 warnings.filterwarnings("ignore", category=ResourceWarning, message=r"unclosed.*<aiohttp")
 from typing import List, Dict, Any, Optional

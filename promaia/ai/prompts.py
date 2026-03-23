@@ -537,7 +537,7 @@ def generate_database_preview(
             return ""  # No databases found
 
     except Exception as e:
-        logger.error(f"Error generating database preview: {e}")
+        logger.debug(f"Database preview unavailable: {e}")
         return ""
 
 

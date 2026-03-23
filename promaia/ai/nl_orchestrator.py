@@ -33,9 +33,8 @@ from .query_strategies import QueryStrategy, SQLQueryStrategy, VectorQueryStrate
 from anthropic import Anthropic
 from openai import OpenAI
 import warnings
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
-    import google.generativeai as genai
+warnings.filterwarnings("ignore", category=FutureWarning, module="google")
+import google.generativeai as genai
 
 
 class MockResponse:
