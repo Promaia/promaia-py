@@ -1,6 +1,9 @@
 """
 Main entry point for the promaia package.
 """
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module=r"google")
+
 # Import main from cli.py file (not the cli/ package directory)
 # NOTE: There's both promaia/cli.py and promaia/cli/ which causes import confusion
 # Use importlib to explicitly load the cli.py file without breaking sys.path
