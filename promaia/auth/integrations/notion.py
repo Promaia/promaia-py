@@ -219,10 +219,12 @@ class NotionIntegration(Integration):
                 resp = await client.get(url, headers=headers)
             if resp.status_code == 200:
                 data = resp.json()
-                name = data.get("name", "Unknown")
+                bot_name = data.get("name", "Unknown")
+                # The actual Notion workspace name is in bot.workspace_name
+                workspace_name = (data.get("bot") or {}).get("workspace_name") or bot_name
                 # Store workspace name for callers that need it
-                self._last_validated_name = name
-                return True, f"Connected as {name}"
+                self._last_validated_name = workspace_name
+                return True, f"Connected as {bot_name} (workspace: {workspace_name})"
             elif resp.status_code == 401:
                 return False, "Invalid API key (authentication failed)"
             elif resp.status_code == 403:

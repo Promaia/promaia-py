@@ -121,40 +121,43 @@ async def _run_setup(args):
             "skipped config file creation"
         )
 
-    # Step 4: Notion connection + auto-workspace
+    # Step 4: Notion connection
     console.print()
-    console.print("[bold]Connect a Notion workspace[/bold]\n")
+    console.print("[bold]Connect to Notion[/bold]\n")
     notion = get_integration("notion")
     notion_success = await configure_credential(notion, console)
 
+    # Step 5: Auto-create workspace from Notion connection
     if notion_success:
-        _auto_create_workspace(notion)
+        _auto_create_workspace(notion, console)
 
-    # Step 5: Google account (Calendar, Gmail, Drive)
+    # Step 6: Google account (Calendar, Gmail, Drive)
     console.print()
     console.print("[bold]Connect a Google account[/bold]  [dim](Calendar, Gmail, Drive)[/dim]\n")
     google = get_integration("google")
     await configure_credential(google, console)
 
-    # Step 6: Next steps
+    # Step 7: Next steps
     console.print()
     from_installer = os.environ.get("PROMAIA_FROM_INSTALLER") == "1"
     maia_installed = os.environ.get("PROMAIA_MAIA_INSTALLED") == "1"
     _print_next_steps(from_installer, maia_installed)
 
 
-def _auto_create_workspace(notion_integration):
+def _auto_create_workspace(notion_integration, c=None):
     """Create a workspace automatically from the Notion OAuth connection."""
     import re
     import shutil as _shutil
     from promaia.config.workspaces import get_workspace_manager
+
+    c = c or console
 
     # Get workspace name from validation (set during validate_credential)
     raw_name = getattr(notion_integration, "_last_validated_name", None)
     if not raw_name:
         return
 
-    # Slugify: "Promaia Dev" -> "promaia-dev"
+    # Slugify: "KOii" -> "koii"
     slug = re.sub(r"[^a-z0-9]+", "-", raw_name.lower()).strip("-")
     if not slug:
         slug = "default"
@@ -168,9 +171,9 @@ def _auto_create_workspace(notion_integration):
             ws_token.parent.mkdir(parents=True, exist_ok=True)
             _shutil.copy2(global_token, ws_token)
 
-        console.print(f"  [green]OK[/green] Created workspace [bold]{slug}[/bold] (set as default)")
+        c.print(f"\n  [green]OK[/green] Created workspace [bold]{slug}[/bold] (set as default)")
     elif slug in manager.workspaces:
-        console.print(f"  [dim]Workspace '{slug}' already exists[/dim]")
+        c.print(f"\n  [green]OK[/green] Workspace [bold]{slug}[/bold] ready")
 
 
 def _print_banner():

@@ -50,7 +50,12 @@ async def configure_credential(
         valid, msg = await integration.validate_credential(existing)
         if valid:
             c.print(f"  [green]OK[/green] {msg}")
-            return True
+            reconfigure = Prompt.ask(
+                "  Reconfigure? [y/N]", default="n"
+            ).strip().lower()
+            if reconfigure not in ("y", "yes"):
+                return True
+            c.print()
         else:
             c.print(f"  [yellow]Warning:[/yellow] {msg}")
             c.print("  [dim]Existing credential invalid — reconfiguring...[/dim]\n")
