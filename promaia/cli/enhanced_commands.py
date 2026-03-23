@@ -118,7 +118,7 @@ async def example_multi_source_queries():
     # maia chat --sources journal[date>-30d] cms[date>-7d,status=published]
     
     # Example 2: Write using specific date ranges from multiple sources
-    # maia write --sources journal[date>2024-01-01,date<2024-01-31] stories[team=alpha]
+    # maia write --sources journal[date>2024-01-01,date<2024-01-31] trass-stories[team=plush]
     
     # Example 3: Sync specific databases with filters
     # maia database sync --sources journal[date>-7d] cms[status=to_push]

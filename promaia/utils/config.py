@@ -27,19 +27,7 @@ def load_environment():
 
     # Load environment variables
     load_dotenv(dotenv_path=dotenv_path)
-
-    # Ensure default prompt files exist
-    from promaia.utils.env_writer import ensure_default_prompts
-    ensure_default_prompts()
-
-    # Temporary OpenRouter shim: if OpenRouter key is set but Anthropic isn't,
-    # use OpenRouter as the Anthropic backend via base_url redirect.
-    # TODO: replace with proper multi-provider routing
-    if os.getenv("OPENROUTER_API_KEY") and not os.getenv("ANTHROPIC_API_KEY"):
-        os.environ["ANTHROPIC_API_KEY"] = os.environ["OPENROUTER_API_KEY"]
-        os.environ["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api"
-        logger.info("Using OpenRouter as Anthropic backend (temporary shim)")
-
+    
     # Validate required API keys
     required_keys = {
         "OPENAI_API_KEY": "OpenAI",
@@ -64,15 +52,15 @@ def load_environment():
             available_optional.append(f"{service} ({key})")
     
     if missing_keys:
-        logger.debug("The following API keys are not set in your .env file:")
+        logger.warning("The following API keys are not set in your .env file:")
         for key in missing_keys:
-            logger.debug(f"  - {key}")
-        logger.debug("Some features may not work without these keys.")
-
+            logger.warning(f"  - {key}")
+        logger.warning("Some features may not work without these keys.")
+    
     if available_optional:
-        logger.debug("Optional AI services available:")
+        logger.info("Optional AI services available:")
         for key in available_optional:
-            logger.debug(f"  - {key}")
+            logger.info(f"  - {key}")
     
     return len(missing_keys) == 0
 

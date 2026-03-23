@@ -3,13 +3,13 @@ from fastapi.responses import JSONResponse
 from promaia.web.models import ChatMessageInput, ChatMessageOutput, InitialMessageOutput, ImageData, MessageContent
 from promaia.utils.env_writer import get_prompts_dir
 
-from promaia.nlq.prompts import create_system_prompt
-from promaia.utils.ai import debug_print, call_anthropic
+from promaia.ai.prompts import create_system_prompt
+from promaia.utils.ai import debug_print, call_anthropic_with_retry
 from promaia.utils.image_processing import (
     encode_image_from_bytes, format_image_for_openai, format_image_for_anthropic, 
     format_image_for_gemini, format_image_for_llama, is_vision_supported, get_model_image_limits
 )
-from promaia.nlq.models import GOOGLE_MODELS, ANTHROPIC_MODELS
+from promaia.ai.models import GOOGLE_MODELS, ANTHROPIC_MODELS
 from promaia.config.databases import get_database_manager
 from promaia.storage.files import load_database_pages_with_filters
 
@@ -29,7 +29,7 @@ import httpx
 router = APIRouter()
 
 # Initialize AI Clients
-from promaia.nlq.models import get_current_google_model
+from promaia.ai.models import get_current_google_model
 gemini_model_name = get_current_google_model()
 gemini_client_initialized = False
 anthropix_client = None
@@ -50,7 +50,7 @@ else:
 # Initialize Anthropic
 if os.getenv("ANTHROPIC_API_KEY"):
     try:
-        anthropix_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
+        anthropix_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
         debug_print("Anthropic API configured.")
     except Exception as e:
         debug_print(f"Error configuring Anthropic API: {e}. Anthropic features will be unavailable.")
@@ -137,7 +137,7 @@ async def get_initial_message():
         debug_print("Warning: create_system_prompt returned an empty string. Using fallback.")
         system_prompt_str = "You are a helpful AI."
 
-    initial_message = "Welcome! How can I help you today?"
+    initial_message = "Welcome to KOii's journal! How can I help you today?"
 
     if not gemini_client_initialized:
         debug_print("Gemini client not available (check GOOGLE_API_KEY and configuration).")
@@ -446,7 +446,7 @@ async def _handle_gemini(user_message: str, images: List[ImageData], message_his
         total_tokens = getattr(usage, 'total_token_count', 0)
         
         from promaia.utils.ai import calculate_ai_cost
-        from promaia.nlq.models import get_current_google_model
+        from promaia.ai.models import get_current_google_model
         # Use Gemini 3 Flash for cost calculation
         model_tier = get_current_google_model()
         cost_data = calculate_ai_cost(prompt_tokens, response_tokens, model_tier)
@@ -511,7 +511,7 @@ async def _handle_anthropic(user_message: str, images: List[ImageData], message_
         model_id = ANTHROPIC_MODELS.get("sonnet", "claude-sonnet-4-5")
 
     debug_print(f"Using Anthropic model: {model_id}")
-    response_content = await call_anthropic(
+    response_content = await call_anthropic_with_retry(
         anthropix_client,
         system_prompt,
         anthropic_messages,
@@ -707,7 +707,7 @@ async def get_available_models():
     }
 
     available_models = []
-    from promaia.nlq.models import get_model_display_name, ANTHROPIC_MODELS, GOOGLE_MODELS, LLAMA_MODELS
+    from promaia.ai.models import get_model_display_name, ANTHROPIC_MODELS, GOOGLE_MODELS, LLAMA_MODELS
     import os
 
     # Add all Anthropic models if client is available

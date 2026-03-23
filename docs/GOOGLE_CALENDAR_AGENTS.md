@@ -59,7 +59,7 @@ After adding an agent to your calendar, you'll see:
   Friday, January 23  •  9:00 AM  •  Weekly (Every Monday, Wednesday, Friday)
 
   Promaia Agent: daily-summary
-  Workspace: acme
+  Workspace: koii
   Databases: journal, gmail, discord
   Output: abc123...
 

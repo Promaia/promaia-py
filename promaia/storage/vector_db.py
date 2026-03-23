@@ -25,17 +25,13 @@ class VectorDBManager:
     One-to-one mapping: 1 page_id = 1 markdown file = 1 vector embedding
     """
     
-    def __init__(self, chroma_path: str = None):
+    def __init__(self, chroma_path: str = "chroma_db"):
         """
         Initialize ChromaDB client and embedding function.
-
+        
         Args:
-            chroma_path: Path to ChromaDB directory (not a file).
-                         Defaults to ``maia-data/chroma_db``.
+            chroma_path: Path to ChromaDB directory (not a file)
         """
-        if chroma_path is None:
-            from promaia.utils.env_writer import get_data_dir
-            chroma_path = str(get_data_dir() / "chroma_db")
         self.chroma_path = chroma_path
         self.collection_name = "promaia_content"
         
@@ -547,7 +543,7 @@ class VectorDBManager:
         
         Args:
             query_text: Search query text
-            filters: Metadata filters (e.g., {"workspace": "acme", "database_name": {"$in": [...]}})
+            filters: Metadata filters (e.g., {"workspace": "trass", "database_name": {"$in": [...]}})
             n_results: Maximum number of results to return
             min_similarity: Minimum similarity score (0-1, cosine distance)
             
@@ -633,7 +629,7 @@ class VectorDBManager:
 
 
 # Convenience function for easy import
-def get_vector_db_manager(chroma_path: str = None) -> VectorDBManager:
+def get_vector_db_manager(chroma_path: str = "chroma_db") -> VectorDBManager:
     """Get or create a VectorDBManager instance."""
     return VectorDBManager(chroma_path=chroma_path)
 

@@ -6,7 +6,7 @@ from .conversion_commands import add_conversion_commands
 # from .edit_commands import edit  # Using argparse handlers in main CLI instead
 
 def extract_database_names_from_sources(sources):
-    """Extract qualified database names from source selections (e.g., 'acme.journal:7' -> 'acme.journal')."""
+    """Extract qualified database names from source selections (e.g., 'koii.journal:7' -> 'koii.journal')."""
     database_names = []
     for source in sources:
         # Remove any day filters (e.g., ':7', ':all') first

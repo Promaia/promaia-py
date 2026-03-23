@@ -99,8 +99,8 @@ class DataMigrator:
             parts = old_path.parts
             if len(parts) >= 4 and parts[-2] == "gmail":
                 username = parts[-1]
-                # For Gmail, use 'default' workspace since we can't determine it from path
-                workspace = "default"  # Default workspace for Gmail migration
+                # For Gmail, we'll use 'koii' as default workspace since we can't determine it from path
+                workspace = "koii"  # Default workspace for Gmail migration
                 
                 new_path = get_data_subdir() / "gmail" / workspace
                 

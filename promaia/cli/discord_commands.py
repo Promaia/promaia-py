@@ -220,7 +220,7 @@ async def handle_discord_list_channels(args):
 async def handle_discord_sync(args):
     """Handle 'maia discord sync' command."""
     database_name = args.database
-    workspace = getattr(args, 'workspace', None)
+    workspace = getattr(args, 'workspace', 'koii')
     channel_id = getattr(args, 'channel_id', None)
     days = getattr(args, 'days', 7)
     limit = getattr(args, 'limit', 100)
@@ -1078,7 +1078,7 @@ def setup_discord_commands(subparsers):
     sync_parser = discord_subparsers.add_parser('sync', help='Sync Discord messages')
     sync_parser.add_argument('database', help='Database name to sync')
     sync_parser.add_argument('--channel-id', required=True, help='Discord channel ID to sync')
-    sync_parser.add_argument('--workspace', default=None, help='Workspace name')
+    sync_parser.add_argument('--workspace', default='koii', help='Workspace name')
     sync_parser.add_argument('--days', type=int, default=7, help='Number of days to sync back')
     sync_parser.add_argument('--limit', type=int, default=100, help='Maximum number of messages to sync')
     sync_parser.set_defaults(func=handle_discord_sync)

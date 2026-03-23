@@ -7,7 +7,7 @@ and sequential/parallel execution patterns.
 Example goals:
 - "Check in with team and summarize results at end of day"
 - "Review PRs, then write weekly summary"
-- "Have goal-setting conversation with Alice and record takeaways"
+- "Have goal-setting conversation with Koii and record takeaways"
 """
 
 import asyncio
@@ -39,7 +39,7 @@ class Orchestrator:
 
     Usage:
         orchestrator = Orchestrator(agent_config)
-        result = await orchestrator.run_goal("Check in with Alice about goals")
+        result = await orchestrator.run_goal("Check in with Koii about goals")
     """
 
     def __init__(
@@ -440,7 +440,7 @@ class Orchestrator:
         Returns:
             A natural opening message
         """
-        from promaia.nlq.nl_orchestrator import PromaiLLMAdapter
+        from promaia.ai.nl_orchestrator import PromaiLLMAdapter
 
         config = task.config
         user_name = config.get('user', 'there')

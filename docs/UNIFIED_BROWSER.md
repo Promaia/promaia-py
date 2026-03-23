@@ -18,27 +18,27 @@ The unified browser replaces the separate workspace and Discord browsers with a 
 
 ```bash
 # Browse entire workspace
-maia chat -b acme
+maia chat -b trass
 
 # Browse specific databases/channels (single -b flag)
-maia chat -b acme.tg acme.journal
+maia chat -b trass.tg trass.journal
 
 # Mixed browsing (workspace + specific database)
-maia chat -b acme acme.stories
+maia chat -b trass trass.stories
 
 # Multiple -b flags (equivalent to above)
-maia chat -b acme -b acme.stories
+maia chat -b trass -b trass.stories
 
 # Multiple databases with separate -b flags
-maia chat -b acme -b acme.tg
+maia chat -b trass -b trass.tg
 
 # Browse specific Discord database
-maia chat -b acme.tg
+maia chat -b trass.tg
 ```
 
 **Note**: Both syntaxes are supported:
-- Single `-b` with multiple arguments: `maia chat -b acme acme.tg`  
-- Multiple `-b` flags: `maia chat -b acme -b acme.tg`
+- Single `-b` with multiple arguments: `maia chat -b trass trass.tg`  
+- Multiple `-b` flags: `maia chat -b trass -b trass.tg`
 
 ### Edit Context Browse (`/e` → `Ctrl+B`)
 
@@ -52,23 +52,23 @@ Within any chat session:
 ### Display Format
 
 ```
-🔍 acme | Sources: 5 databases, 7 channels | Selected: 8/12 | ↑↓ Navigate SPACE Toggle ENTER Confirm ESC Cancel
+🔍 trass | Sources: 5 databases, 7 channels | Selected: 8/12 | ↑↓ Navigate SPACE Toggle ENTER Confirm ESC Cancel
 
 📄 Regular Sources:
-☑       acme.cpj:7
-☐       acme.epics:all
-☑       acme.gmail:7
-☑       acme.journal:20
-☑       acme.stories:7
+☑       trass.cpj:7
+☐       trass.epics:all
+☑       trass.gmail:7
+☑       trass.journal:20
+☑       trass.stories:7
 
 💬 Discord Sources:
-☑       acme.tg#announcements:7
-☐       acme.tg#customer-support:7
-☑       acme.tg#dev-work:30
-☑       acme.tg#maker-work:7
-☐       acme.tg#merch-work:7
-☑       acme.tg#plush-defects:7
-☑       acme.tg#plush-work:7
+☑       trass.tg#announcements:7
+☐       trass.tg#customer-support:7
+☑       trass.tg#koii-work:30
+☑       trass.tg#maker-work:7
+☐       trass.tg#merch-work:7
+☑       trass.tg#plush-defects:7
+☑       trass.tg#plush-work:7
 ```
 
 ### Controls
@@ -94,29 +94,29 @@ Within any chat session:
 ### Basic Workspace Browsing
 
 ```bash
-maia chat -b acme
+maia chat -b trass
 ```
-Opens browser showing all enabled databases in the `acme` workspace. Select desired sources and press Enter.
+Opens browser showing all enabled databases in the `trass` workspace. Select desired sources and press Enter.
 
 ### Mixed Source Selection
 
 ```bash
 # Single -b flag with multiple arguments
-maia chat -b acme.tg acme
+maia chat -b trass.tg trass
 
 # Multiple -b flags (equivalent)
-maia chat -b acme.tg -b acme
+maia chat -b trass.tg -b trass
 ```
 Opens browser showing:
-- All Discord channels from `acme.tg` 
-- All regular databases from `acme` workspace
+- All Discord channels from `trass.tg` 
+- All regular databases from `trass` workspace
 - Allows selection from both categories
 
 ### Edit Context Workflow
 
 ```bash
 # Start with initial selection
-maia chat -b acme.journal acme.tg
+maia chat -b trass.journal trass.tg
 
 # Later, edit your selection
 You: /e
@@ -128,9 +128,9 @@ You: /e
 ### Custom Day Values
 
 In the browser interface:
-1. Navigate to a source (e.g., `acme.journal:7`)
+1. Navigate to a source (e.g., `trass.journal:7`)
 2. Type a new value (e.g., `20`)
-3. The display updates to `acme.journal:20`
+3. The display updates to `trass.journal:20`
 4. Continue selecting other sources
 5. Press Enter to apply all changes
 
@@ -148,14 +148,14 @@ The unified browser remembers:
 
 ### Workspace Expansion
 
-When you specify a workspace name (e.g., `acme`), it automatically expands to include all enabled databases in that workspace:
+When you specify a workspace name (e.g., `trass`), it automatically expands to include all enabled databases in that workspace:
 
 ```bash
 # Either syntax works:
-maia chat -b acme.tg acme
-maia chat -b acme.tg -b acme
+maia chat -b trass.tg trass
+maia chat -b trass.tg -b trass
 
-# Both expand to: acme.tg, acme.journal, acme.stories, acme.gmail, acme.cpj, acme.epics
+# Both expand to: trass.tg, trass.journal, trass.stories, trass.gmail, trass.cpj, trass.epics
 ```
 
 ### Query Format Preservation
@@ -164,10 +164,10 @@ The browser preserves your original browse command format:
 
 ```bash
 # Original command preserved
-maia chat -b acme.tg acme
+maia chat -b trass.tg trass
 
 # NOT decomposed to individual -s flags
-# NOT: maia chat -s acme.journal:7 -s acme.stories:7 -f acme.tg:7:discord_channel_name=...
+# NOT: maia chat -s trass.journal:7 -s trass.stories:7 -f trass.tg:7:discord_channel_name=...
 ```
 
 ## Discord Channel Features
@@ -177,11 +177,11 @@ maia chat -b acme.tg acme
 Discord channels are automatically converted to database sources with channel filters:
 
 ```bash
-# Browser selection: acme.tg#customer-support:7, acme.tg#dev-work:30
+# Browser selection: trass.tg#customer-support:7, trass.tg#koii-work:30
 
 # Becomes internally:
-# - acme.tg:7 with filter discord_channel_name=customer-support  
-# - acme.tg:30 with filter discord_channel_name=dev-work
+# - trass.tg:7 with filter discord_channel_name=customer-support  
+# - trass.tg:30 with filter discord_channel_name=koii-work
 ```
 
 ### Multiple Channels, Same Database
@@ -189,9 +189,9 @@ Discord channels are automatically converted to database sources with channel fi
 You can select multiple channels from the same Discord database with different day values:
 
 ```
-☑ acme.tg#customer-support:3
-☑ acme.tg#dev-work:30  
-☑ acme.tg#announcements:7
+☑ trass.tg#customer-support:3
+☑ trass.tg#koii-work:30  
+☑ trass.tg#announcements:7
 ```
 
 Each creates a separate query with its own day range and channel filter.
@@ -219,7 +219,7 @@ Each creates a separate query with its own day range and channel filter.
 The unified browser works alongside natural language queries:
 
 ```bash
-maia chat -nl "recent updates" -b acme
+maia chat -nl "recent updates" -b trass
 ```
 
 ### Filters (`-f`)
@@ -227,7 +227,7 @@ maia chat -nl "recent updates" -b acme
 Browse selections work with additional filters:
 
 ```bash
-maia chat -b acme -f "status=published"  
+maia chat -b trass -f "status=published"  
 ```
 
 ### MCP Servers (`-mcp`)
@@ -235,7 +235,7 @@ maia chat -b acme -f "status=published"
 Browse selections can be combined with MCP server integration:
 
 ```bash
-maia chat -b acme -mcp files
+maia chat -b trass -mcp files
 ```
 
 ## Configuration
@@ -247,7 +247,7 @@ The unified browser uses your existing database configurations. Ensure your work
 maia database list
 
 # Configure workspace defaults
-maia workspace configure acme --default-days 7
+maia workspace configure trass --default-days 7
 ```
 
 ## Tips and Best Practices

@@ -118,7 +118,7 @@ class Planner:
     """
     AI-powered planner for goal decomposition.
 
-    Takes high-level goals like "Check in with Alice and summarize results"
+    Takes high-level goals like "Check in with Koii and summarize results"
     and decomposes them into executable tasks with proper dependencies.
     """
 
@@ -415,7 +415,7 @@ class Planner:
         This handles goals that don't match predefined patterns.
         """
         try:
-            from promaia.nlq.nl_orchestrator import PromaiLLMAdapter
+            from promaia.ai.nl_orchestrator import PromaiLLMAdapter
 
             model = PromaiLLMAdapter(client_type="auto")
 
@@ -524,7 +524,7 @@ Rules:
 - Tasks that write about, summarize, or log takeaways from a conversation MUST be type "synthesis" (not "tool_call"). Synthesis tasks receive the conversation transcript automatically.
 - Each task description should ONLY describe that task's job — do NOT include instructions for other tasks.
 - For conversation tasks, set "user" in config to the person's name from the team list. Set "channel" to "#channel-name" for channel posts instead of DMs.
-- For conversation tasks, put the detailed topic/instructions in config.topic. The "description" field is shown in the UI and should be SHORT and action-focused (e.g. "Have conversation with Alice"), NOT a restatement of the goal.
+- For conversation tasks, put the detailed topic/instructions in config.topic. The "description" field is shown in the UI and should be SHORT and action-focused (e.g. "Have conversation with Koii"), NOT a restatement of the goal.
 - The goal text is already displayed separately in the UI — task descriptions should NOT repeat it.
 
 Return a JSON array of tasks. Each task should have:
@@ -536,7 +536,7 @@ Return a JSON array of tasks. Each task should have:
 Example response:
 ```json
 [
-  {{"type": "conversation", "description": "Have conversation with Alice", "config": {{"user": "Alice", "topic": "check in and mention the project status"}}}},
+  {{"type": "conversation", "description": "Have conversation with Koii", "config": {{"user": "Koii", "topic": "check in and mention that snakes are wiggly"}}}},
   {{"type": "synthesis", "description": "Log takeaways to journal", "depends_on": [0]}}
 ]
 ```

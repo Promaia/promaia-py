@@ -370,7 +370,7 @@ class TagToChatLoop:
                 logger.warning("No ANTHROPIC_API_KEY, defaulting to answer_now")
                 return ("answer_now", None)
 
-            client = Anthropic(api_key=api_key, base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
+            client = Anthropic(api_key=api_key)
             response = await asyncio.to_thread(
                 client.messages.create,
                 model="claude-haiku-4-5-20251001",
@@ -718,7 +718,7 @@ class TagToChatLoop:
             if not api_key:
                 return
 
-            client = Anthropic(api_key=api_key, base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
+            client = Anthropic(api_key=api_key)
             title_resp = await asyncio.to_thread(
                 client.messages.create,
                 model="claude-haiku-4-5-20251001",

@@ -50,7 +50,7 @@ class DiscordConnector(BaseConnector):
         _ensure_discord_imported()
 
         self.server_id = config.get("database_id")  # Use server_id as database_id for consistency
-        self.workspace = config.get("workspace")
+        self.workspace = config.get("workspace", "koii")
 
         # Bot configuration
         self.bot_token = config.get("bot_token")

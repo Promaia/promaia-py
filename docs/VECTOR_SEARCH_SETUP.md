@@ -46,14 +46,14 @@ maia chat -vs 'product planning' -vs 'team discussions'
 maia chat -s journal:3 -vs 'canada project discussions'
 
 # Compare with SQL mode
-maia chat -nl acme gmail with term acme from last 1 week
+maia chat -nl trass gmail with term mgm from last 1 week
 ```
 
 ## 🎯 Understanding the Two Modes
 
 ### SQL Mode (`-nl`)
 - **Use for:** Exact text matching, specific terms
-- **Example:** `maia chat -nl acme gmail with term acme from last 1 week`
+- **Example:** `maia chat -nl trass gmail with term mgm from last 1 week`
 - **Benefits:** Finds ALL exact matches, learns from patterns
 - **Returns:** Everything that contains the exact terms
 

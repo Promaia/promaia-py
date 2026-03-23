@@ -121,19 +121,16 @@ def extract_env_var_references(data: Any) -> list:
     
     return list(set(var_names))  # Remove duplicates
 
-def load_env_file(env_file_path: str = None) -> bool:
+def load_env_file(env_file_path: str = ".env") -> bool:
     """
     Load environment variables from .env file.
-
+    
     Args:
-        env_file_path: Path to .env file (defaults to project .env via get_env_path())
-
+        env_file_path: Path to .env file
+        
     Returns:
         True if file was loaded successfully, False otherwise
     """
-    if env_file_path is None:
-        from promaia.utils.env_writer import get_env_path
-        env_file_path = str(get_env_path())
     try:
         from dotenv import load_dotenv
         load_dotenv(env_file_path)

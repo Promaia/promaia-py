@@ -31,7 +31,7 @@ class EmailClassifier:
         """
         Load classification prompt template from file.
 
-        Tries to load workspace-specific prompt first (e.g., maia_mail_classification_prompt_acme.md),
+        Tries to load workspace-specific prompt first (e.g., maia_mail_classification_prompt_trass.md),
         falls back to generic prompt if not found.
 
         Args:
@@ -48,9 +48,8 @@ class EmailClassifier:
         workspace_prompt_file = str(get_prompts_dir() / f"maia_mail_classification_prompt_{workspace}.md")
 
         try:
-            from promaia.mail.prompt_builder import strip_prompt_comments
             with open(workspace_prompt_file, 'r') as f:
-                prompt = strip_prompt_comments(f.read())
+                prompt = f.read()
                 self._prompt_cache[workspace] = prompt
                 logger.info(f"Loaded workspace-specific classification prompt for '{workspace}'")
                 return prompt
@@ -60,15 +59,13 @@ class EmailClassifier:
         # Fall back to generic prompt
         generic_prompt_file = str(get_prompts_dir() / "maia_mail_classification_prompt.md")
         try:
-            from promaia.mail.prompt_builder import strip_prompt_comments
             with open(generic_prompt_file, 'r') as f:
-                prompt = strip_prompt_comments(f.read())
+                prompt = f.read()
                 self._prompt_cache[workspace] = prompt
                 logger.warning(f"Using generic classification prompt for workspace '{workspace}' (no workspace-specific prompt found)")
                 return prompt
         except FileNotFoundError:
             logger.error(f"Classification prompt file not found: {generic_prompt_file}")
-            logger.error("Run 'maia mail setup' to configure prompts, or ensure default prompts are installed")
             raise
         except Exception as e:
             logger.error(f"Error loading classification prompt: {e}")
@@ -85,7 +82,7 @@ class EmailClassifier:
         
         # Try Anthropic first (preferred)
         if os.getenv("ANTHROPIC_API_KEY"):
-            self.ai_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
+            self.ai_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
             self.model_type = "anthropic"
             logger.info("Using Anthropic for email classification")
             return self.ai_client

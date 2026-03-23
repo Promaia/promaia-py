@@ -30,7 +30,7 @@ class DatabaseConfig:
         self.description = config_data.get("description", "")
         
         # Workspace assignment
-        self.workspace = config_data.get("workspace")
+        self.workspace = config_data.get("workspace", "koii")
 
         # Workspace scope: "single" (workspace-specific) or "all" (cross-workspace)
         # "all" makes content accessible from any workspace query (immutable content)
@@ -129,7 +129,7 @@ class DatabaseConfig:
         
     def get_qualified_name(self) -> str:
         """Get the workspace-qualified database name."""
-        if not self.workspace:
+        if self.workspace == "koii":
             return self.nickname
         else:
             # Check if nickname already starts with workspace prefix
@@ -345,8 +345,8 @@ class DatabaseManager:
         """Get a database configuration by its qualified name."""
         # First, try exact matches
         for db in self.databases.values():
-            # Check against the key in the config (e.g., "acme.journal")
-            # and the generated qualified name (e.g., "acme.journal")
+            # Check against the key in the config (e.g., "trass.journal")
+            # and the generated qualified name (e.g., "trass.journal")
             if db.name == qualified_name or db.get_qualified_name() == qualified_name:
                 return db
         
@@ -394,9 +394,9 @@ class DatabaseManager:
             self.databases["journal"] = DatabaseConfig("journal", {
                 "source_type": "notion",
                 "database_id": journal_db_id,
-                "nickname": "journal",
+                "nickname": "koii_journal",
                 "description": "Personal journal entries",
-                "output_directory": "data/md/notion/journal",
+                "output_directory": "data/koii/md/journal",
                 "default_days": 7,
                 "include_properties": False,
                 "save_markdown": True,
@@ -413,9 +413,9 @@ class DatabaseManager:
             self.databases["cms"] = DatabaseConfig("cms", {
                 "source_type": "notion",
                 "database_id": cms_db_id,
-                "nickname": "cms",
+                "nickname": "koii_cms",
                 "description": "Content management system",
-                "output_directory": "data/md/notion/cms",
+                "output_directory": "data/koii/md/cms",
                 "default_days": 30,
                 "include_properties": False,
                 "save_markdown": True,

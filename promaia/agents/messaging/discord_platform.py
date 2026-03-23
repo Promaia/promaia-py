@@ -127,6 +127,33 @@ class DiscordPlatform(BaseMessagingPlatform):
         except Exception as e:
             self.logger.warning(f"Failed to show typing indicator: {e}")
     
+    async def get_channel_info(self, channel_id: str) -> Dict[str, Any]:
+        """
+        Get Discord channel information.
+        
+        Args:
+            channel_id: Discord channel ID
+        
+        Returns:
+            Channel metadata
+        """
+        await self._ensure_client()
+        
+        try:
+            channel = await self.client.fetch_channel(int(channel_id))
+            
+            return {
+                'id': str(channel.id),
+                'name': channel.name,
+                'type': str(channel.type),
+                'guild_id': str(channel.guild.id) if hasattr(channel, 'guild') else None,
+                'guild_name': channel.guild.name if hasattr(channel, 'guild') else None
+            }
+        
+        except Exception as e:
+            self.logger.error(f"Error getting Discord channel info: {e}")
+            return {'id': channel_id, 'name': 'Unknown', 'error': str(e)}
+    
     async def get_user_info(self, user_id: str) -> Dict[str, Any]:
         """
         Get Discord user information.

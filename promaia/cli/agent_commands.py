@@ -19,7 +19,7 @@ async def handle_agent_submit(args):
     Submit a task for an external agent.
 
     Usage:
-        maia agent submit --type email_draft --workspace acme --instructions "Review this draft" --context '{"draft_id": "123"}'
+        maia agent submit --type email_draft --workspace koii --instructions "Review this draft" --context '{"draft_id": "123"}'
     """
     task_manager = TaskManager()
 
@@ -74,7 +74,7 @@ async def handle_agent_list(args):
 
     Usage:
         maia agent list
-        maia agent list --workspace acme
+        maia agent list --workspace koii
         maia agent list --status pending
         maia agent list --type email_draft
     """
@@ -184,7 +184,7 @@ async def handle_agent_pending(args):
 
     Usage:
         maia agent pending
-        maia agent pending --workspace acme
+        maia agent pending --workspace koii
     """
     task_manager = TaskManager()
 

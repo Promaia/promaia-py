@@ -76,7 +76,7 @@ class DatabaseRegistrySync:
             
             # 1. Check if it's a Discord database by looking for server ID patterns
             possible_discord_match = None
-            if '.' in orphaned_db_name:
+            if orphaned_db_name.startswith(('trass.', 'koii.')):
                 workspace, old_name = orphaned_db_name.split('.', 1)
                 
                 # Look for Discord databases in the same workspace

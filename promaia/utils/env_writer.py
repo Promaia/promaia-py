@@ -127,33 +127,6 @@ def ensure_env_file() -> Path:
     return env_path
 
 
-def ensure_default_prompts():
-    """Copy missing default prompt files into the prompts directory.
-
-    Checks each file in promaia/default_prompts/ and copies it to the
-    user's prompts dir if it doesn't already exist.  Never overwrites
-    existing files — user customizations are always preserved.
-    """
-    prompts_dir = get_prompts_dir()
-    defaults_dir = Path(__file__).resolve().parent.parent / "default_prompts"
-
-    if not defaults_dir.is_dir():
-        return
-
-    prompts_dir.mkdir(parents=True, exist_ok=True)
-
-    import logging
-    logger = logging.getLogger(__name__)
-
-    for src in defaults_dir.iterdir():
-        if not src.is_file():
-            continue
-        dest = prompts_dir / src.name
-        if not dest.exists():
-            shutil.copy2(src, dest)
-            logger.info(f"Copied default prompt: {src.name}")
-
-
 def parse_env_file(path: Path) -> List[Tuple[Optional[str], str]]:
     """
     Parse .env file into a list of (key, raw_line) tuples.

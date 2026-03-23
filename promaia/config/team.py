@@ -110,9 +110,9 @@ class TeamManager:
         team.sync_from_slack(bot_token)
 
         # Later, find a user
-        member = team.find_member("Alice")
-        if member:
-            slack_id = member.slack_id
+        koii = team.find_member("Koii")
+        if koii:
+            slack_id = koii.slack_id
     """
 
     def __init__(self, config_path: Optional[Path] = None):

@@ -5,7 +5,7 @@ External stdio MCP server that exposes query_sql, query_vector, and query_source
 to Claude Agent SDK.
 
 Usage:
-    python -m promaia.mcp.query_tools_server --workspace <name>
+    python -m promaia.mcp.query_tools_server --workspace koii
 """
 import asyncio
 import json
@@ -24,10 +24,10 @@ except ImportError:
     sys.exit(1)
 
 # Promaia imports
-from promaia.nlq.nl_processor_wrapper import process_natural_language_to_content, process_vector_search_to_content
+from promaia.ai.nl_processor_wrapper import process_natural_language_to_content, process_vector_search_to_content
 from promaia.storage.files import load_database_pages_with_filters
 from promaia.config.databases import get_database_config
-from promaia.nlq.prompts import format_context_data
+from promaia.ai.prompts import format_context_data
 
 # Configure logging
 logging.basicConfig(
@@ -53,7 +53,7 @@ async def list_tools() -> list[Tool]:
             name="query_sql",
             description="Execute SQL queries using natural language to search for exact text/keywords in content. "
                        "Use this for specific data retrieval when you know what you're looking for. "
-                       "Examples: 'Find emails from Alice', 'Show tasks assigned to Alice due this week'",
+                       "Examples: 'Find emails from Federico', 'Show tasks assigned to Alice due this week'",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -602,7 +602,7 @@ async def main():
     global WORKSPACE, AGENT_CONFIG
 
     parser = argparse.ArgumentParser(description="Promaia Query Tools MCP Server")
-    parser.add_argument("--workspace", required=True, help="Workspace name")
+    parser.add_argument("--workspace", required=True, help="Workspace name (e.g., 'koii')")
     parser.add_argument("--agent-id", required=False, help="Agent ID for permission enforcement")
     args = parser.parse_args()
 

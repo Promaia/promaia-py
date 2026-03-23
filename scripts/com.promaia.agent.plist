@@ -21,7 +21,7 @@
 
     <!-- Working Directory -->
     <key>WorkingDirectory</key>
-    <string>__HOME__</string>
+    <string>/Users/kb20250422</string>
 
     <!-- Environment Variables -->
     <key>EnvironmentVariables</key>
@@ -30,7 +30,7 @@
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
-        <string>__HOME__</string>
+        <string>/Users/kb20250422</string>
     </dict>
 
     <!-- Auto-Start Configuration -->
@@ -52,9 +52,9 @@
 
     <!-- Logging -->
     <key>StandardOutPath</key>
-    <string>__HOME__/.promaia/logs/daemon.log</string>
+    <string>/Users/kb20250422/.promaia/logs/daemon.log</string>
     <key>StandardErrorPath</key>
-    <string>__HOME__/.promaia/logs/daemon.error.log</string>
+    <string>/Users/kb20250422/.promaia/logs/daemon.error.log</string>
 
     <!-- Process Management -->
     <key>ProcessType</key>

@@ -56,7 +56,7 @@ Every source — Notion databases, Gmail threads, Discord channels, Slack conver
 | Layer | Purpose | Example |
 | --- | --- | --- |
 | Markdown | Human-readable content, git-friendly | Load 7 days of journal entries for an agent |
-| SQL | Structured metadata, fast filtering | "All emails from Alice about the launch" |
+| SQL | Structured metadata, fast filtering | "All emails from Federico about launch" |
 | Vector | Semantic search, meaning-based retrieval | "Find anything related to our pricing strategy" |
 
 When you run `maia chat -s journal:7 -s gmail:30`, SQL filters by date, markdown loads for context, and vector search catches anything you'd miss with keywords alone. When an agent runs, it assembles context from all three layers automatically.
@@ -142,7 +142,7 @@ Each agent is defined by:
 Here's what a real agent looks like. This is Grace, the Chief of Staff agent:
 
 ```
-Prompt:     chief_of_staff.md — "You are the Chief of Staff for the team.
+Prompt:     chief_of_staff.md — "You are the Chief of Staff for KOii's team.
             Your purpose is to ensure every team member thrives..."
 Databases:  journal:7, stories:all, gmail:7, discord:7
 Schedule:   Monday and Wednesday at 9:00 AM
@@ -183,7 +183,7 @@ Promaia:
   - Notion sync robustness improvements
 
   In Progress:
-  - Investment memo
+  - Investment memo (KOii)
   - Bill of materials integration (Mitchell)
 
   Want me to pull up details on any of these?
@@ -191,15 +191,15 @@ Promaia:
 
 ```
 You (in #engineering on Discord):
-  @promaia draft a recap email to Alice about the launch timeline
+  @promaia draft a recap email to Federico about the launch timeline
 
 Promaia:
-  I've pulled context from your last 12 email threads with Alice
+  I've pulled context from your last 12 email threads with Federico
   and this week's project updates. Here's a draft:
 
   Subject: Launch Timeline Update
 
-  Hey Alice,
+  Hey Federico,
 
   Quick update — we're tracking well for the 2-week window.
   The API work landed Wednesday and we're into integration testing...
@@ -280,9 +280,19 @@ Sources on the roadmap: Google Sheets, Google Drive, Linear, GitHub, Jira — an
 
 ## Who we are
 
-**Founder** — CEO. Founder-operator with a track record of taking products from zero to market across hardware, software, and e-commerce. Built the original Promaia codebase from the ground up: agent orchestration, connector architecture, hybrid storage, CLI, and chat interface.
+**KOii** — CEO. Founder-operator with a track record of taking products from zero to market across hardware, software, and e-commerce.
 
-**Rose** — CTO and cofounder. Core architecture and systems. Designed the Reflex memory model — the hierarchical attachment system that powers semantic expansion. Building the next-generation storage engine, the Google connector suite, and the database architecture that makes Promaia's retrieval work at scale.
+- Raised $750K to build Spriteley, a novel mobile-first 3D voxel avatar builder with a patented 3D modeling engine
+- Built Angl — picture frame greeting cards — from idea to successful e-commerce brand, handed off; now a source of passive income
+- Designed and brought Trass plush pets to market: $1.6M net revenue in November 2025 alone, 60K plushies shipped across 3 international markets
+- Built and maintains multiple ongoing hybrid (in-person/digital) communities, 100+ members
+- Built the original Promaia codebase — ~115K lines of Python — from the ground up: agent orchestration, connector architecture, hybrid storage, CLI, and chat interface
+
+KOii has shipped physical products, raised capital, and written production software. Promaia is the intersection of all three.
+
+**Rose** — CTO and cofounder. Core architecture and systems. Designed the Reflex memory model — the hierarchical attachment system that powers semantic expansion. Building the next-generation storage engine, the Google connector suite, and the database architecture that makes Promaia's retrieval work at scale. The "real next thing" is always Rose's domain.
+
+KOii handles what ships today. Rose architects what ships tomorrow. The division is clean: product and GTM on one side, deep systems engineering on the other.
 
 ---
 

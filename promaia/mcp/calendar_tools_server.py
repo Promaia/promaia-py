@@ -5,7 +5,7 @@ External stdio MCP server that exposes Google Calendar WRITE tools to Claude Age
 Read operations are handled through Promaia's unified query layer (if calendar is synced).
 
 Usage:
-    python -m promaia.mcp.calendar_tools_server --workspace acme --agent-id my-agent
+    python -m promaia.mcp.calendar_tools_server --workspace koii --agent-id my-agent
 """
 import asyncio
 import sys

@@ -606,11 +606,11 @@ class NotionConnector(BaseConnector):
                     
                     # Construct qualified content_type based on workspace
                     nickname = self.config.get("nickname", "unknown")
-                    workspace = self.config.get("workspace")
-                    if workspace:
-                        content_type = f"{workspace}.{nickname}"
-                    else:
+                    workspace = self.config.get("workspace", "koii")
+                    if workspace == "koii":
                         content_type = nickname
+                    else:
+                        content_type = f"{workspace}.{nickname}"
                     
                     # Always save in markdown format
                     # Create a safe filename from the title
@@ -742,7 +742,7 @@ class NotionConnector(BaseConnector):
                     "property": prop_name,
                     "checkbox": {"equals": value}
                 }
-            elif isinstance(value, bool) or prop_name.lower() in ["sync", "reference", "done"]:
+            elif isinstance(value, bool) or prop_name.lower() in ["sync", "reference", "done", "koii chat", "koii_chat"]:
                 # Assume checkbox for boolean values or known checkbox property names
                 return {
                     "property": prop_name,

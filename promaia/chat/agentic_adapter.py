@@ -409,7 +409,7 @@ def build_agentic_system_prompt(
             "- URL format: notion.so/workspace/Page-Title-<32-hex-chars>\n"
             "- The page ID is the last 32 hex characters, formatted as a UUID with dashes: "
             "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\n"
-            "- Example: notion.so/acme/One-Sheet-319d13396967806284d8e1ca1d90f9f5 "
+            "- Example: notion.so/koii/One-Sheet-319d13396967806284d8e1ca1d90f9f5 "
             "→ page_id = 319d1339-6967-8062-84d8-e1ca1d90f9f5\n\n"
             "### Guidelines\n\n"
             "- If the user provides a public URL, use web_fetch — don't search for it\n"
@@ -433,12 +433,35 @@ def build_agentic_system_prompt(
             "to share links — do not construct Notion URLs manually."
         )
 
+    # Build workflow awareness section
+    workflow_section = ""
+    try:
+        from promaia.chat.workflows import list_workflows
+        workflows = list_workflows()
+        if workflows:
+            lines = [
+                "## Configuration Interviews\n",
+                "You can guide the user through these configuration workflows. "
+                "When the user wants to set up or configure something, call "
+                "`start_interview` with the appropriate workflow name. "
+                "The interview system will provide step-by-step guidance.\n",
+                "Available workflows:",
+            ]
+            for wf in workflows:
+                lines.append(f"- **{wf['name']}**: {wf['description']}")
+            workflow_section = "\n".join(lines)
+    except Exception as e:
+        logger.debug(f"Could not load workflows: {e}")
+
     # Apply template substitutions
     filled = template.replace("{agent_name}", "Maia")
     filled = filled.replace("{platform}", "terminal")
     filled = filled.replace("{sources}", sources_list)
     filled = filled.replace("{tool_sections}", tool_sections)
     filled = filled.replace("{notion_guidance}", notion_guidance)
+
+    if workflow_section:
+        filled += "\n\n" + workflow_section
 
     return base_prompt + "\n\n" + filled
 
@@ -574,10 +597,14 @@ async def run_agentic_turn(
     mcp_tools: List[str],
     databases: List[str],
     print_text_fn: Callable[..., None],
+    workflow_prompt: Optional[str] = None,
 ) -> AgenticTurnResult:
     """Run an agentic turn using the full autonomous tool loop.
 
     This is the main bridge between interface.py and agentic_turn.py.
+
+    Args:
+        workflow_prompt: If set, prepended to system prompt for active interview workflows.
     """
     workspace = _resolve_workspace(workspace)
 
@@ -605,6 +632,10 @@ async def run_agentic_turn(
         system_prompt, workspace, mcp_tools, databases,
         agent_calendars=agent_calendars,
     )
+
+    # Inject active workflow prompt if in an interview
+    if workflow_prompt:
+        enhanced_prompt = workflow_prompt + "\n\n" + enhanced_prompt
 
     # Split prompt into base + context block for compact_context support
     context_marker = "\n\n## Context ("

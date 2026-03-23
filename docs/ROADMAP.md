@@ -81,7 +81,7 @@ A **planning layer** has been added so complex multi-part requests get decompose
 
 ## Vision Note
 
-From the founder's thought stash:
+From KOii's thought stash:
 
 > What if Promaia didn't just sync the content but it watched how users work and understood how they behave across all these platforms. Then it wouldn't just understand the content — it would understand the entire digital presence of work itself. I think we're about to realize that most work happens in people's heads.
 

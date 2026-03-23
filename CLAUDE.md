@@ -29,7 +29,7 @@
 ## Scratchspace
 
 - Use `scratchspace_*/` folders for temporary planning, research, and working documents
-- Name them descriptively: `scratchspace_merge_plan/`, `scratchspace_auth_refactor/`, etc.
+- Name them descriptively: `scratchspace_merge_koii/`, `scratchspace_auth_refactor/`, etc.
 - These folders are gitignored and will be deleted once the plan or implementation is complete
 - Do NOT store anything permanent here — use proper project paths for lasting artifacts
 

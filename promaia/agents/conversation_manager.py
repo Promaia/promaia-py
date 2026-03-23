@@ -646,12 +646,12 @@ class ConversationManager:
                     logger.error("ANTHROPIC_API_KEY not set")
                     return "I'm sorry, I couldn't generate a response (missing API key)."
 
-                client = Anthropic(api_key=api_key, base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
+                client = Anthropic(api_key=api_key)
                 response = await asyncio.to_thread(
                     client.messages.create,
                     model="claude-sonnet-4-6",
                     max_tokens=2048,
-                    system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+                    system=system_prompt,
                     messages=messages,
                 )
                 output = response.content[0].text if response.content else ""
@@ -818,7 +818,7 @@ class ConversationManager:
             executor = AgentExecutor(agent)
             initial_context = await executor._load_initial_context()
             if initial_context:
-                from promaia.nlq.prompts import format_context_data
+                from promaia.ai.prompts import format_context_data
                 formatted = format_context_data(initial_context)
                 # Trim only if approaching model context limit
                 # Claude Sonnet 4.6 has 200K token context (~700K chars)

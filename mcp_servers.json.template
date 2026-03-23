@@ -52,7 +52,7 @@
       "description": "Internet search capability using Perplexity AI with source citations",
       "command": [
         "python3",
-        "${PROJECT_ROOT}/mcp_servers/search_server/search_server.py"
+        "/Users/kb20250422/Documents/dev/promaia-py/mcp_servers/search_server/search_server.py"
       ],
       "args": [],
       "env": {

@@ -37,16 +37,16 @@ The unified browser provides an interactive interface for selecting sources from
 #### Basic Browse Commands
 ```bash
 # Browse entire workspace
-maia chat -b acme
+maia chat -b trass
 
 # Browse specific databases/channels
-maia chat -b acme.tg acme.journal
+maia chat -b trass.tg trass.journal
 
 # Mixed browsing (workspace + Discord)
-maia chat -b acme.tg acme
+maia chat -b trass.tg trass
 
 # Browse with default days
-maia chat -b acme:30
+maia chat -b trass:30
 ```
 
 #### Edit Context Integration
@@ -62,20 +62,20 @@ You: /e
 
 #### Unified Browser Interface
 ```
-🔍 acme | Sources: 5 databases, 7 channels | Selected: 8/12 | ↑↓ Navigate SPACE Toggle ENTER Confirm ESC Cancel
+🔍 trass | Sources: 5 databases, 7 channels | Selected: 8/12 | ↑↓ Navigate SPACE Toggle ENTER Confirm ESC Cancel
 
 📄 Regular Sources:
-☑       acme.cpj:7
-☐       acme.epics:all
-☑       acme.gmail:20        # ← Custom day value
-☑       acme.journal:7
-☑       acme.stories:7
+☑       trass.cpj:7
+☐       trass.epics:all
+☑       trass.gmail:20        # ← Custom day value
+☑       trass.journal:7
+☑       trass.stories:7
 
 💬 Discord Sources:
-☑       acme.tg#announcements:7
-☐       acme.tg#customer-support:7
-☑       acme.tg#dev-work:30    # ← Custom day value
-☑       acme.tg#maker-work:all  # ← Text day value
+☑       trass.tg#announcements:7
+☐       trass.tg#customer-support:7
+☑       trass.tg#koii-work:30    # ← Custom day value
+☑       trass.tg#maker-work:all  # ← Text day value
 ```
 
 #### Browser Controls
@@ -193,7 +193,7 @@ python sync_property_embeddings.py
 python sync_property_embeddings.py --dry-run
 
 # Sync specific workspace or database
-python sync_property_embeddings.py --workspace acme
+python sync_property_embeddings.py --workspace trass
 python sync_property_embeddings.py --database stories
 
 # Force re-embed (overwrite existing)

@@ -47,7 +47,7 @@ You MUST update your development config to use separate database paths:
   },
   "databases": {
     "journal": {
-      "markdown_directory": "data-dev/md/notion/acme/journal"
+      "markdown_directory": "data-dev/md/notion/koii/journal"
     }
     // ... update ALL markdown_directory paths to use data-dev/
   }
@@ -64,7 +64,8 @@ MAIA_DATA_DIR=data-dev
 MAIA_DEBUG=1
 
 # Use the same API keys but separate data
-NOTION_ACME_API_KEY=your_key_here
+NOTION_KOII_API_KEY=your_key_here
+NOTION_TRASS_API_KEY=your_key_here
 
 # Optional: Use different endpoints for testing
 # OPENAI_API_KEY=your_dev_key_here
@@ -78,7 +79,8 @@ MAIA_DATA_DIR=data
 MAIA_DEBUG=0
 
 # Production API keys
-NOTION_ACME_API_KEY=your_production_key_here
+NOTION_KOII_API_KEY=your_production_key_here
+NOTION_TRASS_API_KEY=your_production_key_here
 ```
 
 ## Workflow Best Practices

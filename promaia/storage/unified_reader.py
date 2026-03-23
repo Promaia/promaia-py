@@ -50,7 +50,7 @@ def read_content_by_type(
     Read content by content type (nickname) with format preference.
     
     Args:
-        content_type: Database nickname (e.g., "journal", "stories")
+        content_type: Database nickname (e.g., "koii_journal", "koii_cms")
         days: Number of days back to read
         preferred_format: 'json', 'markdown', or 'auto'
         
@@ -149,6 +149,8 @@ def _try_legacy_read(
     legacy_mapping = {
         'journal': 'journal',
         'cms': 'cms',
+        'koii_journal': 'journal',
+        'koii_cms': 'cms'
     }
     
     content_type = legacy_mapping.get(database_name, database_name)

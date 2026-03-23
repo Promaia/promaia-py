@@ -28,8 +28,8 @@ from pathlib import Path
 from promaia.storage.files import load_database_pages_with_filters
 from promaia.utils.config import load_environment, get_last_sync_time
 from promaia.config.workspaces import get_workspace_manager
-from promaia.nlq.prompts import create_system_prompt
-from promaia.nlq.models import LLAMA_MODELS, ANTHROPIC_MODELS
+from promaia.ai.prompts import create_system_prompt
+from promaia.ai.models import LLAMA_MODELS, ANTHROPIC_MODELS
 from promaia.utils.display import print_markdown, print_code, print_text, print_separator
 from promaia.utils.timezone_utils import now_utc
 from promaia.storage.chat_history import ChatHistoryManager
@@ -95,7 +95,7 @@ def _resolve_host_path(path: str) -> str:
         return path
     # Check if we're in Docker with the host home mount
     if os.path.isdir("/host_home"):
-        # /Users/<user>/Desktop/foo.jpg → /host_home/Desktop/foo.jpg
+        # /Users/kb20250422/Desktop/foo.jpg → /host_home/Desktop/foo.jpg
         parts = path.split("/", 3)  # ['', 'Users', 'username', 'rest/of/path']
         if len(parts) >= 4:
             return f"/host_home/{parts[3]}"
@@ -105,8 +105,8 @@ def _resolve_host_path(path: str) -> str:
 def _shell_unescape(path: str) -> str:
     """Remove shell escape backslashes from a file path.
 
-    Handles escaped spaces (\\ ), equals (\\=), parentheses, etc.
-    Example: 'foo_ref_\\\\=bar.png' -> 'foo_ref_=bar.png'
+    Handles escaped spaces (\ ), equals (\=), parentheses, etc.
+    Example: 'foo_ref_\\=bar.png' → 'foo_ref_=bar.png'
     """
     return re.sub(r'\\(.)', r'\1', path)
 
@@ -217,7 +217,7 @@ def save_browser_selection(sources):
 
 anthropic_client = None
 if os.getenv("ANTHROPIC_API_KEY"):
-    anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
+    anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 openai_client = None
 if os.getenv("OPENAI_API_KEY"):
@@ -226,7 +226,7 @@ if os.getenv("OPENAI_API_KEY"):
 gemini_client = None
 if os.getenv("GOOGLE_API_KEY"):
     genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-    from promaia.nlq.models import get_current_google_model, GOOGLE_MODELS
+    from promaia.ai.models import get_current_google_model, GOOGLE_MODELS
     # Use selected model ID if available, otherwise use default
     selected_model = os.getenv("SELECTED_MODEL_ID")
     if selected_model and "gemini" in selected_model.lower():
@@ -311,7 +311,7 @@ def _(event):
     event.app.exit(result='/browser-inline')
 
 session = PromptSession(
-    history=MessageOnlyHistory(str(_get_data_dir() / ".chat_history")),
+    history=MessageOnlyHistory('.chat_history'),
     multiline=True,  # Keep multiline for editing capabilities
     key_bindings=bindings
 )
@@ -474,7 +474,7 @@ llama_client = None
 def get_current_model_name():
     """Get the display name of the current model based on the current API."""
     global current_api
-    from promaia.nlq.models import get_model_display_name, ANTHROPIC_MODELS, GOOGLE_MODELS, LLAMA_MODELS
+    from promaia.ai.models import get_model_display_name, ANTHROPIC_MODELS, GOOGLE_MODELS, LLAMA_MODELS
 
     # Check if a specific model ID was selected
     selected_model_id = os.getenv("SELECTED_MODEL_ID")
@@ -488,7 +488,7 @@ def get_current_model_name():
     elif current_api == "openai":
         return get_model_display_name("gpt-4o", "openai")  # default display for OpenAI
     elif current_api == "gemini":
-        from promaia.nlq.models import get_current_google_model
+        from promaia.ai.models import get_current_google_model
         model_id = get_current_google_model()
         return get_model_display_name(model_id, "gemini")
     elif current_api == "llama":
@@ -500,10 +500,10 @@ def get_current_model_name():
 def switch_model(target_model=None):
     """Switch to a different AI model during chat session."""
     global current_api
-    from promaia.nlq.models import get_model_display_name, ANTHROPIC_MODELS, GOOGLE_MODELS
+    from promaia.ai.models import get_model_display_name, ANTHROPIC_MODELS, GOOGLE_MODELS
     
     # Build available models dynamically
-    from promaia.nlq.models import get_current_google_model
+    from promaia.ai.models import get_current_google_model
     # Build available models list dynamically
     available_choices = {}
     choice_num = 1
@@ -699,17 +699,17 @@ async def push_chat_to_notion(messages):
     await asyncio.sleep(1) # Simulate async operation
     return "Successfully pushed chat to Notion."
 
-def call_anthropic(client, system_prompt, messages, max_tokens=4096, temperature=0.7, max_retries=3):
-    """Call the Anthropic API with automatic model selection.
+def call_anthropic_with_retry(client, system_prompt, messages, max_tokens=4096, temperature=0.7, max_retries=3):
+    """Calls the Anthropic API with retry logic."""
+    from promaia.ai.models import ANTHROPIC_MODELS
 
-    Retries are handled by the SDK client (max_retries on the Anthropic constructor).
-    """
-    from promaia.nlq.models import ANTHROPIC_MODELS
-
+    # Determine which model to use based on current selection
+    # Check if a specific model ID was selected
     selected_model_id = os.getenv("SELECTED_MODEL_ID")
     if selected_model_id and "claude" in selected_model_id.lower():
         model_to_use = selected_model_id
     else:
+        # Fallback to checking display name
         current_model_name = get_current_model_name()
         if "Opus" in current_model_name:
             model_to_use = ANTHROPIC_MODELS.get("opus", "claude-opus-4-5")
@@ -717,15 +717,33 @@ def call_anthropic(client, system_prompt, messages, max_tokens=4096, temperature
             model_to_use = ANTHROPIC_MODELS.get("sonnet", "claude-sonnet-4-5")
 
     debug_print(f"Using Anthropic model: {model_to_use}")
+    
+    for attempt in range(max_retries):
+        try:
+            response = client.messages.create(
+                model=model_to_use,
+                system=system_prompt,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return response
+        except Exception as e:
+            # Check if this is a connection error - don't retry these
+            error_str = str(e).lower()
+            is_connection_error = any(keyword in error_str for keyword in ['connection', 'network', 'timeout', 'unreachable', 'failed to connect'])
 
-    response = client.messages.create(
-        model=model_to_use,
-        system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
-    return response
+            debug_print(f"Anthropic API call failed on attempt {attempt + 1}: {e}")
+
+            if is_connection_error:
+                # Don't retry connection errors - fail fast
+                debug_print("Connection error detected - not retrying")
+                raise
+
+            if attempt + 1 == max_retries:
+                return None
+            time.sleep(2) # Wait before retrying
+    return None
 
 def run_non_interactive_chat(messages: List[Dict[str, Any]], system_prompt: str, for_api: str):
     """Handles a single, non-interactive chat exchange."""
@@ -1192,7 +1210,7 @@ def build_system_prompt_with_mode(multi_source_data, mcp_tools_info, mode_system
     Returns:
         Complete system prompt with context
     """
-    from promaia.nlq.prompts import create_system_prompt, format_context_data
+    from promaia.ai.prompts import create_system_prompt, format_context_data
 
     if mode_system_prompt:
         # Check if mode handles its own context formatting
@@ -1212,7 +1230,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
     Main chat function with simplified, unified logic.
 
     Args:
-        mode: ChatMode instance for specialized behavior
+        mode: ChatMode instance for specialized behavior (e.g., DraftMode)
         mode_config: Additional mode configuration dict
         auto_respond_to_initial: If True, automatically trigger AI response to initial user message before interactive loop
         ... (other existing args)
@@ -1457,6 +1475,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
             parser.add_argument("-th", "--threshold", type=float, dest="threshold")
             parser.add_argument("-mcp", action="append", dest="mcp_servers")
             parser.add_argument("-dc", "--draft-context", action="store_true", dest="draft_context")
+
             parsed_args, unknown = parser.parse_known_args(args_list)
             
             # Extract parsed values
@@ -1513,6 +1532,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
         'agentic_mode': True,  # Agentic loop mode (multi-tool autonomous execution) — on by default
         'agentic_tools': [],  # Detected MCP tools for agentic mode
         'agentic_databases': [],  # Databases available for agentic mode
+        'active_workflow': None,  # Active interview workflow name (e.g. "database_add")
     }
     
     # Detect agentic tools and databases (agent mode is on by default for Anthropic)
@@ -1766,7 +1786,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                     
                     # If no explicit workspace, try to infer from original sources
                     if not workspace and context_state.get('sources'):
-                        # Try to extract workspace from source names (e.g., "acme.gmail" -> "acme")
+                        # Try to extract workspace from source names (e.g., "trass.gmail" -> "trass")
                         for source in context_state['sources']:
                             if '.' in source:
                                 potential_workspace = source.split('.')[0]
@@ -1799,7 +1819,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                     # Check if this is vector search mode
                     if context_state.get('is_vector_search'):
                         # Use vector search processor instead of natural language SQL query
-                        from promaia.nlq.nl_processor_wrapper import process_vector_search_to_content
+                        from promaia.ai.nl_processor_wrapper import process_vector_search_to_content
                         sql_query_content = process_vector_search_to_content(
                             nl_prompt,
                             workspace=None,  # Allow cross-workspace searches
@@ -2030,8 +2050,8 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                         filter_spec = parsed_filter['filter']
 
                         # Check if this is a complete channel filter specification (includes days and filter)
-                        # Format: acme.discord:7:discord_channel_name=general or pmslack:7:slack_channel_name=general
-                        # Also handle "all" day values: acme.discord:all:discord_channel_name=...
+                        # Format: trass.discord:7:discord_channel_name=koii-work or pmslack:7:slack_channel_name=general
+                        # Also handle "all" day values: trass.discord:all:discord_channel_name=...
                         source_parts = source.split(':')
                         source_has_days = (len(source_parts) > 1 and
                                          (source_parts[-1].isdigit() or source_parts[-1] == 'all'))
@@ -2083,7 +2103,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
         if current_sources:
             for source in current_sources:
                 # Skip sources that have Discord filters - they're handled separately
-                # Check if any discord_filter starts with this source (e.g., "acme.tg:14.")
+                # Check if any discord_filter starts with this source (e.g., "trass.tg:14.")
                 is_discord_source = any(df.startswith(source + '.') or df.startswith(source + ':') for df in discord_filters)
                 if is_discord_source:
                     debug_print(f"Skipping source {source} - handled in discord_filters")
@@ -2106,7 +2126,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                 # Build the source specification
                 if applicable_filters:
                     # Create a source spec with integrated filters
-                    # Check if source already has a day specification (e.g., "acme.discord:30")
+                    # Check if source already has a day specification (e.g., "trass.discord:30")
                     if ':' in source:
                         # Source already has day spec, just append filters
                         source_with_filters = f"{source}.{'.'.join(applicable_filters)}"
@@ -2119,9 +2139,9 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                     # No applicable filters, add source as-is
                     # Note: Discord filters with __COMPLEX_EXPR__ are handled separately below
                     # and should not be added here to avoid duplication
-                    # Extract qualified database name (before :) for deduplication
-                    source_db_name = source.split(':')[0]
-                    existing_db_names = [s.split(':')[0] for s in processed_sources]
+                    # Extract database name (before : or .) for deduplication
+                    source_db_name = source.split(':')[0].split('.')[0]
+                    existing_db_names = [s.split(':')[0].split('.')[0] for s in processed_sources]
                     if source_db_name not in existing_db_names:
                         processed_sources.append(source)
                         debug_print(f"Using unfiltered source: {source}")
@@ -2186,7 +2206,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                         source = parsed_filter['source']
                         filter_spec = parsed_filter['filter']
                         
-                        # Extract database and days from source (e.g., "acme.discord:7")
+                        # Extract database and days from source (e.g., "trass.discord:7")
                         source_parts = source.split(':')
                         database = source_parts[0]
                         days = int(source_parts[1]) if len(source_parts) > 1 and source_parts[1].isdigit() else None
@@ -2475,7 +2495,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
             if db_config and db_config.source_type == "discord":
                 # Check if we have channel-specific filters for this Discord source
                 # Match by database name (not including days) to handle day specification mismatches
-                db_base_name = db_config.name  # Get the full database name (e.g., 'acme.discord')
+                db_base_name = db_config.name  # Get the full database name (e.g., 'trass.yeeps_discord')
                 
                 # Find filters that match this database (regardless of day specification)
                 sync_discord_filters = []
@@ -2844,6 +2864,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                     dest="draft_context",
                     help="Enable draft context in draft chat"
                 )
+
                 # Parse the arguments
                 parsed_args = parser.parse_args(args_list)
 
@@ -2932,6 +2953,10 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
 
                             print_text(f"📚 Loaded {context.total_sources} sources from your knowledge base\n", style="green")
 
+                            # The user message has been added to the messages list
+                            # The AI will respond in the chat loop and decide whether to use <artifact> tags
+                            # based on maia_mail_prompt.md guidelines
+
                             # Return True to indicate context was updated
                             return True
 
@@ -3012,7 +3037,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
 
                             # If no explicit workspace, try to infer from original sources
                             if not workspace and context_state.get('sources'):
-                                # Try to extract workspace from source names (e.g., "acme.gmail" -> "acme")
+                                # Try to extract workspace from source names (e.g., "trass.gmail" -> "trass")
                                 for source in context_state['sources']:
                                     if '.' in source:
                                         potential_workspace = source.split('.')[0]
@@ -3151,7 +3176,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
 
                     # Process queries
                     try:
-                        from promaia.nlq.nl_processor_wrapper import process_vector_search_to_content
+                        from promaia.ai.nl_processor_wrapper import process_vector_search_to_content
 
                         combined_vs_content = {}
                         total_results = 0
@@ -3467,7 +3492,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
 
             # Extract components
             regular_sources = parsed_args.sources or []
-            # Flatten nested lists from multiple -b flags: [['acme'], ['acme.tg']] -> ['acme', 'acme.tg']
+            # Flatten nested lists from multiple -b flags: [['trass'], ['trass.tg']] -> ['trass', 'trass.tg']
             raw_browse = parsed_args.browse or []
             browse_databases = []
             if raw_browse:
@@ -3772,7 +3797,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                         print_text("💡 Using both vector search and browse mode - results will be combined", style="dim cyan")
 
                     try:
-                        from promaia.nlq.nl_processor_wrapper import process_vector_search_to_content
+                        from promaia.ai.nl_processor_wrapper import process_vector_search_to_content
 
                         # Process each vector search query and combine results
                         combined_vs_content = {}
@@ -4068,8 +4093,8 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                     
                     # Build the new browse scope - what databases/sources should be kept
                     # We need to check against the ACTUAL browse_selections, not all workspace databases
-                    # Because when you go from "-b acme acme.tg" to "-b acme", acme.tg should be removed
-                    # even though it's part of the acme workspace
+                    # Because when you go from "-b trass trass.tg" to "-b trass", trass.tg should be removed
+                    # even though it's part of the trass workspace
                     
                     from promaia.config.workspaces import get_workspace_manager
                     workspace_manager = get_workspace_manager()
@@ -4119,7 +4144,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                         filtered_filters = []
                         for filter_expr in current_filters:
                             # Check if this filter applies to a removed database
-                            # Filter format can be: "acme.tg:7:discord_channel_name=general"
+                            # Filter format can be: "trass.tg:7:discord_channel_name=koii-work"
                             filter_db = filter_expr.split(':')[0] if ':' in filter_expr else filter_expr
                             
                             # Check if this filter's database is in the removed set
@@ -4223,12 +4248,12 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                         if browse_selections:
                             for browse_sel in browse_selections:
                                 # Extract database name from selection, stripping day suffix
-                                # e.g., 'acme.cpj:7' -> 'acme.cpj', 'acme.tg#channel:7' -> 'acme.tg#channel'
+                                # e.g., 'trass.cpj:7' -> 'trass.cpj', 'trass.tg#channel:7' -> 'trass.tg#channel'
                                 if '#' in browse_sel:
-                                    # Discord channel: acme.tg#channel:7
+                                    # Discord channel: trass.tg#channel:7
                                     base_name = browse_sel.rsplit(':', 1)[0] if ':' in browse_sel else browse_sel
                                 else:
-                                    # Regular database: acme.cpj:7
+                                    # Regular database: trass.cpj:7
                                     base_name = browse_sel.split(':')[0] if ':' in browse_sel else browse_sel
                                 sources_to_keep.add(base_name.lower())
 
@@ -4333,7 +4358,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                     if stored_browser_selections is None:
                         stored_browser_selections = []
                     
-                    # For workspace browse commands (like -b acme), we want to default to ALL workspace sources selected
+                    # For workspace browse commands (like -b trass), we want to default to ALL workspace sources selected
                     # BUT only if there are no existing browser selections (for persistence)
                     # Check if this is a workspace browse command by looking at the original format
                     is_workspace_browse = False
@@ -4353,10 +4378,10 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                             for sel in stored_browser_selections:
                                 # Extract the database name from the selection
                                 if '#' in sel:
-                                    # Discord channel: acme.tg#channel-name:7
+                                    # Discord channel: trass.tg#channel-name:7
                                     db_name = sel.split('#')[0]
                                 else:
-                                    # Regular database: acme.journal:7
+                                    # Regular database: trass.journal:7
                                     db_name = sel.split(':')[0]
                                 
                                 # Only include if it belongs to the current workspace
@@ -4412,10 +4437,10 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                                 
                                 # Extract the database name from the selection
                                 if '#' in sel:
-                                    # Discord channel: acme.tg#channel-name:7
+                                    # Discord channel: trass.tg#channel-name:7
                                     db_name = sel.split('#')[0]
                                 else:
-                                    # Regular database: acme.journal:7
+                                    # Regular database: trass.journal:7
                                     db_name = sel.split(':')[0]
                                 
                                 # Check if this selection matches the current browse scope
@@ -4843,7 +4868,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
 
                     if parsed.vector_searches:
                         try:
-                            from promaia.nlq.nl_processor_wrapper import process_vector_search_to_content
+                            from promaia.ai.nl_processor_wrapper import process_vector_search_to_content
                             combined_vs = {}
                             for vs_prompt in parsed.vector_searches:
                                 vs_result = process_vector_search_to_content(vs_prompt, workspace=None, verbose=True)
@@ -5131,7 +5156,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
                             # Resolve to the same qualified name the browser uses
                             from promaia.config.databases import get_database_config
                             try:
-                                # db_key is like "workspace.stories" — extract parts
+                                # db_key is like "koii.stories" — extract parts
                                 parts = db_key.split('.', 1)
                                 ws_part = parts[0] if len(parts) > 1 else ''
                                 name_part = parts[1] if len(parts) > 1 else parts[0]
@@ -5337,6 +5362,56 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
     if auto_respond_to_initial and messages and messages[-1].get('role') == 'user':
         logger.info("🤖 Auto-responding to initial user message")
 
+        # Log the draft context for debugging
+        if draft_id and mode:
+            try:
+                from datetime import datetime
+                from promaia.chat.modes import DraftMode
+
+                if isinstance(mode, DraftMode):
+                    # Create log directory if it doesn't exist
+                    log_dir = str(_get_data_dir() / 'context_logs' / 'mail_draft_logs')
+                    os.makedirs(log_dir, exist_ok=True)
+
+                    # Generate filename with timestamp and draft subject
+                    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+                    draft_subject = mode.draft_data.get('inbound_subject', 'no_subject')
+                    # Clean subject for filename
+                    safe_subject = "".join(c if c.isalnum() or c in (' ', '_', '-') else '_' for c in draft_subject)
+                    safe_subject = safe_subject.replace(' ', '_')[:50]  # Limit length
+                    filename = f"{timestamp}_initial_draft_{safe_subject}.txt"
+                    log_path = os.path.join(log_dir, filename)
+
+                    # Write log
+                    with open(log_path, 'w', encoding='utf-8') as f:
+                        f.write("=" * 80 + "\n")
+                        f.write("DRAFT CONTEXT LOG - AUTO-RESPONSE\n")
+                        f.write("=" * 80 + "\n\n")
+                        f.write(f"Draft ID: {draft_id}\n")
+                        f.write(f"Workspace: {workspace}\n")
+                        f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+                        f.write(f"Model: {current_api}\n\n")
+
+                        f.write("=" * 80 + "\n")
+                        f.write("SYSTEM PROMPT\n")
+                        f.write("=" * 80 + "\n\n")
+                        f.write(system_prompt)
+                        f.write("\n\n")
+
+                        f.write("=" * 80 + "\n")
+                        f.write("MESSAGES\n")
+                        f.write("=" * 80 + "\n\n")
+                        for i, msg in enumerate(messages):
+                            f.write(f"Message {i+1} - {msg.get('role', 'unknown')}:\n")
+                            f.write(f"{msg.get('content', '')}\n\n")
+
+                        f.write("=" * 80 + "\n")
+
+                    logger.info(f"📝 Draft context log saved to: {log_path}")
+
+            except Exception as e:
+                logger.error(f"Failed to save draft context log: {e}", exc_info=True)
+
         # The user message is already in messages list, now call the AI
         try:
             # Check for images in current message
@@ -5384,8 +5459,8 @@ You are in email composition mode. Gmail threads are loaded in your context - se
    - Omit Thread and Message-ID if sending a new email
 
 4. **Example**:
-   User: "send this doc to bob about UK import"
-   → Search Gmail for threads with "bob", "UK", "import"
+   User: "send this doc to Fionn about UK import"
+   → Search Gmail for threads with "Fionn", "UK", "import"
    → Find matching thread, extract subject/thread_id/message_id
    → Create artifact with exact subject and IDs from Gmail
    → User types /send when ready
@@ -5468,13 +5543,13 @@ The user will type `/send` to trigger the actual sending process.
 
                     if current_message_images:
                         formatted_messages = _format_anthropic_with_images(messages, current_message_images)
-                        response = call_anthropic(anthropic_client, current_system_prompt, formatted_messages, temperature=current_temperature)
+                        response = call_anthropic_with_retry(anthropic_client, current_system_prompt, formatted_messages, temperature=current_temperature)
                     else:
                         clean_messages = []
                         for msg in messages:
                             clean_msg = {"role": msg["role"], "content": msg["content"]}
                             clean_messages.append(clean_msg)
-                        response = call_anthropic(anthropic_client, current_system_prompt, clean_messages, temperature=current_temperature)
+                        response = call_anthropic_with_retry(anthropic_client, current_system_prompt, clean_messages, temperature=current_temperature)
 
                     if response and response.content:
                         response_text = response.content[0].text
@@ -5807,6 +5882,16 @@ The user will type `/send` to trigger the actual sending process.
                 context_state['browse_selections'] = []
                 total_pages_loaded = 0
                 print_text("✅ Context cleared. You're now in a blank slate.", style="green")
+                continue
+
+            # /done - Exit active interview workflow
+            if user_input.strip().lower() == '/done':
+                if context_state.get('active_workflow'):
+                    wf_name = context_state['active_workflow']
+                    context_state['active_workflow'] = None
+                    print_text(f"Exited {wf_name} interview.", style="yellow")
+                else:
+                    print_text("No active interview to exit.", style="dim")
                 continue
 
             # /mute - Mute context (temporarily hide but keep loaded)
@@ -6485,6 +6570,13 @@ The user will type `/send` to trigger the actual sending process.
                             print_text(f"✅ Artifact #{artifact_num} updated successfully!", style="green")
                             print()
 
+                            # Save chat messages if in draft mode
+                            if draft_id and mode:
+                                try:
+                                    mode.draft_manager.save_chat_messages(mode.draft_id, messages)
+                                    logger.info(f"💾 Saved {len(messages)} messages after manual edit")
+                                except Exception as e:
+                                    logger.error(f"Failed to save after manual edit: {e}")
                         else:
                             # User cancelled
                             print()
@@ -7109,7 +7201,7 @@ The user will type `/send` to trigger the actual sending process.
                                 print_text(f"   • {account['display']}", style="dim green")
 
                             print_text("\n💡 You can now drop files and say things like:", style="cyan")
-                            print_text("   'send this to bob' or 'email this report to the team'", style="dim cyan")
+                            print_text("   'send this to fionn' or 'email this report to the team'", style="dim cyan")
                             print_text("   When ready, type /send to send the email", style="dim cyan")
                         else:
                             print_text("⚠️  Failed to load Gmail context, but mail mode is enabled", style="yellow")
@@ -7553,7 +7645,7 @@ The user will type `/send` to trigger the actual sending process.
 
                         # Known command prefixes
                         known_commands = {'quit', 'debug', 'push', 's', 'e', 'help', 'm', 'artifact',
-                                        'edit', 'image', 'model', 'temp', 'save', 'mcp'}
+                                        'edit', 'image', 'model', 'temp', 'save', 'mcp', 'done'}
                         # Check if it matches any known command
                         if command_part.lower() in known_commands:
                             is_command = True
@@ -7862,6 +7954,18 @@ The user will type `/send` when ready to send the email.
                                 cm["images"] = msg["images"]
                             clean_msgs.append(cm)
 
+                        # Get active workflow prompt if in an interview
+                        _workflow_prompt = None
+                        _active_wf = context_state.get('active_workflow')
+                        if _active_wf:
+                            try:
+                                from promaia.chat.workflows import get_workflow
+                                wf = get_workflow(_active_wf)
+                                if wf:
+                                    _workflow_prompt = wf["system_prompt_insert"]
+                            except Exception:
+                                pass
+
                         result = asyncio.run(run_agentic_turn(
                             system_prompt=current_system_prompt,
                             messages=clean_msgs,
@@ -7869,7 +7973,100 @@ The user will type `/send` when ready to send the email.
                             mcp_tools=context_state.get('agentic_tools', []),
                             databases=context_state.get('agentic_databases', []),
                             print_text_fn=print_text,
+                            workflow_prompt=_workflow_prompt,
                         ))
+
+                        # Handle signals in a loop (signals can chain: interview_start → show_selection)
+                        from promaia.chat.workflows import get_workflow as _get_wf
+                        _signal_iterations = 0
+                        while result.signal and _signal_iterations < 5:
+                            _signal_iterations += 1
+                            sig_type = result.signal.get("type")
+
+                            if sig_type == "interview_start":
+                                wf_name = result.signal.get("workflow", "")
+                                context_state['active_workflow'] = wf_name
+                                logger.info(f"Interview started: {wf_name}")
+                                wf = _get_wf(wf_name)
+                                _workflow_prompt = wf["system_prompt_insert"] if wf else None
+                                # Re-run with the interview prompt active
+                                result = asyncio.run(run_agentic_turn(
+                                    system_prompt=current_system_prompt,
+                                    messages=clean_msgs,
+                                    workspace=context_state.get('workspace') or context_state.get('resolved_workspace') or "",
+                                    mcp_tools=context_state.get('agentic_tools', []),
+                                    databases=context_state.get('agentic_databases', []),
+                                    print_text_fn=print_text,
+                                    workflow_prompt=_workflow_prompt,
+                                ))
+                                continue  # Check new result for signals
+
+                            elif sig_type == "show_selection":
+                                try:
+                                    from promaia.chat.inline_selector import show_inline_selection
+                                    payload = result.signal.get("payload", {})
+                                    logger.info(f"Rendering show_selection: {payload.get('title')}, {len(payload.get('items', []))} items")
+                                    print_text("")  # blank line before widget
+                                    sel_result = asyncio.run(show_inline_selection(
+                                        title=payload.get("title", "Select"),
+                                        items=payload.get("items", []),
+                                        multi_select=payload.get("multi_select", False),
+                                        pre_selected=payload.get("pre_selected"),
+                                    ))
+                                    logger.info(f"Selection result: cancelled={sel_result.cancelled}, selected={sel_result.selected}")
+                                    if sel_result.cancelled:
+                                        messages.append({
+                                            "role": "user",
+                                            "content": "[Selection cancelled by user. Do not show the selection again.]"
+                                        })
+                                    else:
+                                        # Map IDs back to labels for clarity
+                                        id_to_label = {
+                                            item.get("id", str(i)): item.get("label", item.get("id", str(i)))
+                                            for i, item in enumerate(payload.get("items", []))
+                                        }
+                                        selected_labels = [id_to_label.get(sid, sid) for sid in sel_result.selected]
+                                        selected_ids_str = ", ".join(sel_result.selected)
+                                        selected_names_str = ", ".join(selected_labels)
+                                        messages.append({
+                                            "role": "user",
+                                            "content": (
+                                                f"[Selection complete. User selected {len(sel_result.selected)} items: "
+                                                f"{selected_names_str}. "
+                                                f"IDs: {selected_ids_str}. "
+                                                f"Proceed with saving this selection. Do NOT show the selection widget again.]"
+                                            )
+                                        })
+                                    # Rebuild clean_msgs and re-run
+                                    clean_msgs = []
+                                    for msg in messages:
+                                        cm = {"role": msg["role"], "content": msg["content"]}
+                                        if msg.get("images"):
+                                            cm["images"] = msg["images"]
+                                        clean_msgs.append(cm)
+                                    result = asyncio.run(run_agentic_turn(
+                                        system_prompt=current_system_prompt,
+                                        messages=clean_msgs,
+                                        workspace=context_state.get('workspace') or context_state.get('resolved_workspace') or "",
+                                        mcp_tools=context_state.get('agentic_tools', []),
+                                        databases=context_state.get('agentic_databases', []),
+                                        print_text_fn=print_text,
+                                        workflow_prompt=_workflow_prompt,
+                                    ))
+                                    continue  # Check new result for signals
+                                except Exception as sel_err:
+                                    logger.error(f"Inline selector error: {sel_err}", exc_info=True)
+                                    print_text(f"\n⚠️  Selection widget error: {sel_err}", style="bold red")
+                                    print_text("   Falling back — please type your selection manually.\n", style="dim yellow")
+                                    break
+
+                            elif sig_type == "interview_end":
+                                logger.info(f"Interview completed: {context_state.get('active_workflow')}")
+                                context_state['active_workflow'] = None
+                                break
+
+                            else:
+                                break
 
                         response_text = result.response_text
                         total_tokens = result.input_tokens + result.output_tokens
@@ -7915,7 +8112,7 @@ The user will type `/send` when ready to send the email.
 
                             if current_message_images:
                                 formatted_messages = _format_anthropic_with_images(messages, current_message_images)
-                                regen_response = call_anthropic(anthropic_client, updated_system_prompt, formatted_messages, temperature=current_temperature)
+                                regen_response = call_anthropic_with_retry(anthropic_client, updated_system_prompt, formatted_messages, temperature=current_temperature)
                             else:
                                 clean_messages = []
                                 for msg in messages:
@@ -7929,7 +8126,7 @@ The user will type `/send` when ready to send the email.
                                     print_text("⚠️  Cannot regenerate response with invalid message history", style="yellow")
                                     return None
 
-                                regen_response = call_anthropic(anthropic_client, updated_system_prompt, clean_messages, temperature=current_temperature)
+                                regen_response = call_anthropic_with_retry(anthropic_client, updated_system_prompt, clean_messages, temperature=current_temperature)
 
                             if regen_response and regen_response.content:
                                 return regen_response.content[0].text
@@ -7948,14 +8145,14 @@ The user will type `/send` when ready to send the email.
                     if current_message_images:
                         # Handle images with Anthropic
                         formatted_messages = _format_anthropic_with_images(messages_for_api, current_message_images)
-                        response = call_anthropic(anthropic_client, current_system_prompt, formatted_messages, temperature=current_temperature)
+                        response = call_anthropic_with_retry(anthropic_client, current_system_prompt, formatted_messages, temperature=current_temperature)
                     else:
                         # Regular text-only message - clean messages to remove extra fields
                         clean_messages = []
                         for msg in messages_for_api:
                             clean_msg = {"role": msg["role"], "content": msg["content"]}
                             clean_messages.append(clean_msg)
-                        response = call_anthropic(anthropic_client, current_system_prompt, clean_messages, temperature=current_temperature)
+                        response = call_anthropic_with_retry(anthropic_client, current_system_prompt, clean_messages, temperature=current_temperature)
                     if response and response.content:
                         response_text = response.content[0].text
 
@@ -8153,7 +8350,7 @@ The user will type `/send` when ready to send the email.
                                 debug_print("Attempting fallback to Anthropic due to Gemini 500 error")
                                 try:
                                     fallback_messages = [{"role": "user", "content": formatted_prompt}]
-                                    fallback_response = call_anthropic(anthropic_client, "", fallback_messages)
+                                    fallback_response = call_anthropic_with_retry(anthropic_client, "", fallback_messages)
                                     if fallback_response and fallback_response.content and len(fallback_response.content) > 0:
                                         response_text_with_tools = fallback_response.content[0].text
                                         debug_print("Successfully fell back to Anthropic")
@@ -8478,16 +8675,6 @@ The user will type `/send` when ready to send the email.
                             artifact_manager.update_artifact(artifact_manager.last_artifact_id, artifact_content)
                             is_artifact = True
 
-                            # Sync artifact metadata with draft DB if in draft mode
-                            if draft_id and mode:
-                                from promaia.chat.modes import DraftMode
-                                from promaia.mail.artifact_helpers import extract_email_metadata_from_artifact, update_draft_with_artifact_metadata
-                                if isinstance(mode, DraftMode):
-                                    _, metadata = extract_email_metadata_from_artifact(artifact_manager, artifact_manager.last_artifact_id)
-                                    if metadata:
-                                        update_draft_with_artifact_metadata(mode.draft_manager, draft_id, metadata)
-                                        mode.draft_data = mode.draft_manager.get_draft(draft_id)
-
                             # Display commentary if present
                             if commentary:
                                 print_markdown(commentary)
@@ -8500,16 +8687,6 @@ The user will type `/send` when ready to send the email.
                             artifact_content, commentary = artifact_manager.extract_artifact_content(response_content)
                             artifact_id = artifact_manager.create_artifact(artifact_content)
                             is_artifact = True
-
-                            # Sync artifact metadata with draft DB if in draft mode
-                            if draft_id and mode:
-                                from promaia.chat.modes import DraftMode
-                                from promaia.mail.artifact_helpers import extract_email_metadata_from_artifact, update_draft_with_artifact_metadata
-                                if isinstance(mode, DraftMode):
-                                    _, metadata = extract_email_metadata_from_artifact(artifact_manager, artifact_id)
-                                    if metadata:
-                                        update_draft_with_artifact_metadata(mode.draft_manager, draft_id, metadata)
-                                        mode.draft_data = mode.draft_manager.get_draft(draft_id)
 
                             # Display commentary if present
                             if commentary:
@@ -8877,7 +9054,7 @@ def _format_gemini_with_images(system_prompt, messages_for_api, current_message_
     """Format Gemini content with image support (base64 and File API)."""
     from promaia.utils.image_processing import format_image_for_gemini
     import google.generativeai as genai
-    from promaia.nlq.models import get_current_google_model
+    from promaia.ai.models import get_current_google_model
     import os
 
     # Gemini uses a different approach - we need to create a model with system instruction

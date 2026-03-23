@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BrowserEntry:
     """Represents a single source row in the browser table."""
-    qualified_name: str      # "acme.journal" or "acme.discord#general"
+    qualified_name: str      # "koii.journal" or "koii.discord#general"
     source_type: str         # "notion", "discord", "slack", "gmail", etc.
     load_value: str          # Days value for the Load field (e.g. "7", "all")
     default_days: int        # From DatabaseConfig.default_days

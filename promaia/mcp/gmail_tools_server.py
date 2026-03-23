@@ -5,7 +5,7 @@ External stdio MCP server that exposes Gmail WRITE tools to Claude Agent SDK.
 Read operations are handled through Promaia's unified query layer.
 
 Usage:
-    python -m promaia.mcp.gmail_tools_server --workspace acme --agent-id my-agent
+    python -m promaia.mcp.gmail_tools_server --workspace koii --agent-id my-agent
 """
 import asyncio
 import sys

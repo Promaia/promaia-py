@@ -6,8 +6,7 @@ Guides the user through:
 2. API key entry and validation
 3. .env file configuration
 4. promaia.config.json initialization
-5. Notion workspace configuration
-6. Google account connection (Calendar, Gmail, Drive)
+5. Optional Notion workspace configuration
 
 Usage:
     maia setup              # Full interactive setup
@@ -113,19 +112,13 @@ async def _run_setup(args):
         console.print("\n[yellow]Setup cancelled.[/yellow]")
         return
 
-    # Step 3: Notion workspace
+    # Step 3: Notion workspace (optional)
     console.print()
-    console.print("[bold]Configure a Notion workspace[/bold]\n")
-    notion = get_integration("notion")
-    await configure_credential(notion, console)
+    if await _confirm("Configure a Notion workspace?"):
+        notion = get_integration("notion")
+        await configure_credential(notion, console)
 
-    # Step 4: Google account (Calendar, Gmail, Drive)
-    console.print()
-    console.print("[bold]Connect a Google account[/bold]  [dim](Calendar, Gmail, Drive)[/dim]\n")
-    google = get_integration("google")
-    await configure_credential(google, console)
-
-    # Step 6: Ensure config file
+    # Step 4: Ensure config file
     if ensure_config_file():
         console.print("[green]OK[/green] promaia.config.json ready")
     else:
@@ -134,7 +127,7 @@ async def _run_setup(args):
             "skipped config file creation"
         )
 
-    # Step 7: Next steps
+    # Step 5: Next steps
     console.print()
     from_installer = os.environ.get("PROMAIA_FROM_INSTALLER") == "1"
     maia_installed = os.environ.get("PROMAIA_MAIA_INSTALLED") == "1"

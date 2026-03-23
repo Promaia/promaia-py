@@ -8,7 +8,7 @@ The vector search system is **fully implemented and working**. Here's how to use
 
 ### A. Ensure Dependencies Are Installed
 ```bash
-cd $PROJECT_ROOT
+cd /Users/kb20250422/Documents/dev/promaia
 source venv/bin/activate
 pip install -r requirements.txt  # If not already done
 ```
@@ -53,7 +53,7 @@ maia chat -s journal:7 -vs 'project updates'
 
 ### With Workspace Filter
 ```bash
-maia chat -ws acme -vs 'international expansion'
+maia chat -ws trass -vs 'international expansion'
 ```
 
 ## 3. What You'll See
@@ -64,7 +64,7 @@ maia chat -ws acme -vs 'international expansion'
 ✅ Initialized semantic search processor with anthropic
 🎯 Parsed Search Parameters:
    Query: international launch stories
-   Workspace: acme
+   Workspace: trass
    Limit: 20 (default)
 ✅ Search successful: 12 results found
 ```

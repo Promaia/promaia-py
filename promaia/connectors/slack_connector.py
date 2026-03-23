@@ -53,7 +53,7 @@ class SlackConnector(BaseConnector):
         _ensure_slack_imported()
         
         self.workspace_id = config.get("database_id")  # Slack workspace ID
-        self.workspace = config.get("workspace")
+        self.workspace = config.get("workspace", "koii")
         
         # Bot configuration
         self.bot_token = config.get("bot_token")
@@ -317,22 +317,11 @@ class SlackConnector(BaseConnector):
         }
     
     async def _get_channel_name(self, channel_id: str) -> str:
-        """Get display name for a conversation.
-
-        For channels: returns the channel name.
-        For group DMs (mpim): returns the auto-generated name.
-        For direct messages (im): resolves the other user's name.
-        """
+        """Get channel name from ID."""
         try:
             response = self.client.conversations_info(channel=channel_id)
             if response['ok']:
-                channel = response['channel']
-                # Channels and mpim have a name field
-                if channel.get('name'):
-                    return channel['name']
-                # im conversations have a user field instead
-                if channel.get('user'):
-                    return await self._get_username(channel['user'])
+                return response['channel']['name']
         except:
             pass
         return channel_id
@@ -384,24 +373,12 @@ class SlackConnector(BaseConnector):
     ) -> List[Dict[str, Any]]:
         """Query messages from all accessible channels."""
         try:
-            # Get all conversations including group DMs (mpim) and direct messages (im)
-            channels = []
-            for conv_types in ["public_channel,private_channel", "mpim", "im"]:
-                cursor = None
-                while True:
-                    kwargs = dict(types=conv_types, limit=200)
-                    if cursor:
-                        kwargs["cursor"] = cursor
-                    response = self.client.conversations_list(**kwargs)
-                    channels.extend(response['channels'])
-                    cursor = response.get("response_metadata", {}).get("next_cursor")
-                    if not cursor:
-                        break
-
-            # Only attempt to fetch messages from channels the bot is a member of
-            member_channels = [ch for ch in channels if ch.get('is_member', False)]
-            self.logger.info(f"Found {len(channels)} conversations, {len(member_channels)} with membership")
-
+            # Get all channels
+            response = self.client.conversations_list(types="public_channel,private_channel")
+            channels = response['channels']
+            
+            self.logger.info(f"Found {len(channels)} channels to sync")
+            
             oldest = None
             latest = None
             if date_filter:
@@ -412,13 +389,13 @@ class SlackConnector(BaseConnector):
             
             all_messages = []
             
-            for channel in member_channels:
+            for channel in channels:
                 channel_id = channel['id']
-
+                
                 try:
                     await self._rate_limit()
-
-                    channel_limit = limit // len(member_channels) if limit else 100
+                    
+                    channel_limit = limit // len(channels) if limit else 100
                     if channel_limit < 10:
                         channel_limit = 10
                     
@@ -430,16 +407,14 @@ class SlackConnector(BaseConnector):
                     )
                     
                     if messages:
-                        channel_label = channel.get('name') or channel_id
-                        self.logger.info(f"Found {len(messages)} messages in {channel_label}")
+                        self.logger.info(f"Found {len(messages)} messages in #{channel['name']}")
                         all_messages.extend(messages)
-
+                
                 except SlackApiError as e:
-                    channel_label = channel.get('name') or channel_id
                     if e.response['error'] == 'not_in_channel':
-                        self.logger.debug(f"Bot not in {channel_label}")
+                        self.logger.debug(f"Bot not in channel #{channel['name']}")
                     else:
-                        self.logger.warning(f"Error fetching from {channel_label}: {e}")
+                        self.logger.warning(f"Error fetching from #{channel['name']}: {e}")
                     continue
             
             # Sort
@@ -466,32 +441,18 @@ class SlackConnector(BaseConnector):
         try:
             self.logger.info("Discovering accessible Slack channels...")
             
-            channels = []
-            for conv_types in ["public_channel,private_channel", "mpim", "im"]:
-                cursor = None
-                while True:
-                    kwargs = dict(types=conv_types, limit=200, exclude_archived=True)
-                    if cursor:
-                        kwargs["cursor"] = cursor
-                    response = self.client.conversations_list(**kwargs)
-                    channels.extend(response['channels'])
-                    cursor = response.get("response_metadata", {}).get("next_cursor")
-                    if not cursor:
-                        break
-
+            response = self.client.conversations_list(
+                types="public_channel,private_channel",
+                exclude_archived=True
+            )
+            
+            channels = response['channels']
             accessible_channels = []
-
+            
             for channel in channels:
-                # Resolve display name: channels/mpim have 'name', im has 'user'
-                name = channel.get('name')
-                if not name and channel.get('user'):
-                    name = await self._get_username(channel['user'])
-                if not name:
-                    name = channel['id']
-
                 accessible_channels.append({
                     'id': channel['id'],
-                    'name': name,
+                    'name': channel['name'],
                     'is_private': channel.get('is_private', False),
                     'is_member': channel.get('is_member', False),
                     'discovered_at': datetime.now().isoformat()

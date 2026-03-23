@@ -36,6 +36,14 @@ except ImportError:
 from .conversation_connector import ConversationConnector
 ConnectorRegistry.register("conversation", ConversationConnector)
 
+# OCR connector (always available - no external dependencies for base functionality)
+try:
+    from .ocr_connector import OCRConnector
+    ConnectorRegistry.register("ocr", OCRConnector)
+    ocr_available = True
+except ImportError:
+    ocr_available = False
+
 # Try to import Shopify connector (requires aiohttp)
 try:
     from .shopify_connector import ShopifyConnector
@@ -78,6 +86,9 @@ if discord_available:
 
 if slack_available:
     __all__.append('SlackConnector')
+
+if ocr_available:
+    __all__.append('OCRConnector')
 
 if shopify_available:
     __all__.append('ShopifyConnector')

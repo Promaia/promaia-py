@@ -191,7 +191,7 @@ async def handle_team_find(args):
     Find a team member by name.
 
     Usage:
-        maia team find "Jane"
+        maia team find "Koii"
         maia team find "john"
     """
     from rich.console import Console
@@ -237,7 +237,7 @@ async def handle_team_add_alias(args):
     Add an alias for a team member.
 
     Usage:
-        maia team alias "Jane Doe" "Jane"
+        maia team alias "Koii Benvenutto" "Koii"
         maia team alias "John Smith" "Johnny" "JS"
     """
     from rich.console import Console
@@ -270,7 +270,7 @@ async def handle_team_set_note(args):
     Set a note for a team member.
 
     Usage:
-        maia team note "Jane" "Prefers async communication"
+        maia team note "Koii" "Prefers async communication"
     """
     from rich.console import Console
     from promaia.config.team import get_team_manager

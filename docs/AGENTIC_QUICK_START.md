@@ -66,7 +66,7 @@ Edit agent config (`promaia.config.json`):
 ```json
 {
   "name": "Chief of Staff",
-  "workspace": "acme",
+  "workspace": "koii",
   "databases": ["journal:7", "stories:all", "gmail:7"],
   "sdk_enabled": true,
   "sdk_permission_mode": "bypassPermissions",
@@ -175,7 +175,7 @@ python test_agent_with_sdk.py
 ### MCP server not starting
 - Check Python path in executor._build_sdk_options()
 - Verify query_tools_server.py exists
-- Test standalone: `python -m promaia.mcp.query_tools_server --workspace acme`
+- Test standalone: `python -m promaia.mcp.query_tools_server --workspace koii`
 
 ### Subprocess buffer issues
 - Initial message should be ~2KB (summary only)
@@ -208,7 +208,7 @@ python test_agent_with_sdk.py
 ```
 
 ### 3. Use Appropriate Tools
-- query_sql: Known keywords ("emails from Alice")
+- query_sql: Known keywords ("emails from Federico")
 - query_vector: Concepts ("team morale discussions")
 - query_source: Time-based loading ("journal:30 for more history")
 

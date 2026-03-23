@@ -102,10 +102,10 @@ class ChatMode:
 class DraftMode(ChatMode):
     """
     Email draft mode - specialized for email composition.
-
+    
     Uses artifacts for email drafts and adds /send and /archive commands.
     """
-
+    
     def __init__(
         self,
         workspace: str,
@@ -138,7 +138,7 @@ class DraftMode(ChatMode):
         self.context_builder = context_builder
         self.response_generator = response_generator
         self.structured_context = structured_context or {}
-
+    
     def get_system_prompt(self) -> Optional[str]:
         """
         Build custom system prompt for draft mode using EmailPromptBuilder.
@@ -151,7 +151,7 @@ class DraftMode(ChatMode):
         # Use shared prompt builder for consistency with batch processing
         builder = EmailPromptBuilder(workspace=self.workspace)
         return builder.build_prompt(self.structured_context)
-
+    
     def get_additional_commands(self) -> Dict[str, Callable]:
         """
         Add /send and /archive commands for draft mode.
@@ -184,7 +184,7 @@ class DraftMode(ChatMode):
             True - DraftMode handles all context formatting in get_system_prompt()
         """
         return True
-
+    
     def get_welcome_message(self, context_state: Dict[str, Any]) -> Optional[str]:
         """
         Custom welcome for draft chat showing structured context info.
@@ -237,16 +237,18 @@ class DraftMode(ChatMode):
         lines.append("")
 
         return "\n".join(lines)
-
+    
     async def handle_send(self, artifact_manager, messages, context_state):
         """
         Handle /send command for drafts.
-
+        
+        Ports logic from draft_chat.py _handle_send_command
+        
         Args:
             artifact_manager: ArtifactManager instance
             messages: Chat messages
             context_state: Chat context state
-
+            
         Returns:
             True if should exit chat, False to continue
         """
@@ -254,7 +256,7 @@ class DraftMode(ChatMode):
         from promaia.mail.recipient_selector import RecipientSelector
         from promaia.mail.gmail_sender import GmailSender
         from promaia.utils.timezone_utils import now_utc
-
+        
         # Get the latest artifact (draft)
         if not artifact_manager or not artifact_manager.artifacts:
             print_text("❌ No draft to send", style="red")
@@ -270,44 +272,29 @@ class DraftMode(ChatMode):
             print_text("❌ Could not extract email body from artifact", style="red")
             return False
 
-        # Check for routing overrides from persona prompt
-        target_action = self.draft_data.get('target_action', 'reply') or 'reply'
-        target_to = self.draft_data.get('target_to')
-        target_cc = self.draft_data.get('target_cc')
-
-        # Pre-populate recipients if routing specifies a target
-        default_recipients = None
-        if target_to:
-            default_recipients = [r.strip() for r in target_to.split(',')]
-
-        default_cc = None
-        if target_cc:
-            default_cc = [r.strip() for r in target_cc.split(',')]
-
         # Show recipient selector
+        # Use inbound_to/inbound_cc from draft_data (updated by artifact sync)
         selector = RecipientSelector(
             from_addr=self.draft_data.get('inbound_from', ''),
             to_addr=self.draft_data.get('inbound_to', ''),
             cc_addr=self.draft_data.get('inbound_cc', ''),
             thread_context=self.draft_data.get('thread_context', ''),
-            user_email=self.user_email,
-            default_recipients=default_recipients,
-            default_cc=default_cc,
+            user_email=self.user_email
         )
-
+        
         print_text("\n📧 Select recipients for this email...", style="cyan")
         confirmed, recipients = await selector.run()
-
+        
         if not confirmed:
             print_text("\n↩️  Send cancelled\n", style="cyan")
             return False
-
+        
         if not recipients:
             print_text("\n❌ No recipients selected\n", style="red")
             return False
-
+        
         print_text(f"\n✅ Sending to: {', '.join(recipients)}", style="green")
-
+        
         # Format the draft
         from promaia.mail.response_generator import ResponseGenerator
         generator = ResponseGenerator()
@@ -343,36 +330,27 @@ class DraftMode(ChatMode):
         if confirmation.lower() != safety_string:
             print_text("\n❌ Confirmation failed\n", style="red")
             return False
-
+        
         print_text("\n📤 Sending email...", style="cyan")
-
-        # Send email — branch on action type
+        
+        # Send email
         sender = GmailSender(self.workspace, self.user_email)
-        if target_action == 'new':
-            # New email — no thread association
-            success = await sender.send_email(
-                to=', '.join(recipients),
-                subject=self.draft_data['draft_subject'],
-                body_text=draft_to_send,
-            )
-        else:
-            # Both 'reply' and 'forward' use send_reply (threaded)
-            success = await sender.send_reply(
-                thread_id=self.draft_data['thread_id'],
-                message_id=self.draft_data['message_id'],
-                subject=self.draft_data['draft_subject'],
-                body_text=draft_to_send,
-                recipients=recipients,
-            )
-
+        success = await sender.send_reply(
+            thread_id=self.draft_data['thread_id'],
+            message_id=self.draft_data['message_id'],
+            subject=self.draft_data['draft_subject'],
+            body_text=draft_to_send,
+            recipients=recipients
+        )
+        
         if success:
             print_text("✅ Email sent!", style="green")
             self.draft_manager.mark_sent(self.draft_id)
-
+            
             # Save to learning system
             from promaia.mail.learning_system import EmailResponseLearningSystem
             learning = EmailResponseLearningSystem(workspace=self.workspace)
-
+            
             pattern = {
                 "inbound": {
                     "from": self.draft_data['inbound_from'],
@@ -392,7 +370,7 @@ class DraftMode(ChatMode):
                 }
             }
             learning.save_successful_response(pattern)
-
+            
             print()
             print_text("↩️  Returning to draft list...", style="cyan")
             print()
@@ -400,7 +378,7 @@ class DraftMode(ChatMode):
         else:
             print_text("❌ Failed to send\n", style="red")
             return False
-
+    
     async def handle_archive(self, artifact_manager, messages, context_state):
         """
         Handle /archive command.
@@ -418,3 +396,4 @@ class DraftMode(ChatMode):
         self.draft_manager.update_draft_status(self.draft_id, 'archived')
         print_text("\n🗄️  Archived - cleared from your queue\n", style="green")
         return True
+

@@ -80,7 +80,7 @@ User: [Continues chatting with Promaia]
 ### Scenario 2: Action Request (Spawn agent)
 
 ```
-User: "Send Alice an email about the launch timeline"
+User: "Send Federico an email about the launch timeline"
 
 Promaia: [Analyzing: Action request detected]
 Promaia: [Loading gmail:7, journal:3, stories:7...]
@@ -92,14 +92,14 @@ Promaia: This requires email access. Spawning Claude Code agent...
 [Promaia → Claude Agent]
 Promaia: I've loaded the user's recent emails and project notes.
          Relevant context:
-         - 12 email threads with Alice
+         - 12 email threads with Federico
          - Journal entry from yesterday about timeline concerns
          - Stories database shows "launch" milestone due in 2 weeks
 
-         Task: Draft an email to Alice about the launch timeline.
+         Task: Draft an email to Federico about the launch timeline.
 
 [Claude Agent → User]
-Claude Agent: I'll draft an email for Alice. Let me check the recent thread first.
+Claude Agent: I'll draft an email for Federico. Let me check the recent thread first.
 Claude Agent: [Using tool: mcp__gmail__list_messages]
 Claude Agent: [Using tool: mcp__gmail__get_message]
 Claude Agent:
@@ -107,7 +107,7 @@ Claude Agent:
 
               Subject: RE: Launch Timeline Update
 
-              Hi Alice,
+              Hi Federico,
 
               Following up on our discussion - based on current progress,
               we're tracking well for the 2-week launch window...
@@ -119,7 +119,7 @@ User: Make it more casual and mention the API work
 [Claude Agent]
 Claude Agent: Updated draft:
 
-              Hey Alice,
+              Hey Federico,
 
               Quick update on launch - we're looking good for the 2-week
               target! The new API work is coming together nicely...
@@ -130,7 +130,7 @@ User: Yes send it
 
 [Claude Agent]
 Claude Agent: [Using tool: mcp__gmail__send_message]
-Claude Agent: ✓ Email sent to Alice
+Claude Agent: ✓ Email sent to Federico
 
 Promaia: Email sent successfully. Returning to chat mode.
 
@@ -340,7 +340,7 @@ class PromaiaChat:
    - Expected: Promaia answers directly, no agent spawn
 
 2. **Simple Action**
-   - Input: "Send Alice an email saying hello"
+   - Input: "Send Federico an email saying hello"
    - Expected: Agent spawns, drafts email, sends
 
 3. **Complex Action**

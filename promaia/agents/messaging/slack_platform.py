@@ -165,6 +165,33 @@ class SlackPlatform(BaseMessagingPlatform):
         """
         pass
     
+    async def get_channel_info(self, channel_id: str) -> Dict[str, Any]:
+        """
+        Get Slack channel information.
+        
+        Args:
+            channel_id: Slack channel ID
+        
+        Returns:
+            Channel metadata
+        """
+        try:
+            response = self.client.conversations_info(channel=channel_id)
+            channel = response['channel']
+            
+            return {
+                'id': channel['id'],
+                'name': channel['name'],
+                'is_private': channel.get('is_private', False),
+                'is_channel': channel.get('is_channel', True),
+                'topic': channel.get('topic', {}).get('value', ''),
+                'purpose': channel.get('purpose', {}).get('value', '')
+            }
+        
+        except SlackApiError as e:
+            self.logger.error(f"Error getting channel info: {e.response['error']}")
+            return {'id': channel_id, 'name': 'Unknown', 'error': str(e)}
+    
     async def get_user_info(self, user_id: str) -> Dict[str, Any]:
         """
         Get Slack user information.

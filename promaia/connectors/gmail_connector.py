@@ -51,10 +51,10 @@ class GmailConnector(BaseConnector):
     
     Usage Examples:
     # Sync all emails from March 1st to June 30th, 2025:
-    maia database sync --source acme.gmail --start-date 2025-03-01 --end-date 2025-06-30
-
+    maia database sync --source trass.gmail --start-date 2025-03-01 --end-date 2025-06-30
+    
     # Sync last 30 days (no artificial limits):
-    maia database sync --source acme.gmail --days 30
+    maia database sync --source trass.gmail --days 30
     
     # Enable full thread mode for complete email history (verbose):
     Configure gmail_content_mode: "full_thread" in database config
@@ -90,7 +90,7 @@ class GmailConnector(BaseConnector):
         super().__init__(config)
 
         self.email = config.get("database_id")  # Use email as database_id
-        self.workspace = config.get("workspace")
+        self.workspace = config.get("workspace", "koii")
 
         # Override default batching configuration from config if provided
         self.max_threads_per_batch = config.get("max_threads_per_batch", self.MAX_THREADS_PER_BATCH)

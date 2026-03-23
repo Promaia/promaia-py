@@ -70,7 +70,7 @@ def parse_chat_args(args_string: str) -> ParsedChatArgs:
     result.top_k = parsed.top_k
     result.threshold = parsed.threshold
 
-    # Flatten browse lists: [['acme'], ['acme.tg']] -> ['acme', 'acme.tg']
+    # Flatten browse lists: [['trass'], ['trass.tg']] -> ['trass', 'trass.tg']
     raw_browse = parsed.browse or []
     for item in raw_browse:
         if isinstance(item, list):
@@ -205,7 +205,7 @@ def apply_browser_result(
     """Apply browser selections to context_state, merging with out-of-scope sources.
 
     Args:
-        selected_sources: Source specs from browser (e.g., ["acme.journal:7"])
+        selected_sources: Source specs from browser (e.g., ["koii.journal:7"])
         context_state: The mutable context state dict
         browse_scope_db_names: Set of database names in the current browse scope
 

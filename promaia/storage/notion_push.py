@@ -738,7 +738,7 @@ async def push_database_changes(
 
     Args:
         database_name: Database name (e.g., "journal")
-        workspace: Workspace name
+        workspace: Workspace name (e.g., "koii")
         force: Force push all files regardless of changes
 
     Returns:
@@ -771,7 +771,7 @@ async def push_database_changes(
             'error': f"No Notion credentials found for workspace '{workspace}'. Run: maia auth configure notion"
         }
 
-    # Resolve markdown directory — config stores relative paths like "data/md/notion/{workspace}/"
+    # Resolve markdown directory — config stores relative paths like "data/md/notion/koii/"
     # that need to be resolved against the data directory
     from promaia.utils.env_writer import get_data_dir
     markdown_dir = Path(db_config.markdown_directory)
@@ -779,7 +779,7 @@ async def push_database_changes(
         markdown_dir = Path(get_data_dir()) / markdown_dir
 
     # Scope to database-specific subdirectory if it exists
-    # (Notion databases share a workspace-level directory like data/md/notion/{workspace}/
+    # (Notion databases share a workspace-level directory like data/md/notion/koii/
     #  with per-database subdirs like chief_of_staff_journal/)
     db_subdir = markdown_dir / db_config.nickname
     if db_subdir.exists() and db_subdir.is_dir():

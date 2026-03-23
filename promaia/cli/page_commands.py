@@ -88,7 +88,7 @@ async def handle_page_add(args):
     # 4. Workspace
     from promaia.config.workspaces import get_workspace_manager
     workspace_mgr = get_workspace_manager()
-    default_ws = workspace_mgr.get_default_workspace() or "default"
+    default_ws = workspace_mgr.get_default_workspace() or "koii"
     ws_input = input(f"Workspace (default: '{default_ws}'): ").strip()
     workspace = ws_input if ws_input else default_ws
 

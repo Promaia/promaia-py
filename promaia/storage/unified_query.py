@@ -283,7 +283,7 @@ class HybridQueryInterface:
     def natural_language_query(self, nl_prompt: str, workspace: str = None, database_names: List[str] = None, verbose: bool = True) -> Dict[str, List[Dict[str, Any]]]:
         """Process natural language queries using the agentic system with retry logic."""
         try:
-            from promaia.nlq.nl_processor_wrapper import process_natural_language_to_content
+            from promaia.ai.nl_processor_wrapper import process_natural_language_to_content
         except ImportError as e:
             print(f"❌ Natural language processing not available: {e}")
             return {}

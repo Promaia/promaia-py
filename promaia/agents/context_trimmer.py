@@ -349,7 +349,7 @@ async def _call_haiku_for_summary(prompt: str) -> Optional[str]:
         if not api_key:
             return None
 
-        client = Anthropic(api_key=api_key, base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
+        client = Anthropic(api_key=api_key)
         response = await asyncio.to_thread(
             client.messages.create,
             model="claude-haiku-4-5-20251001",

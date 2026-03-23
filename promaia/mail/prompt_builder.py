@@ -9,19 +9,9 @@ This ensures all email drafts use the same high-quality prompt structure.
 """
 import logging
 import os
-import re
 from typing import Dict, List, Any, Optional
 
 logger = logging.getLogger(__name__)
-
-
-def strip_prompt_comments(text: str) -> str:
-    """Strip HTML comments (<!-- ... -->) from prompt text.
-
-    Used to remove documentation/guidance comments from prompt files
-    before sending to the AI, saving tokens.
-    """
-    return re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL).strip()
 
 
 class EmailPromptBuilder:
@@ -105,32 +95,17 @@ class EmailPromptBuilder:
         return '\n'.join(sections)
 
     def _load_persona_prompt(self) -> str:
-        """Load persona prompt from file with date/time variables filled in.
-
-        Tries workspace-specific prompt first (maia_mail_prompt_{workspace}.md),
-        falls back to generic prompt (maia_mail_prompt.md).
-        """
+        """Load persona prompt from file with date/time variables filled in."""
         from promaia.utils.env_writer import get_prompts_dir
-        prompts_dir = get_prompts_dir()
+        prompt_path = get_prompts_dir() / "maia_mail_prompt.md"
 
-        # Try workspace-specific prompt first
-        workspace_prompt_path = prompts_dir / f"maia_mail_prompt_{self.workspace}.md"
-        generic_prompt_path = prompts_dir / "maia_mail_prompt.md"
-
-        if os.path.exists(workspace_prompt_path):
-            prompt_path = workspace_prompt_path
-        elif os.path.exists(generic_prompt_path):
-            prompt_path = generic_prompt_path
-        else:
-            logger.warning(f"Persona prompt not found: tried {workspace_prompt_path} and {generic_prompt_path}")
+        if not os.path.exists(prompt_path):
+            logger.warning(f"Persona prompt not found: {prompt_path}")
             return "You are a helpful email assistant."
 
         try:
             with open(prompt_path, 'r', encoding='utf-8') as f:
                 persona = f.read()
-
-            # Strip HTML comments (documentation for the editor)
-            persona = strip_prompt_comments(persona)
 
             # Fill in date/time variables
             from promaia.utils.timezone_utils import now_utc

@@ -216,7 +216,7 @@ async def agent_command(interaction: discord.Interaction):
 class PromaiaBot(commands.Bot):
     """Discord bot for Promaia AI assistant."""
 
-    def __init__(self, workspace: str = None, **kwargs):
+    def __init__(self, workspace: str = "koii", **kwargs):
         """
         Initialize Promaia Discord bot.
 
@@ -787,7 +787,7 @@ class PromaiaBot(commands.Bot):
             await ctx.reply("No conversation context to clear.")
 
 
-async def run_bot(workspace: str = None, token: Optional[str] = None):
+async def run_bot(workspace: str = "koii", token: Optional[str] = None):
     """
     Start the Promaia Discord bot.
 
@@ -824,7 +824,7 @@ if __name__ == "__main__":
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
 
-    workspace = sys.argv[1] if len(sys.argv) > 1 else None
+    workspace = sys.argv[1] if len(sys.argv) > 1 else "koii"
 
     print(f"Starting Promaia Discord bot for workspace: {workspace}")
     asyncio.run(run_bot(workspace=workspace))

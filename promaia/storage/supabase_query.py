@@ -269,7 +269,7 @@ class SupabaseQueryInterface:
             
             # Get counts by source
             source_counts = {}
-            for source in ['gmail', 'journal', 'stories', 'generic']:
+            for source in ['gmail', 'journal', 'stories', 'cms', 'generic']:
                 try:
                     response = self.supabase.table('content_items').select(
                         '*', count='exact'

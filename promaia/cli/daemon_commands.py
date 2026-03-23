@@ -79,7 +79,7 @@ def install_launchd_plist():
         home_dir = str(Path.home())
 
         plist_content = plist_content.replace('/usr/local/bin/python3', python_path)
-        plist_content = plist_content.replace('__HOME__', home_dir)
+        plist_content = plist_content.replace('/Users/kb20250422', home_dir)
 
         # Write to LaunchAgents
         with open(dest_plist, 'w') as f:

@@ -54,8 +54,8 @@ Respond with ONLY a JSON object (no other text):
 
 Examples:
 
-Message: "Can you draft a reply to that email from Alice?"
-Response: {{"has_intent": true, "confidence": 0.95, "intent_type": "reply_to_thread", "recipient_hints": ["Alice"], "subject_hints": [], "thread_reference": "email from Alice", "reasoning": "User explicitly asked to draft a reply to a specific person's email"}}
+Message: "Can you draft a reply to that email from Federico?"
+Response: {{"has_intent": true, "confidence": 0.95, "intent_type": "reply_to_thread", "recipient_hints": ["Federico"], "subject_hints": [], "thread_reference": "email from Federico", "reasoning": "User explicitly asked to draft a reply to a specific person's email"}}
 
 Message: "Send this to John and cc Maria"
 Response: {{"has_intent": true, "confidence": 0.98, "intent_type": "compose_new", "recipient_hints": ["John", "Maria"], "subject_hints": [], "thread_reference": null, "reasoning": "Direct instruction to send with explicit recipients"}}
@@ -83,7 +83,7 @@ Response: {{"has_intent": true, "confidence": 0.9, "intent_type": "compose_new",
 
         # Try Anthropic first (preferred)
         if os.getenv("ANTHROPIC_API_KEY"):
-            self.ai_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
+            self.ai_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
             self.model_type = "anthropic"
             logger.debug("Using Anthropic for intent detection")
             return self.ai_client

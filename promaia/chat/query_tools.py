@@ -11,7 +11,7 @@ import logging
 import uuid
 from datetime import datetime
 from typing import Dict, List, Optional, Any
-from promaia.nlq.nl_processor_wrapper import process_natural_language_to_content, process_vector_search_to_content
+from promaia.ai.nl_processor_wrapper import process_natural_language_to_content, process_vector_search_to_content
 from promaia.storage.files import load_database_pages_with_filters
 from promaia.config.databases import get_database_config
 
@@ -57,7 +57,7 @@ class QueryToolExecutor:
         <tool_call>
           <tool_name>query_sql</tool_name>
           <parameters>
-            <query>find emails from Alice</query>
+            <query>find emails from Federico</query>
             <workspace>default</workspace>
           </parameters>
         </tool_call>

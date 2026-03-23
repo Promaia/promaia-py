@@ -14,7 +14,6 @@ import sqlite3
 
 # Import the new centralized path function
 from promaia.config.paths import get_project_root
-from promaia.utils.env_writer import get_data_dir, get_data_subdir
 
 # Use the centralized function to define PROJECT_ROOT
 PROJECT_ROOT = get_project_root()
@@ -37,7 +36,7 @@ def get_journal_directory() -> str:
     
     # Fallback to default path if config loading fails
     from promaia.utils.env_writer import get_data_subdir
-    return str(get_data_subdir() / "md" / "notion" / "default" / "journal")
+    return str(get_data_subdir() / "md" / "notion" / "koii" / "journal")
 
 def get_cms_directory() -> str:
     """
@@ -56,7 +55,7 @@ def get_cms_directory() -> str:
     
     # Fallback to default path if config loading fails
     from promaia.utils.env_writer import get_data_subdir
-    return str(get_data_subdir() / "md" / "notion" / "default" / "cms")
+    return str(get_data_subdir() / "md" / "notion" / "koii" / "cms")
 
 def get_public_entries_directory() -> str:
     """
@@ -66,7 +65,7 @@ def get_public_entries_directory() -> str:
     Returns:
         Public entries directory path
     """
-    return "chat-entries"
+    return "KOii-chat-entries"
 
 # Legacy constants for backward compatibility (DEPRECATED - use functions above)
 PUBLIC_ENTRIES_DIR_NAME = get_public_entries_directory()  # For scrubbed, public entries for web app
@@ -94,7 +93,7 @@ def get_output_dir(content_type: str) -> str:
         # e.g., if content_type is "example", dir_name will be "notion-example"
         dir_name = f"notion-{content_type}"
     
-    return str(get_data_dir() / dir_name) if dir_name else str(get_data_dir())
+    return os.path.join(PROJECT_ROOT, dir_name)
 
 def ensure_output_dir(content_type: str):
     """Ensure the output directory exists. Uses PROJECT_ROOT via get_output_dir."""
@@ -215,7 +214,7 @@ def read_markdown_files(
         source_dir_name = get_journal_directory() # Default to private journal if ambiguous
 
     # Construct the absolute path to the source directory using PROJECT_ROOT
-    data_directory_path = str(get_data_dir() / source_dir_name)
+    data_directory_path = os.path.join(PROJECT_ROOT, source_dir_name)
 
     if not os.path.isdir(data_directory_path):
         print(f"Error: Source directory not found: {data_directory_path}")
@@ -372,7 +371,7 @@ def read_markdown_files_from_sources(sources: List[Dict[str, Any]]) -> Dict[str,
     Returns:
         Dictionary with database names as keys and lists of pages as values:
         {
-            'journal': [page1, page2, ...],
+            'koii_journal': [page1, page2, ...],
             'awakenings': [page1, page2, ...],
             ...
         }
@@ -392,7 +391,7 @@ def read_markdown_files_from_sources(sources: List[Dict[str, Any]]) -> Dict[str,
         days_filter = None if days == 'all' else days
         
         # Construct the path to the database directory
-        database_path = str(get_data_subdir() / database_name)
+        database_path = os.path.join(PROJECT_ROOT, "data", database_name)
         
         if not os.path.isdir(database_path):
             print(f"Warning: Database directory not found: {database_path}")
@@ -567,7 +566,7 @@ def load_json_files_with_property_filter(property_filters: Dict[str, Any], json_
     if not property_filters:
         return []
     
-    json_dir_path = str(get_data_dir() / json_directory)
+    json_dir_path = os.path.join(PROJECT_ROOT, json_directory)
     
     if not os.path.exists(json_dir_path):
         print(f"Warning: JSON directory not found: {json_dir_path}")
@@ -631,7 +630,7 @@ def _get_properties_from_sqlite(page_id: str, database_id: str, database_name: s
         page_id: Page identifier
         database_id: Notion database ID
         database_name: Database nickname (e.g., 'journal', 'stories', 'cms')
-        workspace: Workspace name
+        workspace: Workspace name (e.g., 'koii', 'trass')
         db_path: Path to SQLite database
 
     Returns:

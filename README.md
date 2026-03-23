@@ -30,35 +30,54 @@ Promaia provides a powerful CLI interface and Python API for syncing content fro
 - **CMS Integration**: Automated content workflows between platforms
 - **Real-time Sync**: Timestamp tracking with conflict resolution
 
-## Quick Start
-
-### Prerequisites
-
-- [Docker Desktop](https://docs.docker.com/get-docker/) (includes Docker Compose v2)
+## 🚀 Quick Start
 
 ### Installation
 
 ```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/Promaia/promaia-py/main/install.sh | sh
+# Clone the repository
+git clone <repository-url>
+cd promaia
 
-# Windows (PowerShell)
-iwr -useb https://raw.githubusercontent.com/Promaia/promaia-py/main/install.ps1 | iex
+# Create and activate virtual environment (recommended)
+# Install uv if you don't have it: brew install uv
+uv venv
+source venv/bin/activate
+
+# Install dependencies
+uv pip install .
+pip3 install -e .
+
+# Set up configuration
+cp docs/env.template .env
+# Edit .env and add your API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.)
 ```
 
-Developers who clone the repo can run the same `install.sh` from the repo root — it auto-detects the dev environment and offers to bind-mount local source.
+### Initial Setup
 
-You can also specify a custom install location: `sh install.sh --location /opt/maia`
+**Note**: Promaia works best with Notion integration, but you can use basic chat features (`maia chat`) without Notion by just setting up your AI API keys in the `.env` file.
 
-The installer will:
-1. Pull the pre-built Docker image
-2. Scaffold config files from the image (or seed them locally if in a dev repo)
-3. If it detects the local repo, offer to **bind-mount your source tree** into the container (for development — sets `COMPOSE_FILE=docker-compose.pilots.yaml`)
-4. Optionally install the `maia` CLI wrapper to your PATH
-5. Launch the interactive **setup wizard** (`maia setup`), which walks you through:
-   - AI provider selection (Claude, Gemini, or ChatGPT) and API key
-   - Notion workspace connection
-   - Google account connection (Calendar, Gmail, Drive)
+```bash
+# Add a workspace (for Notion integration)
+maia workspace add myworkspace --api-key your_notion_token
+
+# Add a Notion database
+# To get your database ID: Open the database in Notion, copy the URL
+# Extract the ID between the slash and question mark: notion.so/workspace/DATABASE_ID?v=...
+maia database add journal --id your_database_id --workspace myworkspace
+
+# Set up Discord (optional)
+maia workspace discord-setup myworkspace --server-id your_discord_server_id
+
+# Test your setup
+maia database list
+maia database test journal
+```
+
+**Understanding Workspaces & Databases:**
+- **Workspace**: Represents a Notion account/team (useful if you have multiple Notion accounts)
+- **Database**: Individual Notion databases within a workspace
+- Promaia adapts to any database schema - it works with any properties you've defined
 
 ### Sync Commands
 
@@ -227,7 +246,26 @@ promaia/
 
 ### Environment Variables & API Keys
 
-API keys and configuration live in `maia-data/.env`. The setup wizard (`maia setup`) creates this file for you. The `promaia.config.json` file can reference env vars using template literals (e.g. `${NOTION_MYWORKSPACE_API_KEY}`) which are resolved at runtime.
+Promaia uses environment variables for API keys and configuration. The `promaia.config.json` file references these variables using template literals:
+
+```json
+{
+  "workspaces": {
+    "myworkspace": {
+      "api_key": "${NOTION_MYWORKSPACE_API_KEY}"
+    }
+  }
+}
+```
+
+These placeholders are dynamically replaced at runtime with values from your `.env` file:
+
+```bash
+# .env file
+ANTHROPIC_API_KEY=your_anthropic_key
+OPENAI_API_KEY=your_openai_key
+NOTION_MYWORKSPACE_API_KEY=your_notion_integration_token
+```
 
 ### Discord Setup
 ```bash
@@ -258,19 +296,41 @@ maia chat -s journal:7 -s stories:30 -f 'journal:created_time>2025-01-01' -f 'st
 maia chat -b workspace.discord -f 'workspace.discord:"channel_name=announcements"'
 ```
 
-## Development
+## 🧪 Development & Testing
 
-If you chose to mount the local repo during install, your source tree is bind-mounted into the container via `docker-compose.pilots.yaml`. Code changes take effect without rebuilding the image (the web service auto-reloads; other services need `maia services restart <service>`).
+### Development Setup
+```bash
+# Install development dependencies
+pip3 install -r requirements.txt
 
-After adding, removing, or changing packages, rebuild the image and recreate containers.
+# Run tests
+python3 -m pytest tests/ -v
+
+# Run with coverage
+python3 -m pytest tests/ --cov=promaia
+
+# Format code
+black promaia/ tests/
+isort promaia/ tests/
+
+# Lint code
+flake8 promaia/ tests/
+```
 
 ### Testing
 ```bash
-maia database test journal                     # Test database connectivity
-maia discord debug-channels --workspace team   # Test Discord integration
-maia database status                           # Show sync status
-maia sync -s journal:1                         # Test sync
-maia chat -s journal:1                         # Test chat
+# Test database connectivity
+maia database test journal
+
+# Test Discord integration
+maia discord debug-channels --workspace myworkspace
+
+# Test sync functionality
+maia database status
+maia sync -s journal:1
+
+# Test chat functionality  
+maia chat -s journal:1
 ```
 
 ## 📖 Documentation

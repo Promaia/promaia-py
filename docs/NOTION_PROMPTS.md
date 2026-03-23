@@ -12,14 +12,14 @@ Promaia syncs its main system prompt from Notion instead of using only the local
 
 ### Prerequisites
 
-1. **Notion Integration**: Create a Notion integration at your Notion integrations page
+1. **Notion Integration**: Create a Notion integration at https://www.notion.so/my-integrations
    - Give it a name (e.g., "Promaia")
    - Copy the integration token (starts with `secret_`)
    - Keep this token secret!
 
 2. **Workspace Configured**: Add your workspace to Promaia
    ```bash
-   maia workspace add acme --api-key secret_your_notion_token
+   maia workspace add koii --api-key secret_your_notion_token
    ```
 
 ### Setup Steps
@@ -31,7 +31,7 @@ The Promaia template page contains:
 - **Agents** database - For scheduled agents
 - Other Promaia resources
 
-**Template URL**: *(available from the Promaia team)*
+**Template URL**: https://www.notion.so/koii/Promaia-2f2d133969678183b4b4c6d6931168f5
 
 1. Open the template URL in your browser
 2. Click **"Duplicate"** in the top right corner
@@ -53,7 +53,7 @@ This gives the integration access to the page and all its child pages (including
 #### 3. Run Setup Command
 
 ```bash
-maia workspace setup-promaia --workspace acme
+maia workspace setup-promaia --workspace koii
 ```
 
 Or if you have a default workspace set:
@@ -72,7 +72,7 @@ The command will:
 Your prompt will now sync from Notion automatically! To verify:
 
 ```bash
-maia workspace info acme
+maia workspace info koii
 ```
 
 You should see the Promaia page ID and Main prompt page ID in the output.
@@ -120,11 +120,11 @@ export PROMAIA_USE_NOTION_PROMPTS=false
 Each workspace can have its own Promaia page and Main prompt:
 
 ```bash
-# Set up for workspace "acme"
-maia workspace setup-promaia --workspace acme
+# Set up for workspace "koii"
+maia workspace setup-promaia --workspace koii
 
-# Set up for workspace "other"
-maia workspace setup-promaia --workspace other
+# Set up for workspace "trass"
+maia workspace setup-promaia --workspace trass
 ```
 
 The workspace configuration is stored in `promaia.config.json`:
@@ -132,7 +132,7 @@ The workspace configuration is stored in `promaia.config.json`:
 ```json
 {
   "workspaces": {
-    "acme": {
+    "koii": {
       "api_key": "secret_...",
       "promaia_page_id": "2f2d1339...",
       "main_prompt_page_id": "2f4d1339..."
@@ -193,8 +193,8 @@ Always has local `prompts/prompt.md` as a fallback if Notion is unavailable.
 
 **Solution**:
 - Share the Promaia page with your integration (see "Share with Your Integration" above)
-- Verify your API key is correct: `maia workspace test acme`
-- Check that the page IDs are correct: `maia workspace info acme`
+- Verify your API key is correct: `maia workspace test koii`
+- Check that the page IDs are correct: `maia workspace info koii`
 
 ### "Page not found" (404 error)
 
@@ -212,7 +212,7 @@ Always has local `prompts/prompt.md` as a fallback if Notion is unavailable.
 **Solution**:
 - Start a new chat session (prompts load fresh each session)
 - Check that `PROMAIA_USE_NOTION_PROMPTS=true` (default)
-- Verify the page ID is correct: `maia workspace info acme`
+- Verify the page ID is correct: `maia workspace info koii`
 
 ### Using local prompt instead
 
@@ -221,11 +221,11 @@ Always has local `prompts/prompt.md` as a fallback if Notion is unavailable.
 **Solution**:
 - Check environment variable: `echo $PROMAIA_USE_NOTION_PROMPTS`
 - Look for warnings in logs: `tail -f promaia.log`
-- Test workspace connection: `maia workspace test acme`
+- Test workspace connection: `maia workspace test koii`
 
 ## Files Modified
 
-- `promaia/nlq/prompts.py` - Added workspace-aware fetch logic
+- `promaia/ai/prompts.py` - Added workspace-aware fetch logic
 - `promaia/notion/prompts.py` - Notion fetching module with MCP client
 - `promaia/agents/notion_setup.py` - Setup flow for Promaia page discovery
 - `promaia/cli/workspace_commands.py` - CLI command for `setup-promaia`
@@ -237,16 +237,16 @@ Always has local `prompts/prompt.md` as a fallback if Notion is unavailable.
 
 ```bash
 # 1. Add workspace
-maia workspace add acme --api-key secret_your_token
+maia workspace add koii --api-key secret_your_token
 
 # 2. Set up Promaia page (opens template in browser)
-maia workspace setup-promaia --workspace acme
+maia workspace setup-promaia --workspace koii
 
 # 3. Paste duplicated page URL when prompted
 # (System discovers Main prompt and other pages)
 
 # 4. Verify
-maia workspace info acme
+maia workspace info koii
 ```
 
 ### Daily Use

@@ -11,8 +11,8 @@ import google.generativeai as genai
 
 # Maia specific imports
 from promaia.storage.unified_reader import read_database_content
-from promaia.nlq.prompts import create_system_prompt
-from promaia.nlq.models import ANTHROPIC_MODELS, GOOGLE_MODELS
+from promaia.ai.prompts import create_system_prompt
+from promaia.ai.models import ANTHROPIC_MODELS, GOOGLE_MODELS
 from promaia.config.workspaces import get_workspace_manager
 from promaia.config.databases import get_database_manager
 
@@ -51,7 +51,7 @@ class WorkflowResponse(BaseModel):
 
 anthropic_client = None
 if os.getenv("ANTHROPIC_API_KEY"):
-    anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
+    anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 openai_client = None
 if os.getenv("OPENAI_API_KEY"):
@@ -137,13 +137,13 @@ def _parse_workflow(workflow: WorkflowRequest) -> Tuple[List[Dict[str, Any]], Op
 def _call_anthropic(system_prompt: str, user_message: str, model_data: Dict) -> str:
     """Call Anthropic API with given prompts and model configuration."""
     from anthropic import Anthropic
-    from promaia.nlq.models import ANTHROPIC_MODELS
+    from promaia.ai.models import ANTHROPIC_MODELS
     import os
     
-    client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"), base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
+    client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     response = client.messages.create(
         model=ANTHROPIC_MODELS.get("sonnet", "claude-sonnet-4-6"),
-        system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+        system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
         max_tokens=model_data.get("max_tokens", 4000),
         temperature=model_data.get("temperature", 0.7)

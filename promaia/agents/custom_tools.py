@@ -43,7 +43,7 @@ The result is formatted context data you can analyze.""",
     async def query_source_impl(args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute query_source with permission checking"""
         from promaia.storage.files import load_database_pages_with_filters
-        from promaia.nlq.prompts import format_context_data
+        from promaia.ai.prompts import format_context_data
 
         database = args.get("database")
         days = args.get("days", 7)
@@ -120,7 +120,7 @@ This searches for EXACT TEXT/KEYWORDS in content (not abstract concepts).
 Use for specific data retrieval when you know what you're looking for.
 
 Examples:
-- "Find emails from Alice about the project"
+- "Find emails from Federico about the project"
 - "Show tasks assigned to Alice due this week"
 - "Get journal entries mentioning 'budget meeting'"
 
@@ -159,7 +159,7 @@ Returns matching pages from Promaia databases.""",
 
             if result.get('success'):
                 # Format the loaded content for response
-                from promaia.nlq.prompts import format_context_data
+                from promaia.ai.prompts import format_context_data
                 loaded_content = result.get('loaded_content', {})
                 formatted = format_context_data(loaded_content)
 
@@ -266,7 +266,7 @@ Returns semantically similar pages from Promaia databases.""",
 
             if result.get('success'):
                 # Format the loaded content for response
-                from promaia.nlq.prompts import format_context_data
+                from promaia.ai.prompts import format_context_data
                 loaded_content = result.get('loaded_content', {})
                 formatted = format_context_data(loaded_content)
 

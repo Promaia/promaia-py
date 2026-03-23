@@ -22,37 +22,6 @@ logger = logging.getLogger(__name__)
 console = Console()
 
 
-async def _check_openrouter_anthropic_conflict(c: Console) -> None:
-    """Temporary: if ANTHROPIC_API_KEY is set, OpenRouter won't be used.
-
-    Offer to clear the Anthropic key so the OpenRouter shim activates.
-    This is a temporary workaround until proper multi-provider routing is built.
-    """
-    from promaia.utils.env_writer import read_env_value, update_env_value
-
-    anthropic_key = read_env_value("ANTHROPIC_API_KEY")
-    if not anthropic_key:
-        return
-
-    c.print()
-    c.print("  [bold yellow]Note:[/bold yellow] An Anthropic API key is already configured.")
-    c.print("  OpenRouter won't be used while a direct Anthropic key is present.")
-    c.print("  [dim](Direct Anthropic keys take priority over OpenRouter.)[/dim]")
-    c.print()
-
-    clear = Prompt.ask(
-        "  Clear Anthropic API key so OpenRouter is used instead? [Y/n]",
-        default="y",
-    ).strip().lower()
-
-    if clear in ("y", "yes", ""):
-        update_env_value("ANTHROPIC_API_KEY", "")
-        c.print("  [green]OK[/green] Anthropic API key cleared. OpenRouter will be used.")
-    else:
-        c.print("  [dim]Keeping Anthropic key. OpenRouter will not be active.[/dim]")
-        c.print("  [dim]To switch later, run: maia auth configure anthropic[/dim]")
-
-
 async def configure_credential(
     integration: Integration,
     con: Console | None = None,
@@ -86,17 +55,10 @@ async def configure_credential(
         return False
 
     if mode == AuthMode.OAUTH:
-        success = await _configure_oauth(integration, c, workspace=workspace, account=account)
-    elif mode == AuthMode.USER_OAUTH:
-        success = await _configure_user_oauth(integration, c, workspace=workspace, account=account)
-    else:
-        success = await _configure_api_key(integration, c, workspace=workspace)
-
-    # Temporary: warn about Anthropic key conflict when setting up OpenRouter
-    if success and integration.name == "openrouter":
-        await _check_openrouter_anthropic_conflict(c)
-
-    return success
+        return await _configure_oauth(integration, c, workspace=workspace, account=account)
+    if mode == AuthMode.USER_OAUTH:
+        return await _configure_user_oauth(integration, c, workspace=workspace, account=account)
+    return await _configure_api_key(integration, c, workspace=workspace)
 
 
 # ── OAuth flow ────────────────────────────────────────────────────────

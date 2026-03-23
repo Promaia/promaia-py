@@ -170,7 +170,7 @@ async def _select_database_interactive(source_types: Optional[List[str]] = None)
         source_types: If provided, only show databases whose source_type is in this list.
 
     Returns:
-        The qualified database name (e.g. "acme.slack-general"), or None if cancelled.
+        The qualified database name (e.g. "koii.slack-general"), or None if cancelled.
     """
     from prompt_toolkit.application import Application
     from prompt_toolkit.layout.containers import HSplit, Window
@@ -838,9 +838,9 @@ async def _handle_database_add_inner(args):
                 elif choice in workspaces:
                     workspace = choice
                 else:
-                    workspace = default_workspace or workspaces[0] if workspaces else None
+                    workspace = default_workspace or workspaces[0] if workspaces else "koii"
         else:
-            workspace = (await prompt_input("Workspace name: ")).strip() or None
+            workspace = (await prompt_input("Workspace name (default: koii): ")).strip() or "koii"
 
     # Discover source name for the nickname suggestion
     suggested_name = None
@@ -889,7 +889,7 @@ async def _handle_database_add_inner(args):
                 if '.' in name:
                     db_config = db_manager.get_database_by_qualified_name(name)
                 else:
-                    qualified_name = f"{workspace}.{name}" if workspace else name
+                    qualified_name = f"{workspace}.{name}" if workspace != "koii" else name
                     db_config = db_manager.get_database_by_qualified_name(qualified_name)
             
             if db_config:
@@ -2363,7 +2363,7 @@ def display_sync_summary(sync_results: List, overall_duration: float):
             if "Google not configured" in error_msg or "Token has expired" in error_msg:
                 print("      💡 Run: maia auth configure google")
             elif "Discord credentials not found" in error_msg:
-                print(f"      💡 Run: maia workspace discord-setup {workspace if '.' in db_name else 'default'}")
+                print(f"      💡 Run: maia workspace discord-setup {workspace if '.' in db_name else 'koii'}")
     # Overall summary
     print("🎯 OVERALL RESULTS")
     
@@ -2559,8 +2559,8 @@ def parse_source_specs(source_specs: List[str]) -> List[Dict[str, Any]]:
     - database_name:days (e.g., 'journal:7')
     - database_name:all (e.g., 'cms:all')
     - database_name.property=value (e.g., 'cms.Reference=true')
-    - database_name:days.property=value (e.g., 'cms:30.chat_flag=true')
-    - database_name#channel:days (e.g., 'acme.tg#general:7')
+    - database_name:days.property=value (e.g., 'cms:30.KOii_chat=true')
+    - database_name#channel:days (e.g., 'trass.tg#koii-work:7')
 
     Args:
         source_specs: List of source specification strings
@@ -2598,11 +2598,11 @@ def parse_source_specs(source_specs: List[str]) -> List[Dict[str, Any]]:
                 if ':' in after_hash:
                     discord_channel_name = after_hash.split(':', 1)[0]
                     # Reconstruct spec without the #channel part for normal parsing
-                    # e.g., 'acme.tg#general:7' becomes 'acme.tg:7'
+                    # e.g., 'trass.tg#koii-work:7' becomes 'trass.tg:7'
                     spec = before_hash + ':' + after_hash.split(':', 1)[1]
                 else:
                     discord_channel_name = after_hash
-                    # e.g., 'acme.tg#general' becomes 'acme.tg'
+                    # e.g., 'trass.tg#koii-work' becomes 'trass.tg'
                     spec = before_hash
 
             # Logic to separate database name from days/filters
@@ -2795,8 +2795,8 @@ def parse_filter_expression(filter_expr: str) -> Dict[str, Any]:
     
     # Check for source prefix (source:filter_expression or source.filter_expression)
     # But exclude global contains:"..." syntax which doesn't have a source prefix
-    # Updated regex to handle day specifications in source names (e.g., acme.discord:30, acme.yp:all)
-    # Also handle period separator for simple filters (e.g., acme.yp:14.discord_channel_name=value)
+    # Updated regex to handle day specifications in source names (e.g., trass.yeeps_discord:30, trass.yp:all)
+    # Also handle period separator for simple filters (e.g., trass.yp:14.discord_channel_name=value)
     source_match = re.match(r'^([a-zA-Z0-9_.-]+(?::[0-9]+|:all)?)[:.](.+)$', filter_expr)
     if source_match and not (filter_expr.startswith('contains:"') and ':' not in filter_expr[9:]):
         source = source_match.group(1)
@@ -3757,16 +3757,16 @@ def add_database_commands_to_existing_parser(parent_parser, subparsers):
     channel_subparsers = channel_parser.add_subparsers(dest='channel_command', help='Channel commands')
 
     ch_add_parser = channel_subparsers.add_parser('add', help='Add channels to a database via interactive browser')
-    ch_add_parser.add_argument('database_name', nargs='?', help='Database name (e.g., "dreamshare" or "acme.slack-general"). Omit to select interactively.')
+    ch_add_parser.add_argument('database_name', nargs='?', help='Database name (e.g., "dreamshare" or "koii.slack-general"). Omit to select interactively.')
     ch_add_parser.set_defaults(func=handle_database_add_channels)
 
     ch_remove_parser = channel_subparsers.add_parser('remove', help='Remove channels from a database via interactive browser')
-    ch_remove_parser.add_argument('database_name', nargs='?', help='Database name (e.g., "dreamshare" or "acme.slack-general"). Omit to select interactively.')
+    ch_remove_parser.add_argument('database_name', nargs='?', help='Database name (e.g., "dreamshare" or "koii.slack-general"). Omit to select interactively.')
     ch_remove_parser.add_argument('--force', action='store_true', help='Skip confirmation prompt')
     ch_remove_parser.set_defaults(func=handle_database_remove_channels)
 
     ch_list_parser = channel_subparsers.add_parser('list', help='List configured channels for a database')
-    ch_list_parser.add_argument('database_name', nargs='?', help='Database name (e.g., "dreamshare" or "acme.slack-general"). Omit to select interactively.')
+    ch_list_parser.add_argument('database_name', nargs='?', help='Database name (e.g., "dreamshare" or "koii.slack-general"). Omit to select interactively.')
     ch_list_parser.set_defaults(func=handle_database_channel_list)
 
     ch_rmi_parser = channel_subparsers.add_parser('rmi', help='Interactively select and remove channels with data purging')
@@ -3829,8 +3829,8 @@ def add_database_commands_to_existing_parser(parent_parser, subparsers):
     
     # Sync databases
     sync_parser = subparsers.add_parser('sync', help='Sync databases')
-    sync_parser.add_argument('--source', '-s', action='append', dest='sources', help='Source specifications (e.g., journal:30, acme.stories:7). Can be used multiple times.')
-    sync_parser.add_argument('--browse', '-b', nargs='*', help='Browse and select Discord channels to sync. Optionally specify databases (e.g., -b acme.discord acme.yeeps_discord)')
+    sync_parser.add_argument('--source', '-s', action='append', dest='sources', help='Source specifications (e.g., journal:30, trass.stories:7). Can be used multiple times.')
+    sync_parser.add_argument('--browse', '-b', nargs='*', help='Browse and select Discord channels to sync. Optionally specify databases (e.g., -b trass.discord trass.yeeps_discord)')
     sync_parser.add_argument('--workspace', '-ws', help='Workspace to sync (expands to all enabled databases in workspace with default days)')
     sync_parser.add_argument('--days', type=int, help='Number of days to sync')
     sync_parser.add_argument('--force', action='store_true', help='Force update all files')

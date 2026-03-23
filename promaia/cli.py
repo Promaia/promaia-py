@@ -48,6 +48,9 @@ from promaia.cli.database_commands import (
 from promaia.cli.conversion_commands import add_conversion_commands
 # from promaia.cli.edit_commands import edit  # Remove this import as we're using argparse handlers
 
+# Import newsletter commands
+from promaia.newsletter.commands import newsletter_sync_command, newsletter_test_command
+
 # Import mail commands
 from promaia.cli.mail_commands import add_mail_commands
 
@@ -782,10 +785,296 @@ async def pull_db_pages(database_id: str, output_dir: str, days: Optional[int] =
     if not fetch_all and not force_pull:
         update_last_sync_time(content_type)
 
+async def handle_cms_pull(args):
+    """Handles 'maia cms pull' command - pulls CMS entries for KOii chat context."""
+    logger.info("Starting CMS pull for KOii chat context")
+    
+    try:
+        from promaia.config.databases import get_database_config
+        database_config = get_database_config("cms")
+        if not database_config:
+            raise ValueError("CMS database not found in configuration")
+    except (FileNotFoundError, ValueError) as e:
+        logger.error(f"Error loading CMS database configuration: {e}")
+        return
+
+    await pull_cms_filtered(
+        database_config=database_config,
+        output_dir="KOii-chat-context", 
+        property_filters={"KOii chat": True},
+        days=args.days,
+        force=args.force,
+        description="KOii chat context"
+    )
+
+async def handle_cms_push(args):
+    """Handles 'maia cms push' command."""
+    logger.info(f"Initiating push to CMS")
+    
+    title = args.title
+
+    try:
+        database_id = get_notion_database_id("cms")
+    except (FileNotFoundError, ValueError) as e:
+        logger.error(f"Error loading Notion database ID for CMS: {e}")
+        return
+
+    logger.info(f"Pushing to Notion database ID: {database_id}")
+
+    draft_file_path = args.draft
+    if not draft_file_path:
+        draft_files = glob.glob("drafts/*.md")
+        if not draft_files:
+            logger.error("No draft files found in drafts/ directory. Specify with --draft <filepath>.")
+            return
+        draft_files.sort(key=os.path.getmtime, reverse=True)
+        draft_file_path = draft_files[0]
+        logger.info(f"No --draft specified, using most recent: {draft_file_path}")
+
+    if not os.path.exists(draft_file_path):
+        logger.error(f"Draft file not found: {draft_file_path}")
+        return
+
+    with open(draft_file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    final_title = title
+    if not final_title:
+        title_match = re.search(r'^#\\s+(.+)$', content, re.MULTILINE)
+        if title_match:
+            final_title = title_match.group(1).strip()
+        else:
+            final_title = os.path.basename(draft_file_path).replace('.md', '').replace('_', ' ').title()
+    
+    logger.info(f"Creating Notion page with title: '{final_title}'")
+    
+    try:
+        notion_client = ensure_default_client()
+        response = await notion_client.pages.create(
+            parent={"database_id": database_id},
+            properties={
+                "Name": {"title": [{"text": {"content": final_title}}]},
+                "Status": {"select": {"name": "Draft"}},
+                "Publish Date": {"date": {"start": now_utc().strftime("%Y-%m-%d")}}
+            },
+            children=[
+                {"object": "block", "type": "paragraph", "paragraph": {
+                    "rich_text": [{"type": "text", "text": {"content": "Content will be added by the editor. Full content from local draft."}}]
+                }}
+            ]
+        )
+        page_id = response["id"]
+        page_url = f"https://notion.so/{page_id.replace('-', '')}"
+        logger.info(f"SUCCESS: Created Notion page with ID: {page_id}")
+        logger.info(f"Page URL: {page_url}")
+        logger.info("\nCMS push completed successfully!")
+        logger.info("Note: You'll need to manually copy the content from the draft into the Notion page.")
+    except Exception as e:
+        logger.error(f"Error pushing to Notion: {str(e)}")
+        if hasattr(e, 'body'): logger.error(f"Details: {e.body}")
+
+async def handle_cms_sync(args):
+    """Handles 'maia cms sync' command."""
+    from promaia.webflow.sync import sync_to_webflow
+
+    logger.info(f"Initiating sync for CMS with Webflow.")
+    
+    try:
+        notion_db_id = get_notion_database_id("cms")
+    except (FileNotFoundError, ValueError) as e:
+        logger.error(f"Error loading Notion database ID for CMS: {e}")
+        return
+
+    webflow_collection_id = args.collection or os.getenv("WEBFLOW_COLLECTION_ID")
+    blog_status_prop = args.blog_status_property
+    force = args.force_update
+
+    if not webflow_collection_id:
+        logger.error("Webflow Collection ID not specified (use --collection or WEBFLOW_COLLECTION_ID env var).")
+        return
+
+    logger.info(f"Syncing Notion DB (CMS: {notion_db_id}) to Webflow Collection: {webflow_collection_id}")
+    logger.info(f"Using Notion status property: '{blog_status_prop}'")
+    if force: logger.info("--force-update flag is active.")
+
+    try:
+        await sync_to_webflow(
+            notion_database_id=notion_db_id,
+            webflow_collection_id=webflow_collection_id,
+            blog_status_property_name=blog_status_prop,
+            force_update=force
+        )
+    except Exception as e:
+        logger.error(f"Error during Notion-Webflow sync: {str(e)}")
+        traceback.print_exc()
+
+async def pull_cms_filtered(database_config, output_dir, property_filters, days, force, description):
+    """Helper function to pull filtered CMS content to a specific directory."""
+    import os
+    import json
+    from datetime import datetime
+    from promaia.connectors import ConnectorRegistry
+    # Create output directory
+    full_output_dir = os.path.join(os.getcwd(), output_dir)
+    os.makedirs(full_output_dir, exist_ok=True)
+    
+    logger.info(f"Saving {description} to: {full_output_dir}")
+    
+    # Configure connector with appropriate credentials
+    connector_config = database_config.to_dict()
+    
+    if database_config.source_type == 'discord':
+        # Load Discord bot token from credentials file
+        from promaia.utils.env_writer import get_data_dir
+        config_dir = str(get_data_dir() / "credentials" / database_config.workspace)
+        credentials_file = os.path.join(config_dir, "discord_credentials.json")
+        
+        if not os.path.exists(credentials_file):
+            logger.error(f"Discord credentials not found for workspace '{database_config.workspace}'")
+            logger.error(f"Please run: maia workspace discord-setup {database_config.workspace}")
+            return
+        
+        try:
+            with open(credentials_file, 'r') as f:
+                creds_data = json.load(f)
+            connector_config['bot_token'] = creds_data.get("bot_token")
+        except Exception as e:
+            logger.error(f"Failed to load Discord credentials: {e}")
+            return
+    elif database_config.source_type == 'slack':
+        bot_token = os.environ.get("SLACK_BOT_TOKEN")
+        if bot_token:
+            connector_config['bot_token'] = bot_token
+    else:
+        from promaia.auth import get_integration
+        api_key = get_integration("notion").get_notion_credentials(database_config.workspace)
+        if not api_key:
+            logger.error(f"No credentials configured for workspace '{database_config.workspace}'")
+            return
+        connector_config['api_key'] = api_key
+
+    connector = ConnectorRegistry.get_connector(database_config.source_type, connector_config)
+    if not connector:
+        logger.error(f"Could not create connector for {database_config.source_type}")
+        return
+    
+    # Parse days argument
+    if days is not None:
+        if isinstance(days, str) and days.lower() == 'all':
+            days = None  # All entries
+        else:
+            try:
+                days = int(days)
+            except ValueError:
+                days = database_config.default_days
+    else:
+        days = database_config.default_days
+    
+    logger.info(f"Filtering CMS pages with {property_filters}, days: {days or 'all'}")
+    
+    try:
+        # Build filters
+        from promaia.connectors.base import QueryFilter, DateRangeFilter
+        from datetime import datetime
+        from promaia.utils.timezone_utils import days_ago_utc, now_utc
+        
+        filters = []
+        for prop_name, prop_value in property_filters.items():
+            filters.append(QueryFilter(
+                property_name=prop_name,
+                operator="eq",
+                value=prop_value
+            ))
+        
+        # Create date filter if days is specified
+        date_filter = None
+        if days:
+            start_date = days_ago_utc(days)
+            date_filter = DateRangeFilter(
+                property_name="last_edited_time",
+                start_date=start_date,
+                end_date=None
+            )
+        
+        pages = await connector.query_pages(filters=filters, date_filter=date_filter)
+        logger.info(f"Found {len(pages)} pages matching filters")
+        
+        # Save pages
+        saved_count = 0
+        for page in pages:
+            try:
+                page_id = page.get("id", "unknown")
+                
+                # Extract title
+                title = "Untitled"
+                properties = page.get("properties", {})
+                for prop_name, prop_data in properties.items():
+                    if prop_data.get("type") == "title" and prop_data.get("title"):
+                        title = prop_data["title"][0].get("plain_text", "Untitled")
+                        break
+                
+                # Get page content
+                try:
+                    from promaia.notion.pages import get_block_content
+                    from promaia.markdown.converter import page_to_markdown
+                    content_blocks = await get_block_content(page_id)
+                    markdown_content = page_to_markdown(content_blocks)
+                    page["content"] = markdown_content
+                except Exception as content_error:
+                    logger.warning(f"Could not fetch content for page {page_id}: {content_error}")
+                    page["content"] = ""
+                
+                # Clean title for filename
+                clean_title = "".join(c for c in title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+                clean_title = clean_title.replace(' ', '_')
+                if not clean_title:
+                    clean_title = f"untitled_{page_id[:8]}"
+                
+                # Save as JSON
+                json_filename = f"{clean_title}_{page_id[:8]}.json"
+                json_path = os.path.join(full_output_dir, json_filename)
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(page, f, indent=2, ensure_ascii=False)
+                
+                # Save as markdown if content exists
+                if page.get("content"):
+                    md_filename = f"{clean_title}_{page_id[:8]}.md"
+                    md_path = os.path.join(full_output_dir, md_filename)
+                    with open(md_path, 'w', encoding='utf-8') as f:
+                        f.write(f"# {title}\n\n")
+                        f.write(page["content"])
+                
+                saved_count += 1
+                logger.info(f"Saved: {clean_title}")
+                
+            except Exception as e:
+                logger.error(f"Error saving page {page_id}: {e}")
+        
+        logger.info(f"Successfully saved {saved_count} {description} pages")
+        
+        # Create metadata file
+        metadata = {
+            "created_at": now_utc().isoformat(),
+            "filter_applied": property_filters,
+            "days_filter": days,
+            "total_pages": len(pages),
+            "saved_pages": saved_count,
+            "description": description
+        }
+        
+        metadata_path = os.path.join(full_output_dir, "_metadata.json")
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+        
+    except Exception as e:
+        logger.error(f"Error querying CMS pages: {e}")
+        import traceback
+        traceback.print_exc()
+
 # ==================== CORE COMMANDS ====================
 
 def extract_database_names_from_sources(sources: List[str]) -> List[str]:
-    """Extract database nicknames from source selections (e.g., 'workspace.journal' -> 'journal')."""
+    """Extract database nicknames from source selections (e.g., 'koii.journal' -> 'journal')."""
     database_names = []
     for source in sources:
         if '.' in source:
@@ -836,8 +1125,8 @@ def chat_run(args):
     # Initialize selected_sources to avoid scoping issues
     selected_sources = None
     
-    # Flatten nested lists from multiple -b flags: [['acme'], ['acme.tg']] -> ['acme', 'acme.tg']
-    # Also handles single -b with multiple args: [['acme', 'acme.tg']] -> ['acme', 'acme.tg']
+    # Flatten nested lists from multiple -b flags: [['trass'], ['trass.tg']] -> ['trass', 'trass.tg']
+    # Also handles single -b with multiple args: [['trass', 'trass.tg']] -> ['trass', 'trass.tg']
     browse_args = None
     if raw_browse_args is not None:
         browse_args = []
@@ -1081,7 +1370,7 @@ def chat_run(args):
 
                     for source in selected_sources:
                         if '#' in source:
-                            # Discord channel: acme.tg#customer-support:7
+                            # Discord channel: trass.tg#customer-support:7
                             db_channel, days_part = source.rsplit(':', 1)
                             db_name, channel_name = db_channel.split('#', 1)
 
@@ -1149,7 +1438,7 @@ def chat_run(args):
                     # Step 2: Process vector search queries (if present)
                     if vs_prompts:
                         try:
-                            from promaia.nlq.nl_processor_wrapper import process_vector_search_to_content
+                            from promaia.ai.nl_processor_wrapper import process_vector_search_to_content
 
                             combined_vs_content = {}
                             for i, vs_prompt in enumerate(vs_prompts):
@@ -1328,10 +1617,10 @@ def chat_run(args):
 
                     for source in selected_sources:
                         if '#' in source:
-                            # Discord channel: acme.tg#customer-support:7
+                            # Discord channel: trass.tg#customer-support:7
                             db_channel, days_part = source.rsplit(':', 1)
                             db_name, channel_name = db_channel.split('#', 1)
-
+                            
                             # Group by database + days combination
                             db_key = f"{db_name}:{days_part}"
                             if db_key not in discord_db_groups:
@@ -1392,7 +1681,7 @@ def chat_run(args):
                 # Step 2: Process vector search queries (if present)
                 if vs_prompts:
                     try:
-                        from promaia.nlq.nl_processor_wrapper import process_vector_search_to_content
+                        from promaia.ai.nl_processor_wrapper import process_vector_search_to_content
 
                         combined_vs_content = {}
                         for i, vs_prompt in enumerate(vs_prompts):
@@ -1585,7 +1874,7 @@ def chat_run(args):
         vs_prompts = [q['query'] for q in vs_queries_structured]
 
         try:
-            from promaia.nlq.nl_processor_wrapper import process_vector_search_to_content
+            from promaia.ai.nl_processor_wrapper import process_vector_search_to_content
             
             # Resolve workspace first for vector search processing
             workspace_manager = get_workspace_manager()
@@ -2001,10 +2290,10 @@ def chat_run_inline_browse(args):
     - Make parallel changes to keep them synchronized
     
     TEST REQUIREMENTS:
-    - Test both: `maia chat -b acme.tg` AND using /e to change browse context
-    - Verify workspace names work: `maia chat -b acme` AND /e with workspace
-    - Verify Discord servers work: `maia chat -b acme.tg` AND /e with servers
-    - Verify multi-workspace: `maia chat -b acme other` AND /e with multiple
+    - Test both: `maia chat -b trass.tg` AND using /e to change browse context
+    - Verify workspace names work: `maia chat -b trass` AND /e with workspace
+    - Verify Discord servers work: `maia chat -b trass.tg` AND /e with servers
+    - Verify multi-workspace: `maia chat -b trass koii` AND /e with multiple
     
     See: promaia/chat/interface.py - handle_browse_in_edit_context()
     See: promaia/chat/interface.py - handle_manual_browse_edit()
@@ -2021,7 +2310,7 @@ def chat_run_inline_browse(args):
         # Resolve workspace
         resolved_workspace = original_workspace
         sources = getattr(args, 'sources', None) or []
-        # Flatten nested lists from multiple -b flags: [['acme.tg'], ['acme']] -> ['acme.tg', 'acme']
+        # Flatten nested lists from multiple -b flags: [['trass.tg'], ['trass']] -> ['trass.tg', 'trass']
         raw_browse = getattr(args, 'browse', [])
         browse_databases = []
         if raw_browse:
@@ -2136,10 +2425,10 @@ def chat_run_inline_browse(args):
             
             for source in selected_sources:
                 if '#' in source:
-                    # Discord channel: acme.tg#customer-support:7
+                    # Discord channel: trass.tg#customer-support:7
                     db_channel, days_part = source.rsplit(':', 1)
                     db_name, channel_name = db_channel.split('#', 1)
-
+                    
                     # Group by database + days combination
                     db_key = f"{db_name}:{days_part}"
                     if db_key not in discord_db_groups:
@@ -2717,7 +3006,7 @@ def create_parser():
     
     # Add mail commands
     add_mail_commands(subparsers)
-
+    
     # Add Gmail commands
     add_gmail_commands(subparsers)
 
@@ -2726,6 +3015,10 @@ def create_parser():
 
     # Add team management commands
     add_team_commands(subparsers)
+
+    # Add OCR commands
+    from promaia.cli.ocr_commands import register_ocr_commands
+    register_ocr_commands(subparsers)
 
     # Add conversation management commands
     add_conversation_commands(subparsers)
@@ -2775,8 +3068,8 @@ def create_parser():
     # Add top-level sync command (alias for database sync)
     sync_parser = subparsers.add_parser('sync', help='Sync databases (alias for database sync)')
     sync_parser.add_argument('--source', '-s', dest='sources', action='append',
-                            help='Source specifications (e.g., journal:30, acme.stories:7). Can be used multiple times.')
-    sync_parser.add_argument('--browse', '-b', action='append', nargs='*', help='Browse and select Discord channels to sync. Optionally specify databases (e.g., -b acme.discord acme.yeeps_discord)')
+                            help='Source specifications (e.g., journal:30, trass.stories:7). Can be used multiple times.')
+    sync_parser.add_argument('--browse', '-b', action='append', nargs='*', help='Browse and select Discord channels to sync. Optionally specify databases (e.g., -b trass.discord trass.yeeps_discord)')
     sync_parser.add_argument('--workspace', '-ws', help='Workspace to sync (expands to all enabled databases in workspace with default days)')
     sync_parser.add_argument('--days', type=int, help='Number of days to sync')
     sync_parser.add_argument('--force', action='store_true', help='Force update all files')
@@ -2811,7 +3104,7 @@ def create_parser():
         "--browse", "-b",
         action="append",
         nargs="*",
-        help="Launch interactive browser to select sources. For workspaces: '-b workspace_name' (e.g., -b acme). For Discord channels: '-b discord' or specific databases (e.g., -b acme.yp). Without arguments, shows all available sources."
+        help="Launch interactive browser to select sources. For workspaces: '-b workspace_name' (e.g., -b trass). For Discord channels: '-b discord' or specific databases (e.g., -b trass.yp). Without arguments, shows all available sources."
     )
     chat_parser.add_argument(
         "--non-interactive",
@@ -2900,6 +3193,47 @@ def create_parser():
     model_parser = subparsers.add_parser("model", help="Set the default AI model for chat and writing tasks")
     model_parser.set_defaults(func=model_run)
 
+    # CMS command (legacy support for blog/newsletter workflow)
+    cms_parser = subparsers.add_parser("cms", help="Content management system operations")
+    cms_subparsers = cms_parser.add_subparsers(dest="cms_action", required=True, help="CMS action to perform")
+    
+    cms_pull_parser = cms_subparsers.add_parser("pull", help="Pull CMS entries for KOii chat context")
+    cms_pull_parser.add_argument("--days", type=lambda x: x.lower() if x.lower() == 'all' else int(x), default=30, help="Number of days to look back (default: 30)")
+    cms_pull_parser.add_argument("--force", action="store_true", default=False, help="Force pull ignoring last sync time.")
+    cms_pull_parser.set_defaults(func=handle_cms_pull)
+    
+    cms_sync_parser = cms_subparsers.add_parser("sync", help="Sync CMS content to Webflow")
+    cms_sync_parser.add_argument("--collection", help="Webflow collection ID (or use WEBFLOW_COLLECTION_ID env var)")
+    cms_sync_parser.add_argument("--blog-status-property", default="Blog Status", help="Notion property name for blog status (default: 'Blog Status')")
+    cms_sync_parser.add_argument("--force-update", action="store_true", help="Force update even if already synced")
+    cms_sync_parser.set_defaults(func=handle_cms_sync)
+    
+    # Newsletter command
+    newsletter_parser = subparsers.add_parser("newsletter", help="Newsletter operations")
+    newsletter_subparsers = newsletter_parser.add_subparsers(dest="newsletter_action", required=True, help="Newsletter action")
+    
+    newsletter_send_parser = newsletter_subparsers.add_parser("send", help="Send newsletters via Resend for eligible CMS pages")
+    newsletter_send_parser.add_argument("--force", action="store_true", help="Skip confirmation prompt (use with caution)")
+    newsletter_send_parser.set_defaults(func=newsletter_sync_command)
+    
+    newsletter_test_parser = newsletter_subparsers.add_parser("test", help="Test newsletter generation without sending")
+    newsletter_test_parser.add_argument("--email", action="append", help="Email address to send test to (can be used multiple times)")
+    newsletter_test_parser.set_defaults(func=newsletter_test_command)
+
+    # Add 'news' alias for newsletter
+    news_parser = subparsers.add_parser("news", help="Newsletter operations (alias for newsletter)")
+    news_subparsers = news_parser.add_subparsers(dest="newsletter_action", required=True, help="Newsletter action")
+
+    news_send_parser = news_subparsers.add_parser("send", help="Send newsletters via Resend for eligible CMS pages")
+    news_send_parser.add_argument("--force", action="store_true", help="Skip confirmation prompt (use with caution)")
+    news_send_parser.set_defaults(func=newsletter_sync_command)
+
+    news_test_parser = news_subparsers.add_parser("test", help="Test newsletter generation without sending")
+    news_test_parser.add_argument("--email", action="append", help="Email address to send test to (can be used multiple times)")
+    news_test_parser.set_defaults(func=newsletter_test_command)
+    
+
+
     # Add conversion commands
     add_conversion_commands(subparsers)
 
@@ -2954,7 +3288,7 @@ def create_parser():
 
     # Discord bot command
     discord_parser = subparsers.add_parser("discord-bot", help="Start Promaia Discord bot")
-    discord_parser.add_argument("--workspace", "-w", default=None, help="Workspace to use for bot configuration")
+    discord_parser.add_argument("--workspace", "-w", default="koii", help="Workspace to use for bot configuration")
     discord_parser.add_argument("--token", help="Discord bot token (optional, will use credentials file if not provided)")
     discord_parser.set_defaults(func=handle_discord_bot)
 
@@ -2974,11 +3308,9 @@ def main():
     # In non-interactive mode (like in the app), send logs to a file
     # and only critical errors to stderr.
     if not sys.stdout.isatty():
-        from promaia.utils.env_writer import get_data_dir
-        log_path = get_data_dir() / "maia_desktop.log"
         logging.basicConfig(level=log_level,
                             format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-                            filename=str(log_path),
+                            filename='maia_desktop.log',
                             filemode='w')
         # Also log critical errors to stderr for the app to see
         stderr_handler = logging.StreamHandler(sys.stderr)

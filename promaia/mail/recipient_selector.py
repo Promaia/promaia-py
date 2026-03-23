@@ -23,60 +23,29 @@ class RecipientMode:
 class RecipientSelector:
     """Interactive recipient selector for emails."""
     
-    def __init__(
-        self,
-        from_addr: str,
-        to_addr: str,
-        cc_addr: Optional[str] = None,
-        thread_context: Optional[str] = None,
-        user_email: Optional[str] = None,
-        default_recipients: Optional[List[str]] = None,
-        default_cc: Optional[List[str]] = None,
-    ):
+    def __init__(self, from_addr: str, to_addr: str, cc_addr: Optional[str] = None, thread_context: Optional[str] = None, user_email: Optional[str] = None):
         """
         Initialize recipient selector.
-
+        
         Args:
             from_addr: The sender's email address
             to_addr: The original TO field
             cc_addr: The original CC field
             thread_context: Optional thread context to extract more recipients
             user_email: User's email address (to exclude from reply all)
-            default_recipients: Pre-populated recipients (starts in Custom mode)
-            default_cc: Pre-populated CC recipients (merged into recipient list)
         """
         self.from_addr = from_addr
         self.to_addr = to_addr
         self.cc_addr = cc_addr or ""
         self.thread_context = thread_context or ""
         self.user_email = user_email.lower() if user_email else None
-
+        
         # Extract all unique email addresses from thread
         self.all_recipients = self._extract_all_recipients()
-
-        # Merge default recipients/CC into the recipient list if provided
-        if default_recipients or default_cc:
-            extras = set()
-            for email in (default_recipients or []):
-                extras.add(email.strip().lower())
-            for email in (default_cc or []):
-                extras.add(email.strip().lower())
-            # Add any new addresses not already in the list
-            for email in sorted(extras):
-                if email not in self.all_recipients:
-                    self.all_recipients.append(email)
-
+        
         # State
-        if default_recipients:
-            # Pre-populated: start in Custom mode with only the specified recipients selected
-            self.mode = RecipientMode.CUSTOM
-            default_set = {e.strip().lower() for e in default_recipients}
-            if default_cc:
-                default_set.update(e.strip().lower() for e in default_cc)
-            self.selected_recipients = default_set
-        else:
-            self.mode = RecipientMode.REPLY_ALL  # Default to reply all
-            self.selected_recipients = set(self.all_recipients)  # Initially all selected
+        self.mode = RecipientMode.REPLY_ALL  # Default to reply all
+        self.selected_recipients = set(self.all_recipients)  # Initially all selected
         self.current_selection = 0  # For custom mode navigation
         self.editing_index = None  # Track which recipient is being edited
         self.edit_buffer = ""  # Buffer for editing email address
@@ -210,8 +179,8 @@ class RecipientSelector:
             - selected_recipients: List of selected email addresses
         """
         # State
+        mode_index = 1  # Start at Reply All (index 1)
         modes = [RecipientMode.REPLY_SENDER, RecipientMode.REPLY_ALL, RecipientMode.CUSTOM]
-        mode_index = modes.index(self.mode)  # Start at current mode (Custom if pre-populated)
         confirmed = False
         
         while True:

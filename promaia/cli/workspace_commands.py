@@ -56,33 +56,6 @@ async def handle_workspace_add(args):
     api_key = getattr(args, 'api_key', None)
     description = getattr(args, 'description', '')
 
-    # Auto-detect workspace name from Notion if not provided
-    if not name:
-        from promaia.notion.client import fetch_workspace_name, _sanitize_workspace_name
-
-        # Resolve an API key: explicit flag -> existing credentials
-        token = api_key
-        if not token:
-            from promaia.auth import get_integration
-            token = get_integration("notion").get_default_credential()
-
-        if token:
-            raw_name = await fetch_workspace_name(token)
-            if raw_name:
-                suggested = _sanitize_workspace_name(raw_name)
-                user_input = input(
-                    f"Workspace name [{suggested}]: "
-                ).strip()
-                name = user_input if user_input else suggested
-            else:
-                name = input("Workspace name: ").strip()
-        else:
-            name = input("Workspace name: ").strip()
-
-        if not name:
-            print("Workspace name is required")
-            return
-
     if workspace_manager.add_workspace(name, description):
         print(f"✓ Added workspace '{name}'")
 
@@ -169,13 +142,6 @@ async def handle_workspace_info(args):
     else:
         print("Credentials: Not configured")
     print(f"Created: {workspace.created_at}")
-
-    # Show Promaia setup status
-    print(f"\nPromaia Setup:")
-    print(f"  Promaia Page: {workspace.promaia_page_id or 'Not configured'}")
-    print(f"  Main Prompt:  {workspace.main_prompt_page_id or 'Not configured'}")
-    print(f"  Agents DB:    {workspace.agents_database_id or 'Not configured'}")
-    print(f"  Prompts DB:   {getattr(workspace, 'prompts_database_id', None) or 'Not configured'}")
 
     # Show databases in this workspace
     workspace_databases = db_manager.get_workspace_databases(name)
@@ -281,100 +247,29 @@ async def handle_workspace_setup_promaia(args):
     workspace_name = getattr(args, 'workspace', None) or workspace_manager.get_default_workspace()
 
     if not workspace_name:
-        print("No workspace specified and no default workspace set")
+        print("✗ No workspace specified and no default workspace set")
         print("  Add a workspace first: maia workspace add <name> --api-key <token>")
         return
 
     # Validate workspace exists
     workspace = workspace_manager.get_workspace(workspace_name)
     if not workspace:
-        print(f"Workspace '{workspace_name}' not found")
+        print(f"✗ Workspace '{workspace_name}' not found")
         print(f"  Available workspaces: {', '.join(workspace_manager.list_workspaces())}")
         return
 
-    from promaia.agents.notion_setup import _extract_page_id_from_url
-
-    # Handle --reset: clear stored IDs so setup runs from scratch
-    if getattr(args, 'reset', False):
-        print(f"Resetting Promaia page config for '{workspace_name}'...")
-        workspace.promaia_page_id = None
-        workspace.main_prompt_page_id = None
-        workspace.agents_database_id = None
-        workspace.agents_page_id = None
-        workspace.prompts_database_id = None
-        workspace_manager.save_config()
-        print("  Cleared all Promaia page IDs. Running setup from scratch.\n")
-
-    # Handle --set-ids: manually specify all three IDs
-    set_ids = getattr(args, 'set_ids', None)
-    if set_ids:
-        if len(set_ids) != 3:
-            print("--set-ids requires exactly 3 values: <promaia_page> <main_prompt> <agents_db>")
-            return
-        promaia_id = _extract_page_id_from_url(set_ids[0])
-        prompt_id = _extract_page_id_from_url(set_ids[1])
-        agents_id = _extract_page_id_from_url(set_ids[2])
-
-        workspace.promaia_page_id = promaia_id
-        workspace.main_prompt_page_id = prompt_id
-        workspace.agents_database_id = agents_id
-        workspace.agents_page_id = promaia_id
-        workspace_manager.save_config()
-
-        print(f"Promaia IDs set for '{workspace_name}':")
-        print(f"   Promaia page:  {promaia_id}")
-        print(f"   Main prompt:   {prompt_id}")
-        print(f"   Agents DB:     {agents_id}")
-        return
-
-    # Handle --page: set promaia page, then discover children
-    page_arg = getattr(args, 'page', None)
-    if page_arg:
-        from promaia.agents.notion_setup import _discover_promaia_components
-        from promaia.notion.client import get_client
-
-        page_id = _extract_page_id_from_url(page_arg)
-        print(f"Using Promaia page: {page_id}")
-        print("Discovering components...")
-
-        client = get_client(workspace_name)
-        discovered = await _discover_promaia_components(client, page_id)
-
-        workspace.promaia_page_id = page_id
-        workspace.agents_page_id = page_id
-        if discovered.get("main_prompt_page_id"):
-            workspace.main_prompt_page_id = discovered["main_prompt_page_id"]
-        if discovered.get("agents_database_id"):
-            workspace.agents_database_id = discovered["agents_database_id"]
-        if discovered.get("prompts_database_id"):
-            workspace.prompts_database_id = discovered["prompts_database_id"]
-        workspace_manager.save_config()
-
-        print(f"\nPromaia page configured for '{workspace_name}':")
-        print(f"   Promaia page:  {page_id}")
-        print(f"   Main prompt:   {workspace.main_prompt_page_id or 'Not found'}")
-        print(f"   Agents DB:     {workspace.agents_database_id or 'Not found'}")
-        print(f"   Prompts DB:    {workspace.prompts_database_id or 'Not found'}")
-
-        missing = []
-        if not workspace.main_prompt_page_id:
-            missing.append("Main prompt")
-        if not workspace.agents_database_id:
-            missing.append("Agents DB")
-        if missing:
-            print(f"\n   Missing: {', '.join(missing)}")
-            print("   These will be created automatically on next agent add or setup run.")
-        return
-
     try:
-        print(f"Setting up Promaia page for workspace: {workspace_name}")
+        print(f"\nSetting up Promaia page for workspace: {workspace_name}")
         promaia_page_id, main_prompt_page_id = await setup_promaia_page(workspace_name)
 
-        print(f"\nYour main prompt will now sync from Notion automatically")
+        print(f"\n✅ Promaia page setup complete!")
+        print(f"   Promaia page ID: {promaia_page_id}")
+        print(f"   Main prompt page ID: {main_prompt_page_id}")
+        print(f"\n💡 Your main prompt will now sync from Notion automatically")
         print(f"   The local prompt file will be used as fallback")
 
     except Exception as e:
-        print(f"\nFailed to set up Promaia page: {str(e)}")
+        print(f"\n✗ Failed to set up Promaia page: {str(e)}")
         logger.exception("Error in setup-promaia command")
 
 def add_workspace_commands(subparsers):
@@ -398,7 +293,7 @@ def add_workspace_commands_to_existing_parser(parent_parser, subparsers):
     
     # Add workspace
     add_parser = subparsers.add_parser('add', help='Add a new workspace')
-    add_parser.add_argument('name', nargs='?', default=None, help='Workspace name (auto-detected from Notion if omitted)')
+    add_parser.add_argument('name', help='Workspace name/nickname')
     add_parser.add_argument('--api-key', dest='api_key', help='Notion API key (can also set later via: maia auth configure notion)')
     add_parser.add_argument('--description', help='Optional description')
     add_parser.add_argument('--set-default', action='store_true', help='Set as default workspace')
@@ -445,9 +340,6 @@ def add_workspace_commands_to_existing_parser(parent_parser, subparsers):
     # Setup Promaia page
     setup_promaia_parser = subparsers.add_parser('setup-promaia', help='Set up Promaia page (main prompt and resources)')
     setup_promaia_parser.add_argument('--workspace', '-ws', help='Workspace name (uses default if not specified)')
-    setup_promaia_parser.add_argument('--reset', action='store_true', help='Clear existing Promaia IDs and re-create from scratch')
-    setup_promaia_parser.add_argument('--page', metavar='URL_OR_ID', help='Existing Promaia page URL/ID -- discovers child databases automatically')
-    setup_promaia_parser.add_argument('--set-ids', nargs=3, metavar=('PROMAIA_PAGE', 'MAIN_PROMPT', 'AGENTS_DB'), help='Manually set all three IDs (URL or raw ID)')
     setup_promaia_parser.set_defaults(func=handle_workspace_setup_promaia)
 
     # Gmail setup (optional)

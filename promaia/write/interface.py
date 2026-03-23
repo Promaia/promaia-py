@@ -17,13 +17,13 @@ from prompt_toolkit.formatted_text import HTML
 from promaia.storage.files import read_markdown_files, get_existing_page_ids
 from promaia.utils.config import get_chat_days_setting, set_chat_days_setting, load_environment
 from promaia.chat.interface import get_api_preference, create_system_prompt, display_message_with_timestamp
-from promaia.nlq.models import ANTHROPIC_MODELS
+from promaia.ai.models import ANTHROPIC_MODELS
 from promaia.notion.client import notion_client
 from promaia.notion.pages import get_sync_pages, get_pages_by_properties, get_page_title, get_block_content, clear_block_cache
 from promaia.markdown.converter import page_to_markdown
 from promaia.storage.files import save_page_to_file
 from promaia.utils.config_loader import get_notion_database_id
-from promaia.nlq.models import GOOGLE_MODELS, LLAMA_MODELS
+from promaia.ai.models import GOOGLE_MODELS, LLAMA_MODELS
 from promaia.utils.display import print_text, print_markdown, print_separator
 
 # Load environment variables
@@ -37,7 +37,7 @@ from promaia.utils.env_writer import get_data_dir as _get_data_dir
 session = PromptSession(history=FileHistory(str(_get_data_dir() / ".maia_write_history")))
 
 # Create drafts directory if it doesn't exist
-DRAFTS_DIR = str(_get_data_dir() / "drafts")
+DRAFTS_DIR = "drafts"
 os.makedirs(DRAFTS_DIR, exist_ok=True)
 
 DEBUG_MODE = os.environ.get("MAIA_DEBUG") == "1"
@@ -260,12 +260,50 @@ def save_blog_post(content):
 async def get_reference_webflow_page_ids():
     """
     Get Webflow entry page IDs from Notion where the "Reference" property is checked.
-
+    
     Returns:
         List of Notion page IDs with Reference=True, or None if error.
     """
-    # CMS database removed - return None to fall back to all webflow pages
-    return None
+    try:
+        # Get the Webflow CMS database ID from environment
+        # database_id = os.getenv("NOTION_WEBFLOW_DATABASE_ID") # Old way
+        try:
+            database_id = get_notion_database_id("cms") # New way
+        except (FileNotFoundError, ValueError) as e:
+            error_message = f"Error loading Notion database ID for 'cms': {e}"
+            console.print(f"[warning]{error_message}[/warning]")
+            debug_print(error_message)
+            return None
+        
+        if not database_id: # Should be caught by get_notion_database_id
+            console.print("[warning]No database ID found for Webflow CMS (nickname 'cms'). Cannot fetch reference pages.[/warning]")
+            return None
+            
+        console.print("[info]Fetching Webflow entries with Reference=True from Notion...[/info]")
+        
+        # Get pages with Reference=True using the existing get_sync_pages helper
+        # Assuming get_sync_pages can handle checkbox properties by name
+        pages = await get_sync_pages(database_id, "Reference") # Changed property name
+        
+        if not pages:
+            console.print("[warning]No reference Webflow entries found in Notion (Reference checkbox is unchecked).[/warning]")
+            return []
+            
+        console.print(f"[info]Found {len(pages)} reference Webflow entries in Notion.[/info]")
+        
+        # Extract the page IDs
+        page_ids = [page["id"] for page in pages]
+        return page_ids
+        
+    except Exception as e:
+        # Check if the error is specifically about the property not existing
+        if "Reference is not a property that exists" in str(e):
+             console.print("[error]Error fetching reference entries: The 'Reference' property does not exist in the Notion database.[/error]")
+        elif "Could not find property with name or id: Reference" in str(e):
+             console.print("[error]Error fetching reference entries: The 'Reference' property could not be found. Check spelling and case.[/error]")
+        else:
+            console.print(f"[error]Error fetching reference Webflow entries: {str(e)}[/error]")
+        return None
 
 def filter_webflow_entries_by_page_ids(webflow_pages, page_ids):
     """
@@ -379,8 +417,8 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
     else:
         console.print("[info]Skipping journal entries as reference material as requested.[/info]")
     
-    # Load all webflow content
-    all_webflow_pages = read_content_by_type("webflow")
+    # Load all webflow content first
+    all_webflow_pages = read_content_by_type("cms")
     console.print(f"[info]Found {len(all_webflow_pages)} total local webflow entries[/info]")
     
     # Get reference Webflow page IDs from Notion
@@ -411,7 +449,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
     system_prompt = create_blog_system_prompt(journal_pages, webflow_pages, custom_prompt, api_type, max_entries)
 
     # Save the system prompt to a file without output
-    debug_dir = str(_get_data_dir() / "debug")
+    debug_dir = "debug"
     os.makedirs(debug_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     debug_file = os.path.join(debug_dir, f"write_prompt_{timestamp}.txt")
@@ -431,12 +469,12 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
         if api_type == "anthropic":
             # Anthropic sync client used here
             from anthropic import Anthropic
-            client = Anthropic(base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
+            client = Anthropic()
             response = client.messages.create(
                 model=ANTHROPIC_MODELS.get("sonnet", "claude-sonnet-4-6"),
                 max_tokens=4000,
                 temperature=0.7,
-                system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+                system=system_prompt,
                 messages=[
                     {"role": "user", "content": "Please write a blog post based on the journal entries and webflow content provided."}
                 ]
@@ -465,7 +503,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
             genai.configure(api_key=google_api_key)
 
             # Initialize Model
-            from promaia.nlq.models import get_current_google_model
+            from promaia.ai.models import get_current_google_model
             model = genai.GenerativeModel(get_current_google_model())
 
             # Start chat session
@@ -489,7 +527,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
             blog_content = response.text
             # Save the response to a file without output
             with open(os.path.join(debug_dir, f"write_response_{timestamp}.json"), "w", encoding="utf-8") as f:
-                from promaia.nlq.models import get_current_google_model
+                from promaia.ai.models import get_current_google_model
                 f.write(json.dumps({
                     "model": get_current_google_model(),
                     "content": blog_content
@@ -589,10 +627,11 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
         console.print("\n[info]Pushing blog post to Notion...[/info]")
         
         # Get the database ID
+        # database_id = os.getenv("NOTION_WEBFLOW_DATABASE_ID") # Old way
         try:
-            database_id = get_notion_database_id("webflow")
+            database_id = get_notion_database_id("cms") # New way
         except (FileNotFoundError, ValueError) as e:
-            error_message = f"Error loading Notion database ID for 'webflow' for push: {e}"
+            error_message = f"Error loading Notion database ID for 'cms' for push: {e}"
             console.print(f"[warning]{error_message}[/warning]")
             # Save locally as a fallback if Notion push prep fails
             if not 'saved_filepath' in locals(): # If generation failed before save
@@ -601,7 +640,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
             return blog_content # Return content even if Notion push fails
 
         if not database_id:
-            console.print("[warning]No database ID found for 'webflow'. Please configure in notion_config.json.[/warning]")
+            console.print("[warning]No database ID found for 'cms'. Please set NOTION_WEBFLOW_DATABASE_ID environment variable or configure in notion_config.json.[/warning]")
             # Save locally as a fallback
             if not 'saved_filepath' in locals(): # If generation failed before save
                 saved_filepath = save_blog_post(blog_content)
@@ -749,7 +788,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
                         "rich_text": [ { "text": { "content": f"{len(blog_content.split()) // 200} min read" } } ]
                     },
                     "Author Name": { # Text (Paragraph icon)
-                        "rich_text": [ { "text": { "content": None } } ] # Default Author
+                        "rich_text": [ { "text": { "content": "Koii Benvenutto" } } ] # Default Author
                     },
                     "Tag": { # Select (Tag icon)
                         "select": { "name": "AI" } # Default Tag
@@ -862,10 +901,10 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
             # If there's an error, save the content locally as a fallback
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"blog_post_{timestamp}.md"
-            filepath = os.path.join(DRAFTS_DIR, filename)
-
+            filepath = os.path.join("drafts", filename)
+            
             # Ensure drafts directory exists
-            os.makedirs(DRAFTS_DIR, exist_ok=True)
+            os.makedirs("drafts", exist_ok=True)
             
             # Save the content
             with open(filepath, "w", encoding="utf-8") as f:
@@ -897,7 +936,7 @@ async def _minimal_process_page(page_id: str, content_type: str = "webflow"):
     filepath = await save_page_to_file(page_id, title, markdown_content, content_type)
     print_text(f"  ✓ Saved page to {filepath}", style="dim")
 
-async def ensure_latest_live_posts_downloaded(content_type: str = "webflow"):
+async def ensure_latest_live_posts_downloaded(content_type: str = "cms"):
     """Ensure that all Notion pages with Blog Status 'Live' are downloaded locally."""
     print_text(f"\n[info]Ensuring latest 'Live' posts for content type '{content_type}' are downloaded...[/info]", style="dim")
     try:

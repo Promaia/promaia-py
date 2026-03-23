@@ -44,7 +44,7 @@ echo ""
 
 # Customize plist
 sed -e "s|/usr/local/bin/python3|$PYTHON_PATH|g" \
-    -e "s|__HOME__|$HOME|g" \
+    -e "s|/Users/kb20250422|$HOME|g" \
     "$TEMPLATE_PLIST" > "$DEST_PLIST"
 
 # Set permissions

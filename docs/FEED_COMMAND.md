@@ -47,10 +47,10 @@ Events are displayed in a group-chat style with timestamps, emojis, and correlat
 [12:55:05] 🔧 Chief of Staff [task:def456]
            Tool call: query_sql("recent updates")
 
-[12:55:08] 💬 @alice → Maia
+[12:55:08] 💬 @koii → Maia
            "Hey Maia, quick update on the ML pipeline..."
 
-[12:55:12] 💬 Maia → @alice
+[12:55:12] 💬 Maia → @koii
            "Thanks! Can you share the latest metrics?"
 ```
 

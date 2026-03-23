@@ -1212,8 +1212,7 @@ class HybridContentRegistry:
             # Check if vector search is enabled
             import json
             import os
-            from promaia.utils.env_writer import get_config_path
-            config_path = str(get_config_path())
+            config_path = "promaia.config.json"
             with open(config_path, 'r') as f:
                 config = json.load(f)
             vector_config = config.get('global', {}).get('vector_search', {})
@@ -1226,7 +1225,7 @@ class HybridContentRegistry:
 
             # Initialize vector DB
             from promaia.storage.vector_db import VectorDBManager
-            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path'))
+            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path', 'chroma_db'))
 
             # Get property schema
             property_schema = self.get_property_schema(database_id)
@@ -1364,8 +1363,7 @@ class HybridContentRegistry:
 
             # Check if vector search is enabled - load from main config file
             import json
-            from promaia.utils.env_writer import get_config_path
-            config_path = str(get_config_path())
+            config_path = "promaia.config.json"
             with open(config_path, 'r') as f:
                 config = json.load(f)
             vector_config = config.get('global', {}).get('vector_search', {})
@@ -1392,7 +1390,7 @@ class HybridContentRegistry:
             
             # Initialize vector DB
             from promaia.storage.vector_db import VectorDBManager
-            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path'))
+            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path', 'chroma_db'))
             
             # Prepare metadata
             metadata = {
@@ -2468,15 +2466,14 @@ class HybridContentRegistry:
                 if removed_props:
                     try:
                         # Load vector config to check if embeddings are enabled
-                        from promaia.utils.env_writer import get_config_path
-                        config_path = str(get_config_path())
+                        config_path = "promaia.config.json"
                         with open(config_path, 'r') as f:
                             config = json.load(f)
                         vector_config = config.get('global', {}).get('vector_search', {})
 
                         if vector_config.get('enabled') and vector_config.get('property_embeddings', {}).get('enabled'):
                             from promaia.storage.vector_db import VectorDBManager
-                            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path'))
+                            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path', 'chroma_db'))
 
                             EMBEDDABLE_TYPES = {'title', 'text', 'rich_text', 'relation'}
 
@@ -2496,15 +2493,14 @@ class HybridContentRegistry:
                 if type_changed:
                     try:
                         # Load vector config to check if embeddings are enabled
-                        from promaia.utils.env_writer import get_config_path
-                        config_path = str(get_config_path())
+                        config_path = "promaia.config.json"
                         with open(config_path, 'r') as f:
                             config = json.load(f)
                         vector_config = config.get('global', {}).get('vector_search', {})
 
                         if vector_config.get('enabled') and vector_config.get('property_embeddings', {}).get('enabled'):
                             from promaia.storage.vector_db import VectorDBManager
-                            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path'))
+                            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path', 'chroma_db'))
 
                             EMBEDDABLE_TYPES = {'title', 'text', 'rich_text', 'relation'}
 

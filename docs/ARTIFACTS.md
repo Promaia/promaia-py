@@ -52,7 +52,7 @@ Hi Sarah,
 Thanks for taking the time to meet today...
 
 Best,
-Jane
+Koii
 </artifact>
 
 This keeps the tone professional while being concise.
@@ -140,7 +140,7 @@ maia mail --draft abc123
 Artifact #1 (Draft #1)
 ─────────────────────────────────────────────────────────────────
 
-Dear Bob,
+Dear Fionn,
 
 Thank you for the update...
 
