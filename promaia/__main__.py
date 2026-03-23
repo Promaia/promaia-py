@@ -2,7 +2,7 @@
 Main entry point for the promaia package.
 """
 import warnings
-warnings.filterwarnings("ignore", category=FutureWarning, module=r"google")
+warnings.filterwarnings("ignore", category=FutureWarning, message=r".*google\.generativeai.*")
 
 # Import main from cli.py file (not the cli/ package directory)
 # NOTE: There's both promaia/cli.py and promaia/cli/ which causes import confusion
