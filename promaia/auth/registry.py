@@ -7,7 +7,7 @@ from promaia.auth.base import Integration
 _INTEGRATIONS: dict[str, Integration] = {}
 
 # Tag integrations as AI providers for setup selector
-_AI_NAMES = {"anthropic", "openai", "google_ai"}
+_AI_NAMES = {"anthropic", "openai", "google_ai", "openrouter"}
 
 
 def register(integration: Integration) -> None:
@@ -52,7 +52,9 @@ def _ensure_loaded() -> None:
     from promaia.auth.integrations.notion import NotionIntegration
     from promaia.auth.integrations.discord import DiscordIntegration
     from promaia.auth.integrations.perplexity import PerplexityIntegration
+    from promaia.auth.integrations.openrouter import OpenRouterIntegration
 
+    register(OpenRouterIntegration())
     register(AnthropicIntegration())
     register(OpenAIIntegration())
     register(GoogleAIIntegration())

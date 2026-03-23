@@ -123,14 +123,20 @@ async def _run_setup(args):
 
     # Step 4: Notion connection + auto-workspace
     console.print()
-    console.print("Connect a Notion workspace\n")
+    console.print("[bold]Connect a Notion workspace[/bold]\n")
     notion = get_integration("notion")
     notion_success = await configure_credential(notion, console)
 
     if notion_success:
         _auto_create_workspace(notion)
 
-    # Step 5: Next steps
+    # Step 5: Google account (Calendar, Gmail, Drive)
+    console.print()
+    console.print("[bold]Connect a Google account[/bold]  [dim](Calendar, Gmail, Drive)[/dim]\n")
+    google = get_integration("google")
+    await configure_credential(google, console)
+
+    # Step 6: Next steps
     console.print()
     from_installer = os.environ.get("PROMAIA_FROM_INSTALLER") == "1"
     maia_installed = os.environ.get("PROMAIA_MAIA_INSTALLED") == "1"
