@@ -30,7 +30,7 @@ anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
 if anthropic_api_key:
     anthropic_client = AsyncAnthropic(api_key=anthropic_api_key)
 else:
-    logger.warning("ANTHROPIC_API_KEY not found. Anthropic AI calls will fail.")
+    logger.debug("ANTHROPIC_API_KEY not set — direct Anthropic calls unavailable.")
 
 from promaia.utils.env_writer import get_data_dir
 DEBUG_LOGS_DIR = str(get_data_dir() / "debug_logs" / "ai_calls")

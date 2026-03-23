@@ -196,7 +196,8 @@ def build_agentic_system_prompt(
     # Strip XML query tool docs — agentic loop uses native tool_use
     base_prompt = _strip_xml_query_tools(base_prompt)
 
-    conv_prompt_path = get_prompts_dir() / "conversation_mode.md"
+    from promaia.ai.prompts import _resolve_prompt
+    conv_prompt_path = _resolve_prompt("conversation_mode.md")
     try:
         template = conv_prompt_path.read_text()
     except FileNotFoundError:

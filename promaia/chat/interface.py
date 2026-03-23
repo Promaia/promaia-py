@@ -36,7 +36,10 @@ from promaia.storage.chat_history import ChatHistoryManager
 from promaia.storage.recents import RecentsManager
 from promaia.utils.query_parsing import parse_vs_queries_with_params
 
-import google.generativeai as genai
+import warnings
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
+    import google.generativeai as genai
 
 # Setup logging
 logger = logging.getLogger(__name__)

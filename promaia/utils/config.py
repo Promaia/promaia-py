@@ -28,41 +28,7 @@ def load_environment():
     # Load environment variables
     load_dotenv(dotenv_path=dotenv_path)
     
-    # Validate required API keys
-    required_keys = {
-        "OPENAI_API_KEY": "OpenAI",
-        "ANTHROPIC_API_KEY": "Anthropic",
-        "GOOGLE_API_KEY": "Google"
-    }
-    
-    # Optional API keys (for additional features)
-    optional_keys = {
-        "LLAMA_BASE_URL": "Local Llama"
-    }
-    
-    missing_keys = []
-    for key, service in required_keys.items():
-        if not os.getenv(key):
-            missing_keys.append(f"{service} ({key})")
-    
-    # Check optional keys and note if they're available
-    available_optional = []
-    for key, service in optional_keys.items():
-        if os.getenv(key):
-            available_optional.append(f"{service} ({key})")
-    
-    if missing_keys:
-        logger.warning("The following API keys are not set in your .env file:")
-        for key in missing_keys:
-            logger.warning(f"  - {key}")
-        logger.warning("Some features may not work without these keys.")
-    
-    if available_optional:
-        logger.info("Optional AI services available:")
-        for key in available_optional:
-            logger.info(f"  - {key}")
-    
-    return len(missing_keys) == 0
+    return True
 
 def get_config() -> Dict[str, Any]:
     """

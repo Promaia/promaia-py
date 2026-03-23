@@ -6,12 +6,29 @@ import datetime
 from typing import List, Dict, Any, Optional
 import logging
 
+from pathlib import Path
 from promaia.utils.env_writer import get_prompts_dir
+from promaia.config.paths import get_project_root
 
 logger = logging.getLogger(__name__)
 
-PROMPT_FILE_PATH = get_prompts_dir() / "prompt.md"
-ARTIFACT_GUIDELINES_PATH = get_prompts_dir() / "artifact_guidelines.md"
+# Default prompts ship in {repo}/prompts/, user customizations live in maia-data
+_REPO_PROMPTS_DIR = Path(get_project_root()) / "prompts"
+
+
+def _resolve_prompt(filename: str) -> Path:
+    """Return maia-data path if it exists, otherwise fall back to repo default."""
+    user_path = get_prompts_dir() / filename
+    if user_path.exists():
+        return user_path
+    default_path = _REPO_PROMPTS_DIR / filename
+    if default_path.exists():
+        return default_path
+    return user_path  # return expected path for error messages
+
+
+PROMPT_FILE_PATH = _resolve_prompt("prompt.md")
+ARTIFACT_GUIDELINES_PATH = _resolve_prompt("artifact_guidelines.md")
 NOTION_PROMPT_PAGE_ID = "292d1339-6967-80a5-84ed-cc171358ccb7"  # Main prompt page ID
 
 
