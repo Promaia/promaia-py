@@ -55,7 +55,10 @@ The installer will:
 2. Scaffold config files from the image (or seed them locally if in a dev repo)
 3. If it detects the local repo, offer to **bind-mount your source tree** into the container (for development — sets `COMPOSE_FILE=docker-compose.pilots.yaml`)
 4. Optionally install the `maia` CLI wrapper to your PATH
-5. Launch the interactive **setup wizard** (`maia setup`) to configure API keys and integrations
+5. Launch the interactive **setup wizard** (`maia setup`), which walks you through:
+   - AI provider selection (Claude, Gemini, or ChatGPT) and API key
+   - Notion workspace connection
+   - Google account connection (Calendar, Gmail, Drive)
 
 ### Sync Commands
 

@@ -30,7 +30,7 @@ anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
 if anthropic_api_key:
     anthropic_client = AsyncAnthropic(api_key=anthropic_api_key, base_url=os.environ.get("ANTHROPIC_BASE_URL"), max_retries=5)
 else:
-    if not os.getenv("OPENROUTER_API_KEY"):
+    if not os.getenv("OPENROUTER_API_KEY") and not os.getenv("PROMAIA_FROM_INSTALLER"):
         logger.warning("ANTHROPIC_API_KEY not found. Anthropic AI calls will fail.")
 
 from promaia.utils.env_writer import get_data_dir
