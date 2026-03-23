@@ -51,7 +51,7 @@ async def configure_credential(
         if valid:
             c.print(f"  [green]OK[/green] {msg}")
             reconfigure = Prompt.ask(
-                "  Reconfigure? [y/N]", default="n"
+                "  Reconfigure?", choices=["y", "n"], default="n"
             ).strip().lower()
             if reconfigure not in ("y", "yes"):
                 return True
