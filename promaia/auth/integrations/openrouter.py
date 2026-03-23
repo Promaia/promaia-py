@@ -45,6 +45,8 @@ class OpenRouterIntegration(Integration):
                 return False, "Invalid API key (authentication failed)"
             elif resp.status_code == 403:
                 return False, "API key lacks required permissions"
+            elif resp.status_code == 402:
+                return True, "Key is valid (account needs credits)"
             elif resp.status_code == 429:
                 return True, "Key is valid (rate-limited, but authenticated)"
             else:
