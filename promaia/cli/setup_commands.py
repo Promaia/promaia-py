@@ -538,7 +538,7 @@ async def _browse_notion_databases(workspace, c=None):
         c.print("  [dim]No Notion credentials found — skipping database selection[/dim]")
         return
 
-    # Search for all databases and resolve parent names for disambiguation
+    # Search for databases — show top-level immediately, load nested on demand
     c.print("  [dim]Searching for databases...[/dim]")
     try:
         headers = {
@@ -561,44 +561,25 @@ async def _browse_notion_databases(workspace, c=None):
                 c.print("  [dim]No databases found. Share databases with your Notion integration to see them here.[/dim]")
                 return
 
-            # Resolve parent page names for databases with duplicate titles
-            parent_page_ids = set()
+            # Split into top-level and nested
+            top_level = []
+            nested_raw = []
             for db in results:
+                db_id = db.get("id", "")
+                title = "".join(t.get("plain_text", "") for t in db.get("title", [])).strip() or "Untitled"
                 p = db.get("parent", {})
-                if p.get("type") == "page_id":
-                    parent_page_ids.add(p["page_id"])
+                if p.get("type") == "workspace":
+                    top_level.append((db_id, title, ""))
+                else:
+                    nested_raw.append((db, db_id, title, p))
 
-            parent_names = {}
-            for pid in parent_page_ids:
-                try:
-                    pr = await client.get(f"https://api.notion.com/v1/pages/{pid}", headers=headers)
-                    if pr.status_code == 200:
-                        for _pname, pval in pr.json().get("properties", {}).items():
-                            if pval.get("type") == "title":
-                                parts = pval.get("title", [])
-                                parent_names[pid] = "".join(t.get("plain_text", "") for t in parts).strip() or ""
-                                break
-                except Exception:
-                    pass
+            nested_count = len(nested_raw)
     except Exception as e:
         c.print(f"  [yellow]Could not connect to Notion: {e}[/yellow]")
         return
 
-    # Build list: (id, title, group)
-    # Top-level databases (parent=workspace) get group=""  (shown flat at top)
-    # Nested databases get group=parent_page_name (shown in collapsible groups)
-    all_databases = []
-    for db in results:
-        db_id = db.get("id", "")
-        title = "".join(t.get("plain_text", "") for t in db.get("title", [])).strip() or "Untitled"
-        p = db.get("parent", {})
-        if p.get("type") == "workspace":
-            group = ""  # flat/ungrouped
-        elif p.get("type") == "page_id":
-            group = parent_names.get(p["page_id"], "(other)")
-        else:
-            group = "(other)"
-        all_databases.append((db_id, title, group))
+    # Start with top-level databases only
+    all_databases = list(top_level)
 
     # Check which are already added
     db_manager = get_database_manager()
@@ -606,30 +587,85 @@ async def _browse_notion_databases(workspace, c=None):
     for db_config in db_manager.get_workspace_databases(workspace):
         existing_ids.add(db_config.database_id)
 
-    # Filter out already-added
+    # Filter and select from top-level first
     new_databases = [(db_id, title, group) for db_id, title, group in all_databases if db_id not in existing_ids]
     already_added = len(all_databases) - len(new_databases)
 
     if already_added > 0:
         c.print(f"  [dim]{already_added} database(s) already configured[/dim]")
 
-    if not new_databases:
+    if not new_databases and nested_count == 0:
         c.print("  [green]OK[/green] All available databases are already configured")
         return
 
-    # Sort: ungrouped (flat) first alphabetically, then grouped alphabetically
-    new_databases.sort(key=lambda x: (0 if x[2] == "" else 1, x[2].lower(), x[1].lower()))
+    all_selected = []
 
-    # Multi-select with flat top-level + collapsible groups
-    selected = await _multi_select_flat(new_databases, c)
+    if new_databases:
+        new_databases.sort(key=lambda x: x[1].lower())
+        if nested_count > 0:
+            c.print(f"  [dim]Showing {len(new_databases)} top-level databases ({nested_count} more in sub-pages)[/dim]")
 
-    if not selected:
+        selected = await _multi_select_flat(new_databases, c)
+        if selected:
+            all_selected.extend(selected)
+
+    # Offer to load nested databases
+    if nested_count > 0:
+        from rich.prompt import Prompt
+        show_more = Prompt.ask(
+            f"\n  Show {nested_count} more databases from sub-pages?",
+            choices=["y", "n"], default="n"
+        ).strip().lower()
+
+        if show_more == "y":
+            c.print("  [dim]Loading nested databases...[/dim]")
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client2:
+                    parent_names = {}
+                    parent_page_ids = set()
+                    for _db, _db_id, _title, p in nested_raw:
+                        if p.get("type") == "page_id":
+                            parent_page_ids.add(p["page_id"])
+
+                    for pid in parent_page_ids:
+                        try:
+                            pr = await client2.get(f"https://api.notion.com/v1/pages/{pid}", headers=headers)
+                            if pr.status_code == 200:
+                                for _pname, pval in pr.json().get("properties", {}).items():
+                                    if pval.get("type") == "title":
+                                        parts = pval.get("title", [])
+                                        parent_names[pid] = "".join(t.get("plain_text", "") for t in parts).strip() or ""
+                                        break
+                        except Exception:
+                            pass
+
+                nested_databases = []
+                for _db, db_id, title, p in nested_raw:
+                    if db_id in existing_ids:
+                        continue
+                    if p.get("type") == "page_id":
+                        group = parent_names.get(p["page_id"], "(other)")
+                    else:
+                        group = "(other)"
+                    nested_databases.append((db_id, title, group))
+
+                if nested_databases:
+                    nested_databases.sort(key=lambda x: (x[2].lower(), x[1].lower()))
+                    selected2 = await _multi_select_flat(nested_databases, c)
+                    if selected2:
+                        all_selected.extend(selected2)
+                else:
+                    c.print("  [dim]All nested databases already configured[/dim]")
+            except Exception as e:
+                c.print(f"  [yellow]Could not load nested databases: {e}[/yellow]")
+
+    if not all_selected:
         c.print("  [dim]No databases selected[/dim]")
         return
 
     # Add selected databases
     added = 0
-    for db_id, title, _display in selected:
+    for db_id, title, _group in all_selected:
         name = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") or "untitled"
         config = {
             "source_type": "notion",
