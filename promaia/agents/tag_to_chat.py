@@ -230,7 +230,7 @@ class TagToChatLoop:
         if self.state.status == "paused":
             self.state.status = "active"
             self._pause_event.set()
-            logger.info(f"[tag2chat:{self.state.thread_id[:12]}] Unpaused by new message")
+            logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Unpaused by new message")
 
     def update_typing(self, user_id: str):
         """Record a typing event from a human."""
@@ -238,7 +238,7 @@ class TagToChatLoop:
 
     async def handle_cancel(self, user_id: str):
         """Handle 🛑 reaction — cancel current response, stay in thread."""
-        logger.info(f"[tag2chat:{self.state.thread_id[:12]}] Cancelled by user {user_id}")
+        logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Cancelled by user {user_id}")
         self._cancelled = True
         self._pause_event.set()  # Unblock if waiting
         await self._cleanup_temp_message()
@@ -256,18 +256,18 @@ class TagToChatLoop:
     async def run(self):
         """Run the response loop. Call via asyncio.create_task()."""
         logger.info(
-            f"[tag2chat:{self.state.thread_id[:12]}] Loop started for "
+            f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Loop started for "
             f"agent={self.state.agent_id} platform={self.state.platform}"
         )
         try:
             while True:
                 # Check stop conditions
                 if self._stop_requested or self.state.status == "stopped":
-                    logger.info(f"[tag2chat:{self.state.thread_id[:12]}] Loop stopped")
+                    logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Loop stopped")
                     break
 
                 if time.time() > self.state.ultimate_timeout:
-                    logger.info(f"[tag2chat:{self.state.thread_id[:12]}] Ultimate timeout reached")
+                    logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Ultimate timeout reached")
                     await self._go_dormant(announce=True)
                     break
 
@@ -284,10 +284,10 @@ class TagToChatLoop:
                 await asyncio.sleep(LOOP_TICK_INTERVAL)
 
         except asyncio.CancelledError:
-            logger.info(f"[tag2chat:{self.state.thread_id[:12]}] Loop cancelled")
+            logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Loop cancelled")
             await self._cleanup_temp_message()
         except Exception as e:
-            logger.error(f"[tag2chat:{self.state.thread_id[:12]}] Loop error: {e}", exc_info=True)
+            logger.error(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Loop error: {e}", exc_info=True)
             await self._cleanup_temp_message()
             await self._go_dormant()
         finally:
@@ -307,7 +307,7 @@ class TagToChatLoop:
 
         # Someone is actively typing — defer
         if self._is_typing_active(now):
-            logger.debug(f"[tag2chat:{self.state.thread_id[:12]}] Typing detected, deferring")
+            logger.debug(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Typing detected, deferring")
             return
 
         # Scheduled wait hasn't elapsed
@@ -319,7 +319,7 @@ class TagToChatLoop:
         # call for follow-up messages after the first response.
         if self.state.status == "dormant":
             decision, emoji = await self._make_decision()
-            logger.info(f"[tag2chat:{self.state.thread_id[:12]}] Decision: {decision} emoji={emoji}")
+            logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Decision: {decision} emoji={emoji}")
 
             if decision == "wait":
                 self.state.next_check_in = now + 5
@@ -646,7 +646,7 @@ class TagToChatLoop:
                     thread_id=self.state.thread_id,
                 )
             logger.info(
-                f"[tag2chat:{self.state.thread_id[:12]}] "
+                f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] "
                 f"Response posted ({len(response_text)} chars)"
             )
         except Exception as e:
@@ -691,7 +691,7 @@ class TagToChatLoop:
 
     async def _handle_typing_interrupt(self):
         """Handle interruption — restart hidden countdown."""
-        logger.info(f"[tag2chat:{self.state.thread_id[:12]}] Interrupted, restarting hidden countdown")
+        logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Interrupted, restarting hidden countdown")
         # Run a fresh hidden countdown — if interrupted again, recurse
         interrupted = await self._countdown(COUNTDOWN_SECONDS)
         if not interrupted:
@@ -747,7 +747,7 @@ class TagToChatLoop:
                 message_id=self.thread_parent_message_id,
                 content=f"*{title}* — {participant_str}",
             )
-            logger.info(f"[tag2chat:{self.state.thread_id[:12]}] Thread titled: {title}")
+            logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Thread titled: {title}")
 
         except Exception as e:
             logger.warning(f"Failed to update thread title: {e}")
@@ -914,7 +914,7 @@ class TagToChatLoop:
             await self.platform.add_reaction(
                 self.state.channel_id, last_ts, reaction
             )
-            logger.info(f"[tag2chat:{self.state.thread_id[:12]}] Reacted with {reaction}")
+            logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Reacted with {reaction}")
         except Exception:
             try:
                 await self.platform.add_reaction(
@@ -942,7 +942,7 @@ class TagToChatLoop:
                       explicit leave requests and inactivity timeout,
                       but not after a normal response or end_conversation.
         """
-        logger.info(f"[tag2chat:{self.state.thread_id[:12]}] Going dormant (announce={announce})")
+        logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Going dormant (announce={announce})")
         self.state.status = "dormant"
         self.state.pending_messages.clear()  # Don't re-evaluate the same messages
         await self._update_db_status("dormant")
