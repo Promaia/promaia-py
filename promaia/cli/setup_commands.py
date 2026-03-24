@@ -126,7 +126,6 @@ async def _run_setup(args):
     # Step 4: Select Notion databases
     workspace_slug = None
     if notion_success:
-        # Workspace setup (needed before database selection)
         workspace_slug = _auto_create_workspace(notion, console)
     else:
         from promaia.config.workspaces import get_workspace_manager
@@ -137,39 +136,10 @@ async def _run_setup(args):
     if workspace_slug:
         console.print()
         console.print("[bold]Select Notion databases to sync[/bold]\n")
-        console.print("  [dim]Shared databases are expanded. Use RIGHT/LEFT to expand/collapse groups.[/dim]")
         await _safe_step(
             _browse_notion_databases(workspace_slug, console),
             "database selection"
         )
-
-    # Step 5: Name workspace
-    if workspace_slug:
-        console.print()
-        console.print("[bold]Name your Promaia workspace[/bold]\n")
-        console.print("  [dim]This is your Promaia workspace name, not your Notion workspace.[/dim]")
-        # Workspace already created silently above; let user rename if desired
-        from promaia.config.workspaces import get_workspace_manager as _gwm
-        _mgr = _gwm()
-        if _mgr.default_workspace:
-            from rich.prompt import Prompt
-            import re as _re
-            current_name = _mgr.default_workspace
-            new_name = Prompt.ask("  Workspace name", default=current_name).strip().lower()
-            new_name = _re.sub(r"[^a-z0-9]+", "-", new_name).strip("-") or current_name
-            if new_name != current_name:
-                import shutil as _shutil
-                _mgr.add_workspace(new_name)
-                old_t = notion._token_path(current_name)
-                new_t = notion._token_path(new_name)
-                if old_t.exists() and not new_t.exists():
-                    new_t.parent.mkdir(parents=True, exist_ok=True)
-                    _shutil.copy2(old_t, new_t)
-                _mgr.remove_workspace(current_name)
-                _mgr.set_default_workspace(new_name)
-                console.print(f"  [green]OK[/green] Workspace renamed to [bold]{new_name}[/bold]")
-            else:
-                console.print(f"  [green]OK[/green] Workspace [bold]{current_name}[/bold] ready")
 
     # Step 6: Connect Google
     console.print()
@@ -273,7 +243,7 @@ async def _browse_notion_databases(workspace, c=None):
         c.print("  [dim]No Notion credentials found — skipping database selection[/dim]")
         return
 
-    # Search for all databases and resolve parent names for grouping
+    # Search for all databases and resolve parent names for disambiguation
     c.print("  [dim]Searching for databases...[/dim]")
     try:
         headers = {
@@ -296,7 +266,7 @@ async def _browse_notion_databases(workspace, c=None):
                 c.print("  [dim]No databases found. Share databases with your Notion integration to see them here.[/dim]")
                 return
 
-            # Collect unique parent page IDs and resolve their titles
+            # Resolve parent page names for databases with duplicate titles
             parent_page_ids = set()
             for db in results:
                 p = db.get("parent", {})
@@ -311,7 +281,7 @@ async def _browse_notion_databases(workspace, c=None):
                         for _pname, pval in pr.json().get("properties", {}).items():
                             if pval.get("type") == "title":
                                 parts = pval.get("title", [])
-                                parent_names[pid] = "".join(t.get("plain_text", "") for t in parts).strip() or "(untitled)"
+                                parent_names[pid] = "".join(t.get("plain_text", "") for t in parts).strip() or ""
                                 break
                 except Exception:
                     pass
@@ -319,21 +289,21 @@ async def _browse_notion_databases(workspace, c=None):
         c.print(f"  [yellow]Could not connect to Notion: {e}[/yellow]")
         return
 
-    # Build grouped list: (id, title, group_name)
-    # group_name is: "Shared" for workspace-level, parent page title for nested
-    grouped_databases = []
+    # Build list: (id, title, group)
+    # Top-level databases (parent=workspace) get group=""  (shown flat at top)
+    # Nested databases get group=parent_page_name (shown in collapsible groups)
+    all_databases = []
     for db in results:
         db_id = db.get("id", "")
-        title_parts = db.get("title", [])
-        title = "".join(t.get("plain_text", "") for t in title_parts).strip() or "Untitled"
+        title = "".join(t.get("plain_text", "") for t in db.get("title", [])).strip() or "Untitled"
         p = db.get("parent", {})
         if p.get("type") == "workspace":
-            group = "Shared"
+            group = ""  # flat/ungrouped
         elif p.get("type") == "page_id":
             group = parent_names.get(p["page_id"], "(other)")
         else:
             group = "(other)"
-        grouped_databases.append((db_id, title, group))
+        all_databases.append((db_id, title, group))
 
     # Check which are already added
     db_manager = get_database_manager()
@@ -341,9 +311,9 @@ async def _browse_notion_databases(workspace, c=None):
     for db_config in db_manager.get_workspace_databases(workspace):
         existing_ids.add(db_config.database_id)
 
-    # Filter out already-added databases
-    new_databases = [(db_id, title, group) for db_id, title, group in grouped_databases if db_id not in existing_ids]
-    already_added = len(grouped_databases) - len(new_databases)
+    # Filter out already-added
+    new_databases = [(db_id, title, group) for db_id, title, group in all_databases if db_id not in existing_ids]
+    already_added = len(all_databases) - len(new_databases)
 
     if already_added > 0:
         c.print(f"  [dim]{already_added} database(s) already configured[/dim]")
@@ -352,11 +322,11 @@ async def _browse_notion_databases(workspace, c=None):
         c.print("  [green]OK[/green] All available databases are already configured")
         return
 
-    # Sort by group, then title
-    new_databases.sort(key=lambda x: (x[2].lower(), x[1].lower()))
+    # Sort: ungrouped (flat) first alphabetically, then grouped alphabetically
+    new_databases.sort(key=lambda x: (0 if x[2] == "" else 1, x[2].lower(), x[1].lower()))
 
-    # Multi-select UI with grouped display
-    selected = await _multi_select_databases(new_databases, c)
+    # Multi-select with flat top-level + collapsible groups
+    selected = await _multi_select_flat(new_databases, c)
 
     if not selected:
         c.print("  [dim]No databases selected[/dim]")
@@ -364,7 +334,7 @@ async def _browse_notion_databases(workspace, c=None):
 
     # Add selected databases
     added = 0
-    for db_id, title, _group in selected:
+    for db_id, title, _display in selected:
         name = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") or "untitled"
         config = {
             "source_type": "notion",
@@ -382,15 +352,14 @@ async def _browse_notion_databases(workspace, c=None):
     c.print(f"  [green]OK[/green] Added {added} database(s) to workspace [bold]{workspace}[/bold]")
 
 
-async def _multi_select_databases(databases, c):
-    """Multi-select checkbox UI with collapsible groups.
+async def _multi_select_flat(databases, c):
+    """Multi-select with flat top-level items + collapsible groups.
 
-    Groups start collapsed except "Shared" (top-level databases).
-    Right arrow or Enter on a group header expands/collapses it.
-    Space toggles database selection.
+    Items with group="" are shown flat at the top (top-level databases).
+    Items with a group name are shown in collapsible sections below.
 
     Args:
-        databases: list of (id, title, group) tuples, pre-sorted by group
+        databases: list of (id, title, group) tuples, sorted flat-first
     Returns:
         list of selected (id, title, group) tuples
     """
@@ -405,24 +374,30 @@ async def _multi_select_databases(databases, c):
     confirmed = False
     max_visible = 20
 
-    # Build group structure
-    # groups: ordered list of (group_name, [db_indices])
-    groups = []
-    group_map = {}  # group_name -> index in groups
+    # Separate flat items from grouped items
+    flat_indices = [i for i, (_, _, g) in enumerate(databases) if g == ""]
+    groups = []  # (group_name, [db_indices])
+    group_map = {}
     for i, (db_id, title, group) in enumerate(databases):
+        if group == "":
+            continue
         if group not in group_map:
             group_map[group] = len(groups)
             groups.append((group, []))
         groups[group_map[group]][1].append(i)
 
-    # Expanded state: "Shared" starts expanded, others collapsed
-    expanded = {g: (g == "Shared") for g, _ in groups}
+    # All groups start collapsed
+    expanded = {g: False for g, _ in groups}
 
-    # Navigable items: mix of group headers and database entries
-    # Rebuild this whenever expanded state changes
     def build_nav_items():
-        """Returns list of (type, value) where type is 'group' or 'db'."""
+        """Returns list of (type, value)."""
         items = []
+        # Flat items first
+        for idx in flat_indices:
+            items.append(("db", idx))
+        # Then groups
+        if groups and flat_indices:
+            items.append(("separator", None))
         for group_name, db_indices in groups:
             items.append(("group", group_name))
             if expanded.get(group_name, False):
@@ -431,7 +406,7 @@ async def _multi_select_databases(databases, c):
         return items
 
     nav_items = build_nav_items()
-    current = [0]  # mutable for closures
+    current = [0]
 
     def get_viewport_text():
         items = nav_items
@@ -458,7 +433,9 @@ async def _multi_select_databases(databases, c):
             is_cur = (i == cur)
             arrow = " >" if is_cur else "  "
 
-            if item_type == "group":
+            if item_type == "separator":
+                lines.append("")
+            elif item_type == "group":
                 icon = "v" if expanded.get(value, False) else ">"
                 count = len(groups[group_map[value]][1])
                 sel_count = sum(1 for idx in groups[group_map[value]][1] if selected[idx])
@@ -467,7 +444,7 @@ async def _multi_select_databases(databases, c):
             else:
                 db_idx = value
                 check = "[x]" if selected[db_idx] else "[ ]"
-                lines.append(f" {arrow}   {check} {databases[db_idx][1]}")
+                lines.append(f" {arrow} {check} {databases[db_idx][1]}")
 
         if end < total:
             lines.append("  ... more below")
@@ -476,7 +453,7 @@ async def _multi_select_databases(databases, c):
 
     def get_status():
         count = sum(selected)
-        return " SPACE select  RIGHT expand  ENTER confirm ({} selected)  ESC skip".format(count)
+        return " SPACE select  RIGHT/LEFT expand/collapse  ENTER confirm ({} selected)  ESC skip".format(count)
 
     def make_layout():
         visible = min(len(nav_items), max_visible) + 3
@@ -491,26 +468,34 @@ async def _multi_select_databases(databases, c):
 
     bindings = KeyBindings()
 
+    def _skip_separators(direction):
+        """Move cursor past separator items."""
+        while 0 <= current[0] < len(nav_items) and nav_items[current[0]][0] == "separator":
+            current[0] += direction
+
     @bindings.add(Keys.Up)
     def up(event):
         if current[0] > 0:
             current[0] -= 1
+            _skip_separators(-1)
             event.app.layout = make_layout()
 
     @bindings.add(Keys.Down)
     def down(event):
         if current[0] < len(nav_items) - 1:
             current[0] += 1
+            _skip_separators(1)
             event.app.layout = make_layout()
 
     @bindings.add(Keys.Right)
-    def expand(event):
+    def expand_group(event):
         nonlocal nav_items
+        if current[0] >= len(nav_items):
+            return
         item_type, value = nav_items[current[0]]
         if item_type == "group":
             expanded[value] = not expanded[value]
             nav_items = build_nav_items()
-            # Keep cursor on the same group header
             for i, (t, v) in enumerate(nav_items):
                 if t == "group" and v == value:
                     current[0] = i
@@ -518,37 +503,39 @@ async def _multi_select_databases(databases, c):
             event.app.layout = make_layout()
 
     @bindings.add(Keys.Left)
-    def collapse(event):
+    def collapse_group(event):
         nonlocal nav_items
+        if current[0] >= len(nav_items):
+            return
         item_type, value = nav_items[current[0]]
         if item_type == "group" and expanded.get(value, False):
             expanded[value] = False
             nav_items = build_nav_items()
             event.app.layout = make_layout()
         elif item_type == "db":
-            # Find parent group and collapse it, move cursor to header
             db_group = databases[value][2]
-            expanded[db_group] = False
-            nav_items = build_nav_items()
-            for i, (t, v) in enumerate(nav_items):
-                if t == "group" and v == db_group:
-                    current[0] = i
-                    break
-            event.app.layout = make_layout()
+            if db_group and db_group in expanded:
+                expanded[db_group] = False
+                nav_items = build_nav_items()
+                for i, (t, v) in enumerate(nav_items):
+                    if t == "group" and v == db_group:
+                        current[0] = i
+                        break
+                event.app.layout = make_layout()
 
     @bindings.add(" ")
     def toggle(event):
         nonlocal nav_items
+        if current[0] >= len(nav_items):
+            return
         item_type, value = nav_items[current[0]]
         if item_type == "db":
             selected[value] = not selected[value]
         elif item_type == "group":
-            # Toggle all databases in this group
             db_indices = groups[group_map[value]][1]
             all_selected = all(selected[i] for i in db_indices)
             for i in db_indices:
                 selected[i] = not all_selected
-            # Auto-expand if selecting
             if not all_selected and not expanded.get(value, False):
                 expanded[value] = True
                 nav_items = build_nav_items()
