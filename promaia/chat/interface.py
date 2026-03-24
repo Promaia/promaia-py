@@ -520,7 +520,7 @@ def get_current_model_name():
         model_id = os.getenv('LLAMA_DEFAULT_MODEL', 'llama3:latest')
         return get_model_display_name(model_id, "llama")
     elif current_api == "openrouter":
-        return "Claude Sonnet 4.5 (OpenRouter)"
+        return "Claude Sonnet 4.6 (OpenRouter)"
 
     return "Unknown Model"
 
@@ -561,8 +561,10 @@ def switch_model(target_model=None):
     # Add OpenRouter models
     if openrouter_client:
         for model_id, display in [
+            ("anthropic/claude-sonnet-4-6", "Claude Sonnet 4.6 (OpenRouter)"),
             ("anthropic/claude-sonnet-4-5", "Claude Sonnet 4.5 (OpenRouter)"),
             ("anthropic/claude-haiku-4-5-20251001", "Claude Haiku 4.5 (OpenRouter)"),
+            ("anthropic/claude-opus-4-6", "Claude Opus 4.6 (OpenRouter)"),
             ("anthropic/claude-opus-4-5", "Claude Opus 4.5 (OpenRouter)"),
         ]:
             available_choices[str(choice_num)] = ("openrouter", display, model_id)
@@ -8234,7 +8236,7 @@ The user will type `/send` when ready to send the email.
                     else:
                         formatted_messages = [{"role": "system", "content": current_system_prompt}] + messages_for_api
 
-                    or_model = os.getenv("SELECTED_MODEL_ID") or "anthropic/claude-sonnet-4-5"
+                    or_model = os.getenv("SELECTED_MODEL_ID") or "anthropic/claude-sonnet-4-6"
 
                     response = openrouter_client.chat.completions.create(
                         model=or_model,
