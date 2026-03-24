@@ -111,17 +111,22 @@ async def _run_setup(args):
             "skipped config file creation"
         )
 
-    # Step 2: Connect Notion
+    # Step 2: AI provider
+    console.print()
+    integrations = get_ai_integrations()
+    selected = await _select_provider(integrations)
+    if selected:
+        await _safe_step(configure_credential(selected, console), "AI provider")
+
+    # Step 3: Connect Notion
     console.print()
     notion = get_integration("notion")
     notion_success = await _safe_step(configure_credential(notion, console), "Notion")
 
-    # Step 3: Set up workspace
+    # Step 4: Select Notion databases
     workspace_slug = None
     if notion_success:
-        console.print()
-        console.print("[bold]Name your Promaia workspace[/bold]\n")
-        console.print("  [dim]This is your Promaia workspace name, not your Notion workspace.[/dim]")
+        # Workspace setup (needed before database selection)
         workspace_slug = _auto_create_workspace(notion, console)
     else:
         from promaia.config.workspaces import get_workspace_manager
@@ -129,21 +134,42 @@ async def _run_setup(args):
         if manager.default_workspace:
             workspace_slug = manager.default_workspace
 
-    # Step 4: Select Notion databases
     if workspace_slug:
         console.print()
         console.print("[bold]Select Notion databases to sync[/bold]\n")
+        console.print("  [dim]Shared databases are expanded. Use RIGHT/LEFT to expand/collapse groups.[/dim]")
         await _safe_step(
             _browse_notion_databases(workspace_slug, console),
             "database selection"
         )
 
-    # Step 5: AI provider
-    console.print()
-    integrations = get_ai_integrations()
-    selected = await _select_provider(integrations)
-    if selected:
-        await _safe_step(configure_credential(selected, console), "AI provider")
+    # Step 5: Name workspace
+    if workspace_slug:
+        console.print()
+        console.print("[bold]Name your Promaia workspace[/bold]\n")
+        console.print("  [dim]This is your Promaia workspace name, not your Notion workspace.[/dim]")
+        # Workspace already created silently above; let user rename if desired
+        from promaia.config.workspaces import get_workspace_manager as _gwm
+        _mgr = _gwm()
+        if _mgr.default_workspace:
+            from rich.prompt import Prompt
+            import re as _re
+            current_name = _mgr.default_workspace
+            new_name = Prompt.ask("  Workspace name", default=current_name).strip().lower()
+            new_name = _re.sub(r"[^a-z0-9]+", "-", new_name).strip("-") or current_name
+            if new_name != current_name:
+                import shutil as _shutil
+                _mgr.add_workspace(new_name)
+                old_t = notion._token_path(current_name)
+                new_t = notion._token_path(new_name)
+                if old_t.exists() and not new_t.exists():
+                    new_t.parent.mkdir(parents=True, exist_ok=True)
+                    _shutil.copy2(old_t, new_t)
+                _mgr.remove_workspace(current_name)
+                _mgr.set_default_workspace(new_name)
+                console.print(f"  [green]OK[/green] Workspace renamed to [bold]{new_name}[/bold]")
+            else:
+                console.print(f"  [green]OK[/green] Workspace [bold]{current_name}[/bold] ready")
 
     # Step 6: Connect Google
     console.print()
@@ -357,10 +383,11 @@ async def _browse_notion_databases(workspace, c=None):
 
 
 async def _multi_select_databases(databases, c):
-    """Multi-select checkbox UI with grouped/nested display.
+    """Multi-select checkbox UI with collapsible groups.
 
-    Uses a scrollable viewport. Databases are grouped by their parent
-    page name (e.g. "Shared", "Angl Home", "Promaia agents").
+    Groups start collapsed except "Shared" (top-level databases).
+    Right arrow or Enter on a group header expands/collapses it.
+    Space toggles database selection.
 
     Args:
         databases: list of (id, title, group) tuples, pre-sorted by group
@@ -375,68 +402,84 @@ async def _multi_select_databases(databases, c):
     from prompt_toolkit.layout.layout import Layout
 
     selected = [False] * len(databases)
-    current = 0
     confirmed = False
     max_visible = 20
 
-    # Build display lines with group headers
-    # Each line is either a header (not selectable) or a db entry (selectable)
-    display_lines = []  # list of (type, index_or_group)
-    last_group = None
+    # Build group structure
+    # groups: ordered list of (group_name, [db_indices])
+    groups = []
+    group_map = {}  # group_name -> index in groups
     for i, (db_id, title, group) in enumerate(databases):
-        if group != last_group:
-            display_lines.append(("header", group))
-            last_group = group
-        display_lines.append(("entry", i))
+        if group not in group_map:
+            group_map[group] = len(groups)
+            groups.append((group, []))
+        groups[group_map[group]][1].append(i)
 
-    # Map from selectable positions to display_lines indices
-    selectable_positions = [i for i, (t, _) in enumerate(display_lines) if t == "entry"]
-    # Map from cursor position (0..N-1 selectable items) to display_lines index
-    cursor_to_display = {pos: dl_idx for pos, dl_idx in enumerate(selectable_positions)}
+    # Expanded state: "Shared" starts expanded, others collapsed
+    expanded = {g: (g == "Shared") for g, _ in groups}
+
+    # Navigable items: mix of group headers and database entries
+    # Rebuild this whenever expanded state changes
+    def build_nav_items():
+        """Returns list of (type, value) where type is 'group' or 'db'."""
+        items = []
+        for group_name, db_indices in groups:
+            items.append(("group", group_name))
+            if expanded.get(group_name, False):
+                for idx in db_indices:
+                    items.append(("db", idx))
+        return items
+
+    nav_items = build_nav_items()
+    current = [0]  # mutable for closures
 
     def get_viewport_text():
-        total_display = len(display_lines)
-        # Find display index of current cursor
-        current_display_idx = cursor_to_display.get(current, 0)
+        items = nav_items
+        total = len(items)
+        cur = current[0]
 
-        # Calculate scroll window around current item
         half = max_visible // 2
-        if total_display <= max_visible:
+        if total <= max_visible:
             start = 0
-        elif current_display_idx < half:
+        elif cur < half:
             start = 0
-        elif current_display_idx >= total_display - half:
-            start = max(0, total_display - max_visible)
+        elif cur >= total - half:
+            start = max(0, total - max_visible)
         else:
-            start = current_display_idx - half
-        end = min(start + max_visible, total_display)
+            start = cur - half
+        end = min(start + max_visible, total)
 
         lines = []
         if start > 0:
             lines.append("  ... more above")
 
-        for dl_idx in range(start, end):
-            line_type, value = display_lines[dl_idx]
-            if line_type == "header":
-                lines.append(f"\n  {value}")
+        for i in range(start, end):
+            item_type, value = items[i]
+            is_cur = (i == cur)
+            arrow = " >" if is_cur else "  "
+
+            if item_type == "group":
+                icon = "v" if expanded.get(value, False) else ">"
+                count = len(groups[group_map[value]][1])
+                sel_count = sum(1 for idx in groups[group_map[value]][1] if selected[idx])
+                sel_info = f" ({sel_count}/{count})" if sel_count > 0 else f" ({count})"
+                lines.append(f" {arrow} {icon} {value}{sel_info}")
             else:
                 db_idx = value
                 check = "[x]" if selected[db_idx] else "[ ]"
-                is_current = (dl_idx == cursor_to_display.get(current))
-                arrow = " >" if is_current else "  "
-                lines.append(f" {arrow} {check} {databases[db_idx][1]}")
+                lines.append(f" {arrow}   {check} {databases[db_idx][1]}")
 
-        if end < total_display:
+        if end < total:
             lines.append("  ... more below")
 
         return "\n".join(lines)
 
     def get_status():
         count = sum(selected)
-        return f" SPACE toggle  ENTER confirm ({count} selected)  ESC skip"
+        return " SPACE select  RIGHT expand  ENTER confirm ({} selected)  ESC skip".format(count)
 
     def make_layout():
-        visible = min(len(display_lines), max_visible) + 3
+        visible = min(len(nav_items), max_visible) + 3
         viewport = Window(
             FormattedTextControl(text=get_viewport_text),
             height=visible,
@@ -447,28 +490,72 @@ async def _multi_select_databases(databases, c):
         return Layout(HSplit([viewport, status]))
 
     bindings = KeyBindings()
-    total_selectable = len(selectable_positions)
 
     @bindings.add(Keys.Up)
     def up(event):
-        nonlocal current
-        if current > 0:
-            current -= 1
+        if current[0] > 0:
+            current[0] -= 1
             event.app.layout = make_layout()
 
     @bindings.add(Keys.Down)
     def down(event):
-        nonlocal current
-        if current < total_selectable - 1:
-            current += 1
+        if current[0] < len(nav_items) - 1:
+            current[0] += 1
+            event.app.layout = make_layout()
+
+    @bindings.add(Keys.Right)
+    def expand(event):
+        nonlocal nav_items
+        item_type, value = nav_items[current[0]]
+        if item_type == "group":
+            expanded[value] = not expanded[value]
+            nav_items = build_nav_items()
+            # Keep cursor on the same group header
+            for i, (t, v) in enumerate(nav_items):
+                if t == "group" and v == value:
+                    current[0] = i
+                    break
+            event.app.layout = make_layout()
+
+    @bindings.add(Keys.Left)
+    def collapse(event):
+        nonlocal nav_items
+        item_type, value = nav_items[current[0]]
+        if item_type == "group" and expanded.get(value, False):
+            expanded[value] = False
+            nav_items = build_nav_items()
+            event.app.layout = make_layout()
+        elif item_type == "db":
+            # Find parent group and collapse it, move cursor to header
+            db_group = databases[value][2]
+            expanded[db_group] = False
+            nav_items = build_nav_items()
+            for i, (t, v) in enumerate(nav_items):
+                if t == "group" and v == db_group:
+                    current[0] = i
+                    break
             event.app.layout = make_layout()
 
     @bindings.add(" ")
     def toggle(event):
-        # Get the actual database index for the current cursor position
-        dl_idx = cursor_to_display[current]
-        _, db_idx = display_lines[dl_idx]
-        selected[db_idx] = not selected[db_idx]
+        nonlocal nav_items
+        item_type, value = nav_items[current[0]]
+        if item_type == "db":
+            selected[value] = not selected[value]
+        elif item_type == "group":
+            # Toggle all databases in this group
+            db_indices = groups[group_map[value]][1]
+            all_selected = all(selected[i] for i in db_indices)
+            for i in db_indices:
+                selected[i] = not all_selected
+            # Auto-expand if selecting
+            if not all_selected and not expanded.get(value, False):
+                expanded[value] = True
+                nav_items = build_nav_items()
+                for i, (t, v) in enumerate(nav_items):
+                    if t == "group" and v == value:
+                        current[0] = i
+                        break
         event.app.layout = make_layout()
 
     @bindings.add(Keys.Enter)
