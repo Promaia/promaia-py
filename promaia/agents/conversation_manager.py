@@ -469,20 +469,23 @@ class ConversationManager:
             logger.error(f"Error generating AI response: {e}", exc_info=True)
             response = "I'm sorry, I encountered an error generating a response. Please try again."
         
-        # Add response to conversation
-        response_time = datetime.now(timezone.utc).isoformat()
-        state.messages.append({
-            'role': 'assistant',
-            'content': response,
-            'timestamp': response_time,
-        })
-        state.last_message_at = response_time
+        # Add response to conversation (skip if agentic turn already stored history_messages)
+        if not getattr(state, '_skip_response_append', False):
+            response_time = datetime.now(timezone.utc).isoformat()
+            state.messages.append({
+                'role': 'assistant',
+                'content': response,
+                'timestamp': response_time,
+            })
+        else:
+            state._skip_response_append = False
+        state.last_message_at = datetime.now(timezone.utc).isoformat()
 
         await self._save_state(state)
-        
+
         logger.debug(f"Handled message in {conversation_id}, turn {state.turn_count}")
         return response
-    
+
     async def _get_ai_response(
         self,
         state: ConversationState,
@@ -633,6 +636,11 @@ class ConversationManager:
                     plan=plan,
                 )
                 output = result.response_text
+                # Store tool_use/tool_result blocks for conversation history
+                if hasattr(result, 'history_messages') and result.history_messages:
+                    state.messages.extend(result.history_messages)
+                    # Don't append plain text below — history_messages includes it
+                    state._skip_response_append = True
                 if result.tool_calls_made:
                     logger.info(
                         f"Agentic turn: {result.iterations_used} iterations, "
@@ -1058,14 +1066,17 @@ class ConversationManager:
             logger.error(f"Error generating batched response: {e}", exc_info=True)
             response = "I'm sorry, I encountered an error generating a response. Please try again."
 
-        # Save response to conversation
-        response_time = datetime.now(timezone.utc).isoformat()
-        state.messages.append({
-            'role': 'assistant',
-            'content': response,
-            'timestamp': response_time,
-        })
-        state.last_message_at = response_time
+        # Save response to conversation (skip if agentic turn already stored history_messages)
+        if not getattr(state, '_skip_response_append', False):
+            response_time = datetime.now(timezone.utc).isoformat()
+            state.messages.append({
+                'role': 'assistant',
+                'content': response,
+                'timestamp': response_time,
+            })
+        else:
+            state._skip_response_append = False
+        state.last_message_at = datetime.now(timezone.utc).isoformat()
         await self._save_state(state)
 
         logger.debug(f"Handled batched messages in {conversation_id}, turn {state.turn_count}")
