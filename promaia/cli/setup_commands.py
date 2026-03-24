@@ -131,25 +131,19 @@ async def _run_setup(args):
     notion = get_integration("notion")
     notion_success = await _safe_step(configure_credential(notion, console), "Notion")
 
-    # Step 5: Connect Google
-    console.print()
-    google = get_integration("google")
-    await _safe_step(configure_credential(google, console), "Google")
-
-    # Step 6: Set up workspace
+    # Step 5: Set up workspace (right after Notion, before other services)
     workspace_slug = None
     if notion_success:
         console.print()
         console.print("[bold]Setting up your workspace[/bold]\n")
         workspace_slug = _auto_create_workspace(notion, console)
     else:
-        # Check if workspace already exists from a prior run
         from promaia.config.workspaces import get_workspace_manager
         manager = get_workspace_manager()
         if manager.default_workspace:
             workspace_slug = manager.default_workspace
 
-    # Step 7: Select Notion databases
+    # Step 6: Select Notion databases
     if workspace_slug:
         console.print()
         console.print("[bold]Select Notion databases to sync[/bold]\n")
@@ -157,6 +151,11 @@ async def _run_setup(args):
             _browse_notion_databases(workspace_slug, console),
             "database selection"
         )
+
+    # Step 7: Connect Google
+    console.print()
+    google = get_integration("google")
+    await _safe_step(configure_credential(google, console), "Google")
 
     # Step 8: Next steps
     console.print()
