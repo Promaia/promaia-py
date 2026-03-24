@@ -337,6 +337,8 @@ async def _browse_notion_databases(workspace, c=None):
 async def _multi_select_databases(databases, c):
     """Multi-select checkbox UI for database selection.
 
+    Uses a scrollable viewport so it works with any number of items.
+
     Args:
         databases: list of (id, title) tuples
     Returns:
@@ -352,28 +354,50 @@ async def _multi_select_databases(databases, c):
     selected = [False] * len(databases)
     current = 0
     confirmed = False
+    max_visible = 15  # Show at most 15 items at a time
 
-    def get_entry(i):
-        check = "[x]" if selected[i] else "[ ]"
-        arrow = " >" if i == current else "  "
-        return f" {arrow} {check} {databases[i][1]}"
+    def get_viewport_text():
+        """Render a scrollable viewport as a single text block."""
+        total = len(databases)
+        # Calculate scroll offset to keep cursor visible
+        half = max_visible // 2
+        if total <= max_visible:
+            start = 0
+        elif current < half:
+            start = 0
+        elif current >= total - half:
+            start = total - max_visible
+        else:
+            start = current - half
+        end = min(start + max_visible, total)
+
+        lines = []
+        for i in range(start, end):
+            check = "[x]" if selected[i] else "[ ]"
+            arrow = " >" if i == current else "  "
+            lines.append(f" {arrow} {check} {databases[i][1]}")
+
+        if start > 0:
+            lines.insert(0, f"  ... {start} more above")
+        if end < total:
+            lines.append(f"  ... {total - end} more below")
+
+        return "\n".join(lines)
 
     def get_status():
         count = sum(selected)
         return f" SPACE toggle  ENTER confirm ({count} selected)  ESC skip"
 
     def make_layout():
-        entries = [
-            Window(
-                FormattedTextControl(text=lambda i=i: get_entry(i)),
-                height=1,
-            )
-            for i in range(len(databases))
-        ]
+        viewport_height = min(len(databases), max_visible) + (1 if len(databases) > max_visible else 0) + 1
+        viewport = Window(
+            FormattedTextControl(text=get_viewport_text),
+            height=viewport_height,
+        )
         status = Window(
             FormattedTextControl(text=get_status), height=1, style="fg:gray"
         )
-        return Layout(HSplit([*entries, Window(height=1), status]))
+        return Layout(HSplit([viewport, Window(height=1), status]))
 
     bindings = KeyBindings()
 
@@ -397,7 +421,7 @@ async def _multi_select_databases(databases, c):
         event.app.layout = make_layout()
 
     @bindings.add(Keys.Enter)
-    def confirm(event):
+    def confirm_sel(event):
         nonlocal confirmed
         confirmed = True
         event.app.exit()
