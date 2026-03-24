@@ -291,24 +291,30 @@ def create_slack_bot():
             if not message.get('text'):
                 return
 
-            # Skip @mentions — handled by handle_app_mention
+            # Skip @mentions in channels — handled by handle_app_mention
+            # But in DMs, process everything (no app_mention event fires for DMs)
             nonlocal _bot_user_id
             if _bot_user_id is None:
                 auth_result = await client.auth_test()
                 _bot_user_id = auth_result['user_id']
-            if f'<@{_bot_user_id}>' in message.get('text', ''):
-                return
 
             channel_id = message['channel']
+            is_1on1_dm = channel_id.startswith('D')  # D = 1-on-1 DM, G = group DM (mpim)
+
+            if not is_1on1_dm and f'<@{_bot_user_id}>' in message.get('text', ''):
+                return  # Channel/group @mention — let handle_app_mention deal with it
             user_id = message['user']
             text = message['text']
+            # Strip bot @mention from 1-on-1 DMs
+            if is_1on1_dm and _bot_user_id:
+                text = text.replace(f'<@{_bot_user_id}>', '').strip()
             thread_ts = message.get('thread_ts')
 
             logger.info(f"Message from {user_id} in {channel_id}: {text[:50]}...")
 
             # 1. Active tag-to-chat loop? Feed message directly.
             # Check thread_ts for threaded conversations, channel_id for DMs
-            loop_key = thread_ts if thread_ts else (channel_id if channel_id.startswith('D') else None)
+            loop_key = thread_ts if thread_ts else (channel_id if is_1on1_dm else None)
             if loop_key and loop_key in active_loops:
                 loop = active_loops[loop_key]
                 if loop.state.status != "stopped":
@@ -354,14 +360,14 @@ def create_slack_bot():
                 )
 
                 if response:
-                    is_dm = channel_id.startswith('D')
+                    is_dm = is_1on1_dm
                     await say(
                         text=response,
                         thread_ts=None if is_dm else conversation.thread_id
                     )
                     logger.info(f"Response sent ({len(response)} chars)")
 
-            elif channel_id.startswith('D') and default_agent:
+            elif is_1on1_dm and default_agent:
                 # Unsolicited DM — auto-create a conversation with default agent
                 logger.info(f"New DM from {user_id}, starting conversation with {default_agent}")
 
