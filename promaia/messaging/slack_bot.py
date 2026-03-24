@@ -343,61 +343,45 @@ def create_slack_bot():
                     logger.info(f"Woke dormant thread {thread_ts[:12]} with new message")
                     return
 
-            # 3. Existing direct conversation? Handle normally (legacy).
-            conversation = await conv_manager.get_active_conversation(
-                platform='slack',
-                channel_id=channel_id,
-                user_id=user_id
-            )
-
-            if conversation:
-                logger.info(f"Found conversation {conversation.conversation_id[:20]}... agent={conversation.agent_id}")
-
-                response = await conv_manager.handle_user_message(
-                    conversation_id=conversation.conversation_id,
-                    user_message=text,
-                    user_id=user_id
-                )
-
-                if response:
-                    is_dm = is_1on1_dm
-                    await say(
-                        text=response,
-                        thread_ts=None if is_dm else conversation.thread_id
-                    )
-                    logger.info(f"Response sent ({len(response)} chars)")
-
-            elif is_1on1_dm and default_agent:
-                # Unsolicited DM — auto-create a conversation with default agent
-                logger.info(f"New DM from {user_id}, starting conversation with {default_agent}")
-
-                now = datetime.now(timezone.utc).isoformat()
-                conversation_id = f"slack_dm_{channel_id}_{int(datetime.now(timezone.utc).timestamp())}"
-
-                dm_conversation = ConversationState(
-                    conversation_id=conversation_id,
-                    agent_id=default_agent,
+            # 3. DMs: always use tag-to-chat for tool animation display
+            if is_1on1_dm and default_agent:
+                # Check for existing DM conversation to resume
+                conversation = await conv_manager.get_active_conversation(
                     platform='slack',
                     channel_id=channel_id,
-                    user_id=user_id,
-                    thread_id=None,  # DMs don't use threads
-                    status='active',
-                    last_message_at=now,
-                    messages=[],
-                    context={},
-                    timeout_seconds=30 * 60,
-                    max_turns=None,
-                    created_at=now,
-                    conversation_type='tag_to_chat',
+                    user_id=user_id
                 )
-                await conv_manager._save_state(dm_conversation)
+                conv_id = conversation.conversation_id if conversation else f"slack_dm_{channel_id}_{int(datetime.now(timezone.utc).timestamp())}"
+                agent_id = conversation.agent_id if conversation else default_agent
+
+                if not conversation:
+                    # New DM — create conversation state
+                    logger.info(f"New DM from {user_id}, starting conversation with {agent_id}")
+                    now = datetime.now(timezone.utc).isoformat()
+                    dm_conversation = ConversationState(
+                        conversation_id=conv_id,
+                        agent_id=agent_id,
+                        platform='slack',
+                        channel_id=channel_id,
+                        user_id=user_id,
+                        thread_id=None,
+                        status='active',
+                        last_message_at=now,
+                        messages=[],
+                        context={},
+                        timeout_seconds=30 * 60,
+                        max_turns=None,
+                        created_at=now,
+                        conversation_type='tag_to_chat',
+                    )
+                    await conv_manager._save_state(dm_conversation)
 
                 loop = _start_loop(
-                    conversation_id=conversation_id,
+                    conversation_id=conv_id,
                     channel_id=channel_id,
-                    thread_id=None,  # DMs don't use threads
-                    agent_id=default_agent,
-                    dm_key=channel_id,  # Use channel_id as loop key for DMs
+                    thread_id=None,
+                    agent_id=agent_id,
+                    dm_key=channel_id,
                 )
 
                 username = await _get_username(client, user_id)
@@ -409,8 +393,9 @@ def create_slack_bot():
                 )
 
                 asyncio.create_task(loop.run())
-                logger.info(f"DM conversation started: {conversation_id}")
+                logger.info(f"DM conversation via tag-to-chat: {conv_id}")
 
+            # 4. Non-DM without active loop — channel message without @mention
             else:
                 logger.debug(f"No active conversation for user {user_id} in {channel_id}")
 
