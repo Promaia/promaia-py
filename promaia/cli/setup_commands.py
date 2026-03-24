@@ -120,7 +120,8 @@ async def _run_setup(args):
     workspace_slug = None
     if notion_success:
         console.print()
-        console.print("[bold]Setting up your workspace[/bold]\n")
+        console.print("[bold]Name your Promaia workspace[/bold]\n")
+        console.print("  [dim]This is your Promaia workspace name, not your Notion workspace.[/dim]")
         workspace_slug = _auto_create_workspace(notion, console)
     else:
         from promaia.config.workspaces import get_workspace_manager
