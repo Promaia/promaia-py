@@ -55,8 +55,17 @@ class SlackConnector(BaseConnector):
         self.workspace_id = config.get("database_id")  # Slack workspace ID
         self.workspace = config.get("workspace", "koii")
         
-        # Bot configuration
+        # Bot configuration: try config, then auth module, then env var
         self.bot_token = config.get("bot_token")
+        if not self.bot_token:
+            try:
+                from promaia.auth.registry import get_integration
+                slack_int = get_integration("slack")
+                creds = slack_int.get_slack_credentials(self.workspace)
+                if creds:
+                    self.bot_token = creds.get("bot_token")
+            except Exception:
+                pass
         if not self.bot_token:
             self.bot_token = os.environ.get("SLACK_BOT_TOKEN")
         
