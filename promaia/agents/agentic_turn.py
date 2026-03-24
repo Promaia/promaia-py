@@ -4856,6 +4856,15 @@ async def _generate_plan(
         from anthropic import Anthropic
 
         api_key = os.environ.get("ANTHROPIC_API_KEY")
+        base_url = None
+        if not api_key:
+            try:
+                from promaia.auth.registry import get_integration
+                api_key = get_integration("openrouter").get_default_credential()
+                if api_key:
+                    base_url = "https://openrouter.ai/api/v1"
+            except Exception:
+                pass
         if not api_key:
             return None
 
@@ -4890,10 +4899,10 @@ Example:
 
 Return ONLY the JSON array, no other text."""
 
-        client = Anthropic(api_key=api_key)
+        client = Anthropic(api_key=api_key, base_url=base_url) if base_url else Anthropic(api_key=api_key)
         response = await asyncio.to_thread(
             client.messages.create,
-            model="claude-haiku-4-5-20251001",
+            model="anthropic/claude-haiku-4-5-20251001" if base_url else "claude-haiku-4-5-20251001",
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -4966,12 +4975,24 @@ async def agentic_turn(
     from anthropic import Anthropic
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
+    base_url = None
+
+    # Fall back to OpenRouter if no direct Anthropic key
+    if not api_key:
+        try:
+            from promaia.auth.registry import get_integration
+            api_key = get_integration("openrouter").get_default_credential()
+            if api_key:
+                base_url = "https://openrouter.ai/api/v1"
+        except Exception:
+            pass
+
     if not api_key:
         return AgenticTurnResult(
             response_text="I'm sorry, I couldn't generate a response (missing API key).",
         )
 
-    client = Anthropic(api_key=api_key)
+    client = Anthropic(api_key=api_key, base_url=base_url) if base_url else Anthropic(api_key=api_key)
 
     # Inject plan into system prompt if provided
     if plan:

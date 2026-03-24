@@ -172,13 +172,20 @@ def get_api_preference():
                 api_type = lines[0] if lines else "anthropic"
                 model_id = lines[1] if len(lines) > 1 else None
 
-                if api_type in ["anthropic", "openai", "gemini", "llama"]:
+                if api_type in ["anthropic", "openai", "gemini", "llama", "openrouter"]:
                     # Set the model ID in environment if available
                     if model_id:
                         os.environ["SELECTED_MODEL_ID"] = model_id
                     return api_type
     except Exception as e:
         debug_print(f"Error reading API preference: {str(e)}")
+    # Default: prefer openrouter if configured, then anthropic
+    try:
+        from promaia.auth.registry import get_integration as _gi
+        if _gi("openrouter").get_default_credential():
+            return "openrouter"
+    except Exception:
+        pass
     return "anthropic"
 
 def save_api_preference(api_type, model_id=None):
@@ -222,6 +229,24 @@ if os.getenv("ANTHROPIC_API_KEY"):
 openai_client = None
 if os.getenv("OPENAI_API_KEY"):
     openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# OpenRouter uses the OpenAI-compatible API
+openrouter_client = None
+try:
+    from promaia.auth.registry import get_integration as _get_int
+    _or_key = _get_int("openrouter").get_default_credential()
+    if _or_key:
+        openrouter_client = OpenAI(
+            api_key=_or_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
+except Exception:
+    pass
+if not openrouter_client and os.getenv("OPENROUTER_API_KEY"):
+    openrouter_client = OpenAI(
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url="https://openrouter.ai/api/v1",
+    )
 
 gemini_client = None
 if os.getenv("GOOGLE_API_KEY"):
@@ -7941,7 +7966,7 @@ The user will type `/send` when ready to send the email.
                         current_system_prompt = system_prompt + "\n\n## EMAIL MODE\nCompose emails as JSON artifacts. User will type /send to send."
 
                 # Agentic mode: use autonomous multi-tool loop
-                if context_state.get('agentic_mode') and current_api == "anthropic" and anthropic_client:
+                if context_state.get('agentic_mode') and current_api in ("anthropic", "openrouter") and (anthropic_client or openrouter_client):
                     try:
                         import asyncio
                         from promaia.chat.agentic_adapter import run_agentic_turn
@@ -8190,6 +8215,48 @@ The user will type `/send` when ready to send the email.
                                 'text': response_text,
                                 'tokens': None
                             }
+                elif current_api == "openrouter" and openrouter_client:
+                    # OpenRouter uses OpenAI-compatible API
+                    if current_message_images:
+                        formatted_messages = _format_openai_with_images(current_system_prompt, messages_for_api, current_message_images)
+                    else:
+                        formatted_messages = [{"role": "system", "content": current_system_prompt}] + messages_for_api
+
+                    or_model = os.getenv("SELECTED_MODEL_ID") or "anthropic/claude-sonnet-4-5"
+
+                    response = openrouter_client.chat.completions.create(
+                        model=or_model,
+                        messages=formatted_messages,
+                        max_tokens=4096,
+                        temperature=current_temperature
+                    )
+                    if response.choices:
+                        response_text = response.choices[0].message.content
+
+                        import asyncio
+                        response_text = asyncio.run(execute_all_tools_with_iteration(response_text))
+
+                        if hasattr(response, 'usage') and response.usage:
+                            prompt_tokens = response.usage.prompt_tokens or 0
+                            completion_tokens = response.usage.completion_tokens or 0
+                            total_tokens = (response.usage.total_tokens or 0) or (prompt_tokens + completion_tokens)
+
+                            from promaia.utils.ai import calculate_ai_cost
+                            cost_data = calculate_ai_cost(prompt_tokens, completion_tokens, "claude-sonnet-4-5")
+                            total_cost = cost_data["total_cost"]
+
+                            response_content = {
+                                'text': response_text,
+                                'tokens': {
+                                    'prompt_tokens': prompt_tokens,
+                                    'completion_tokens': completion_tokens,
+                                    'total_tokens': total_tokens,
+                                    'cost': total_cost
+                                }
+                            }
+                        else:
+                            response_content = {'text': response_text, 'tokens': None}
+
                 elif current_api == "openai" and openai_client:
                     # Define regenerate callback for query tool iterations
                     def regenerate_openai_response(updated_system_prompt):
