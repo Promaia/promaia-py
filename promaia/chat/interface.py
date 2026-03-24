@@ -377,6 +377,48 @@ def _track_agentic_query_sources(tool_calls_made, context_state):
                     current_srcs = [source_spec if s.split(':')[0] == qualified else s for s in current_srcs]
                 context_state['sources'] = current_srcs
 
+def _build_tool_context_summary(tool_calls_made):
+    """Build a concise hidden summary of tool calls for conversation history.
+
+    This lets future turns reference page IDs, databases loaded, etc.
+    without re-querying. The summary is appended to the assistant message
+    but not displayed to the user.
+    """
+    if not tool_calls_made:
+        return ""
+
+    parts = []
+    for tc in tool_calls_made:
+        name = tc.get("name", "")
+        tc_input = tc.get("input", {})
+        summary = tc.get("summary", "")
+
+        if name == "query_source":
+            db = tc_input.get("database", "")
+            days = tc_input.get("days", "")
+            parts.append(f"query_source: {db} ({days}d) -> {summary}")
+        elif name == "query_sql":
+            query = tc_input.get("query", "")[:80]
+            parts.append(f"query_sql: \"{query}\" -> {summary}")
+        elif name == "notion_append_blocks":
+            page_id = tc_input.get("page_id", "")
+            parts.append(f"notion_append_blocks: page_id={page_id}")
+        elif name == "notion_get_page":
+            page_id = tc_input.get("page_id", "")
+            parts.append(f"notion_get_page: page_id={page_id}")
+        elif name in ("send_message", "send_email", "create_draft"):
+            parts.append(f"{name}: {summary}")
+        elif name == "calendar_create_event":
+            parts.append(f"calendar_create_event: {summary}")
+        elif summary:
+            parts.append(f"{name}: {summary}")
+
+    if not parts:
+        return ""
+
+    return "\n\n<!-- tool_context\n" + "\n".join(parts) + "\n-->"
+
+
 def debug_print(message):
     """Print debug messages if debug mode is enabled."""
     if DEBUG_MODE:
@@ -5542,7 +5584,15 @@ The user will type `/send` to trigger the actual sending process.
                             print_text_fn=print_text,
                         ))
 
+                        display_text = result.response_text
                         response_text = result.response_text
+
+                        # Append tool context summary so future turns can reference
+                        # page IDs and data without re-querying
+                        tool_summary = _build_tool_context_summary(result.tool_calls_made)
+                        if tool_summary:
+                            response_text = response_text + tool_summary
+
                         total_tokens = result.input_tokens + result.output_tokens
 
                         from promaia.utils.ai import calculate_ai_cost
@@ -5555,14 +5605,15 @@ The user will type `/send` to trigger the actual sending process.
                         model_info += ")"
 
                         response_content = {
-                            'text': response_text,
+                            'text': display_text,
                             'tokens': {
                                 'prompt_tokens': result.input_tokens,
                                 'response_tokens': result.output_tokens,
                                 'total_tokens': total_tokens,
                                 'cost': cost_data["total_cost"],
                                 'model': model_info,
-                            }
+                            },
+                            '_history_text': response_text,
                         }
                         # Track sources loaded by agentic query_source calls
                         _track_agentic_query_sources(result.tool_calls_made, context_state)
@@ -5883,7 +5934,8 @@ The user will type `/send` to trigger the actual sending process.
                             saved_content = f"{commentary}\n\n{saved_content}"
                         messages.append({"role": "assistant", "content": saved_content})
                     else:
-                        messages.append({"role": "assistant", "content": response_text})
+                        history_text = response_content.get('_history_text', response_text) if isinstance(response_content, dict) else response_text
+                        messages.append({"role": "assistant", "content": history_text})
 
                     # Auto-save messages in draft mode
                     if draft_id and mode:
@@ -8107,7 +8159,15 @@ The user will type `/send` when ready to send the email.
                             else:
                                 break
 
+                        display_text = result.response_text
                         response_text = result.response_text
+
+                        # Append tool context summary so future turns can reference
+                        # page IDs and data without re-querying
+                        tool_summary = _build_tool_context_summary(result.tool_calls_made)
+                        if tool_summary:
+                            response_text = response_text + tool_summary
+
                         total_tokens = result.input_tokens + result.output_tokens
 
                         from promaia.utils.ai import calculate_ai_cost
@@ -8120,14 +8180,15 @@ The user will type `/send` when ready to send the email.
                         model_info += ")"
 
                         response_content = {
-                            'text': response_text,
+                            'text': display_text,
                             'tokens': {
                                 'prompt_tokens': result.input_tokens,
                                 'response_tokens': result.output_tokens,
                                 'total_tokens': total_tokens,
                                 'cost': cost_data["total_cost"],
                                 'model': model_info,
-                            }
+                            },
+                            '_history_text': response_text,
                         }
                         # Track sources loaded by agentic query_source calls
                         _track_agentic_query_sources(result.tool_calls_made, context_state)
@@ -8721,7 +8782,9 @@ The user will type `/send` when ready to send the email.
                                 saved_content = f"{commentary}\n\n{saved_content}"
                             messages.append({"role": "assistant", "content": saved_content})
                         else:
-                            messages.append({"role": "assistant", "content": response_text})
+                            # Use enriched text with tool context if available
+                            history_text = response_content.get('_history_text', response_text) if isinstance(response_content, dict) else response_text
+                            messages.append({"role": "assistant", "content": history_text})
 
                         # Auto-save messages in draft mode after each response
                         if draft_id and mode:
