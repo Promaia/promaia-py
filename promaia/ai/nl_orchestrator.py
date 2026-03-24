@@ -80,7 +80,18 @@ class PromaiLLMAdapter:
                     except Exception as e:
                         print(f"⚠️  Failed to setup {client_type} client: {e}")
                         continue
-            
+
+            # Try OpenRouter as fallback
+            try:
+                from promaia.utils.ai import get_anthropic_client
+                client, _ = get_anthropic_client()
+                if client:
+                    self.client_type = "anthropic"
+                    self.client = client
+                    return
+            except Exception:
+                pass
+
             raise ValueError("No working LLM API clients found")
         
     def invoke(self, messages):
