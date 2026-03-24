@@ -93,6 +93,12 @@ async def _run_setup(args):
         await _check_config()
         return
 
+    # Handle single-service setup: maia setup slack, maia setup notion, etc.
+    service = getattr(args, "service", None)
+    if service:
+        await _run_single_service_setup(service)
+        return
+
     _print_banner()
 
     in_docker = is_running_in_docker()
@@ -183,6 +189,45 @@ async def _run_initial_sync(workspace):
             self.limit = None
 
     await handle_database_sync(SyncArgs())
+
+
+async def _run_single_service_setup(service):
+    """Run setup for a single service by name."""
+    from promaia.auth.registry import get_integration
+    from promaia.auth.flow import configure_credential
+    from promaia.config.workspaces import get_workspace_manager
+
+    ensure_config_file()
+
+    manager = get_workspace_manager()
+    workspace = manager.get_default_workspace()
+    if not workspace:
+        console.print("[yellow]No workspace configured. Run 'maia setup' first.[/yellow]")
+        return
+
+    service = service.lower().strip()
+
+    if service == "slack":
+        await _setup_slack(workspace, console)
+    elif service == "notion":
+        notion = get_integration("notion")
+        await configure_credential(notion, console)
+        _copy_notion_creds_to_workspace(notion, workspace)
+        console.print()
+        console.print("[bold]Select Notion databases to sync[/bold]\n")
+        await _browse_notion_databases(workspace, console)
+    elif service == "google":
+        google = get_integration("google")
+        await configure_credential(google, console)
+    elif service in ("llm", "ai", "openrouter", "anthropic"):
+        from promaia.auth.registry import get_ai_integrations
+        integrations = get_ai_integrations()
+        selected = await _select_provider(integrations)
+        if selected:
+            await configure_credential(selected, console)
+    else:
+        console.print(f"[yellow]Unknown service: {service}[/yellow]")
+        console.print("[dim]Available: slack, notion, google, llm[/dim]")
 
 
 async def _safe_step(coro, name="step"):
@@ -1135,6 +1180,12 @@ def add_setup_commands(subparsers):
     setup_parser = subparsers.add_parser(
         "setup",
         help="Interactive setup wizard — configure AI provider and API key",
+    )
+    setup_parser.add_argument(
+        "service",
+        nargs="?",
+        default=None,
+        help="Run setup for a specific service (slack, notion, google, llm)",
     )
     setup_parser.add_argument(
         "--check",
