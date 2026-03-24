@@ -759,6 +759,25 @@ NOTION_BLOCK_TOOL_DEFINITIONS = [
             "required": ["page_id", "content"]
         }
     },
+    {
+        "name": "notion_delete_blocks",
+        "description": (
+            "Delete (archive) one or more blocks from a Notion page. "
+            "Use this to remove blocks, or as part of a delete-and-recreate "
+            "flow to change a block's type."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "block_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of block IDs to delete"
+                }
+            },
+            "required": ["block_ids"]
+        }
+    },
 ]
 
 
@@ -3502,6 +3521,8 @@ class ToolExecutor:
             return await self._notion_update_blocks(tool_input)
         elif tool_name == "notion_append_blocks":
             return await self._notion_append_blocks(tool_input)
+        elif tool_name == "notion_delete_blocks":
+            return await self._notion_delete_blocks(tool_input)
         else:
             return f"Unknown Notion tool: {tool_name}"
 
@@ -3739,6 +3760,25 @@ class ToolExecutor:
             return f"Appended {len(blocks)} blocks to page {page_id}"
         except Exception as e:
             return f"Error appending blocks: {e}"
+
+    async def _notion_delete_blocks(self, tool_input: Dict) -> str:
+        block_ids = tool_input.get("block_ids", [])
+        if not block_ids:
+            return "Error: 'block_ids' is required"
+
+        deleted = 0
+        errors = []
+        for bid in block_ids:
+            try:
+                await self._notion_client.blocks.delete(block_id=bid)
+                deleted += 1
+            except Exception as e:
+                errors.append(f"{bid}: {e}")
+
+        parts = [f"Deleted {deleted}/{len(block_ids)} blocks"]
+        if errors:
+            parts.append("Errors: " + "; ".join(errors))
+        return ". ".join(parts)
 
     # ── Config tools ────────────────────────────────────────────────────
 
