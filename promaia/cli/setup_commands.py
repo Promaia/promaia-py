@@ -102,20 +102,7 @@ async def _run_setup(args):
     from promaia.auth.registry import get_ai_integrations, get_integration
     from promaia.auth.flow import configure_credential
 
-    # Step 1: AI provider selection
-    integrations = get_ai_integrations()
-    selected = await _select_provider(integrations)
-    if selected is None:
-        console.print("\n[yellow]Setup cancelled.[/yellow]")
-        return
-
-    # Step 2: Configure the selected AI provider
-    success = await _safe_step(configure_credential(selected, console), "AI provider")
-    if not success:
-        console.print("\n[yellow]Setup cancelled.[/yellow]")
-        return
-
-    # Step 3: Ensure config file exists (needed before workspace creation)
+    # Step 1: Ensure config file exists (needed before workspace creation)
     if ensure_config_file():
         console.print("[green]OK[/green] promaia.config.json ready")
     else:
@@ -124,14 +111,12 @@ async def _run_setup(args):
             "skipped config file creation"
         )
 
-    # Step 4: Connect Notion
+    # Step 2: Connect Notion
     console.print()
-    console.print("[bold]Connect your services[/bold]\n")
-
     notion = get_integration("notion")
     notion_success = await _safe_step(configure_credential(notion, console), "Notion")
 
-    # Step 5: Set up workspace (right after Notion, before other services)
+    # Step 3: Set up workspace
     workspace_slug = None
     if notion_success:
         console.print()
@@ -143,7 +128,7 @@ async def _run_setup(args):
         if manager.default_workspace:
             workspace_slug = manager.default_workspace
 
-    # Step 6: Select Notion databases
+    # Step 4: Select Notion databases
     if workspace_slug:
         console.print()
         console.print("[bold]Select Notion databases to sync[/bold]\n")
@@ -152,12 +137,19 @@ async def _run_setup(args):
             "database selection"
         )
 
-    # Step 7: Connect Google
+    # Step 5: AI provider
+    console.print()
+    integrations = get_ai_integrations()
+    selected = await _select_provider(integrations)
+    if selected:
+        await _safe_step(configure_credential(selected, console), "AI provider")
+
+    # Step 6: Connect Google
     console.print()
     google = get_integration("google")
     await _safe_step(configure_credential(google, console), "Google")
 
-    # Step 8: Next steps
+    # Step 7: Next steps
     console.print()
     from_installer = os.environ.get("PROMAIA_FROM_INSTALLER") == "1"
     maia_installed = os.environ.get("PROMAIA_MAIA_INSTALLED") == "1"
@@ -254,41 +246,67 @@ async def _browse_notion_databases(workspace, c=None):
         c.print("  [dim]No Notion credentials found — skipping database selection[/dim]")
         return
 
-    # Search for all databases the bot has access to
+    # Search for all databases and resolve parent names for grouping
     c.print("  [dim]Searching for databases...[/dim]")
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 "https://api.notion.com/v1/search",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Notion-Version": "2022-06-28",
-                    "Content-Type": "application/json",
-                },
+                headers=headers,
                 json={"filter": {"value": "database", "property": "object"}},
             )
-        if resp.status_code != 200:
-            c.print(f"  [yellow]Could not search Notion databases (HTTP {resp.status_code})[/yellow]")
-            return
+            if resp.status_code != 200:
+                c.print(f"  [yellow]Could not search Notion databases (HTTP {resp.status_code})[/yellow]")
+                return
 
-        results = resp.json().get("results", [])
+            results = resp.json().get("results", [])
+            if not results:
+                c.print("  [dim]No databases found. Share databases with your Notion integration to see them here.[/dim]")
+                return
+
+            # Collect unique parent page IDs and resolve their titles
+            parent_page_ids = set()
+            for db in results:
+                p = db.get("parent", {})
+                if p.get("type") == "page_id":
+                    parent_page_ids.add(p["page_id"])
+
+            parent_names = {}
+            for pid in parent_page_ids:
+                try:
+                    pr = await client.get(f"https://api.notion.com/v1/pages/{pid}", headers=headers)
+                    if pr.status_code == 200:
+                        for _pname, pval in pr.json().get("properties", {}).items():
+                            if pval.get("type") == "title":
+                                parts = pval.get("title", [])
+                                parent_names[pid] = "".join(t.get("plain_text", "") for t in parts).strip() or "(untitled)"
+                                break
+                except Exception:
+                    pass
     except Exception as e:
         c.print(f"  [yellow]Could not connect to Notion: {e}[/yellow]")
         return
 
-    if not results:
-        c.print("  [dim]No databases found. Share databases with your Notion integration to see them here.[/dim]")
-        return
-
-    # Build list of (id, title) from results
-    databases = []
+    # Build grouped list: (id, title, group_name)
+    # group_name is: "Shared" for workspace-level, parent page title for nested
+    grouped_databases = []
     for db in results:
         db_id = db.get("id", "")
         title_parts = db.get("title", [])
-        title = "".join(t.get("plain_text", "") for t in title_parts).strip()
-        if not title:
-            title = "Untitled"
-        databases.append((db_id, title))
+        title = "".join(t.get("plain_text", "") for t in title_parts).strip() or "Untitled"
+        p = db.get("parent", {})
+        if p.get("type") == "workspace":
+            group = "Shared"
+        elif p.get("type") == "page_id":
+            group = parent_names.get(p["page_id"], "(other)")
+        else:
+            group = "(other)"
+        grouped_databases.append((db_id, title, group))
 
     # Check which are already added
     db_manager = get_database_manager()
@@ -297,8 +315,8 @@ async def _browse_notion_databases(workspace, c=None):
         existing_ids.add(db_config.database_id)
 
     # Filter out already-added databases
-    new_databases = [(db_id, title) for db_id, title in databases if db_id not in existing_ids]
-    already_added = len(databases) - len(new_databases)
+    new_databases = [(db_id, title, group) for db_id, title, group in grouped_databases if db_id not in existing_ids]
+    already_added = len(grouped_databases) - len(new_databases)
 
     if already_added > 0:
         c.print(f"  [dim]{already_added} database(s) already configured[/dim]")
@@ -307,7 +325,10 @@ async def _browse_notion_databases(workspace, c=None):
         c.print("  [green]OK[/green] All available databases are already configured")
         return
 
-    # Multi-select UI using prompt_toolkit
+    # Sort by group, then title
+    new_databases.sort(key=lambda x: (x[2].lower(), x[1].lower()))
+
+    # Multi-select UI with grouped display
     selected = await _multi_select_databases(new_databases, c)
 
     if not selected:
@@ -316,7 +337,7 @@ async def _browse_notion_databases(workspace, c=None):
 
     # Add selected databases
     added = 0
-    for db_id, title in selected:
+    for db_id, title, _group in selected:
         name = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") or "untitled"
         config = {
             "source_type": "notion",
@@ -335,14 +356,15 @@ async def _browse_notion_databases(workspace, c=None):
 
 
 async def _multi_select_databases(databases, c):
-    """Multi-select checkbox UI for database selection.
+    """Multi-select checkbox UI with grouped/nested display.
 
-    Uses a scrollable viewport so it works with any number of items.
+    Uses a scrollable viewport. Databases are grouped by their parent
+    page name (e.g. "Shared", "Angl Home", "Promaia agents").
 
     Args:
-        databases: list of (id, title) tuples
+        databases: list of (id, title, group) tuples, pre-sorted by group
     Returns:
-        list of selected (id, title) tuples
+        list of selected (id, title, group) tuples
     """
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.keys import Keys
@@ -354,33 +376,57 @@ async def _multi_select_databases(databases, c):
     selected = [False] * len(databases)
     current = 0
     confirmed = False
-    max_visible = 15  # Show at most 15 items at a time
+    max_visible = 20
+
+    # Build display lines with group headers
+    # Each line is either a header (not selectable) or a db entry (selectable)
+    display_lines = []  # list of (type, index_or_group)
+    last_group = None
+    for i, (db_id, title, group) in enumerate(databases):
+        if group != last_group:
+            display_lines.append(("header", group))
+            last_group = group
+        display_lines.append(("entry", i))
+
+    # Map from selectable positions to display_lines indices
+    selectable_positions = [i for i, (t, _) in enumerate(display_lines) if t == "entry"]
+    # Map from cursor position (0..N-1 selectable items) to display_lines index
+    cursor_to_display = {pos: dl_idx for pos, dl_idx in enumerate(selectable_positions)}
 
     def get_viewport_text():
-        """Render a scrollable viewport as a single text block."""
-        total = len(databases)
-        # Calculate scroll offset to keep cursor visible
+        total_display = len(display_lines)
+        # Find display index of current cursor
+        current_display_idx = cursor_to_display.get(current, 0)
+
+        # Calculate scroll window around current item
         half = max_visible // 2
-        if total <= max_visible:
+        if total_display <= max_visible:
             start = 0
-        elif current < half:
+        elif current_display_idx < half:
             start = 0
-        elif current >= total - half:
-            start = total - max_visible
+        elif current_display_idx >= total_display - half:
+            start = max(0, total_display - max_visible)
         else:
-            start = current - half
-        end = min(start + max_visible, total)
+            start = current_display_idx - half
+        end = min(start + max_visible, total_display)
 
         lines = []
-        for i in range(start, end):
-            check = "[x]" if selected[i] else "[ ]"
-            arrow = " >" if i == current else "  "
-            lines.append(f" {arrow} {check} {databases[i][1]}")
-
         if start > 0:
-            lines.insert(0, f"  ... {start} more above")
-        if end < total:
-            lines.append(f"  ... {total - end} more below")
+            lines.append("  ... more above")
+
+        for dl_idx in range(start, end):
+            line_type, value = display_lines[dl_idx]
+            if line_type == "header":
+                lines.append(f"\n  {value}")
+            else:
+                db_idx = value
+                check = "[x]" if selected[db_idx] else "[ ]"
+                is_current = (dl_idx == cursor_to_display.get(current))
+                arrow = " >" if is_current else "  "
+                lines.append(f" {arrow} {check} {databases[db_idx][1]}")
+
+        if end < total_display:
+            lines.append("  ... more below")
 
         return "\n".join(lines)
 
@@ -389,17 +435,18 @@ async def _multi_select_databases(databases, c):
         return f" SPACE toggle  ENTER confirm ({count} selected)  ESC skip"
 
     def make_layout():
-        viewport_height = min(len(databases), max_visible) + (1 if len(databases) > max_visible else 0) + 1
+        visible = min(len(display_lines), max_visible) + 3
         viewport = Window(
             FormattedTextControl(text=get_viewport_text),
-            height=viewport_height,
+            height=visible,
         )
         status = Window(
             FormattedTextControl(text=get_status), height=1, style="fg:gray"
         )
-        return Layout(HSplit([viewport, Window(height=1), status]))
+        return Layout(HSplit([viewport, status]))
 
     bindings = KeyBindings()
+    total_selectable = len(selectable_positions)
 
     @bindings.add(Keys.Up)
     def up(event):
@@ -411,13 +458,16 @@ async def _multi_select_databases(databases, c):
     @bindings.add(Keys.Down)
     def down(event):
         nonlocal current
-        if current < len(databases) - 1:
+        if current < total_selectable - 1:
             current += 1
             event.app.layout = make_layout()
 
     @bindings.add(" ")
     def toggle(event):
-        selected[current] = not selected[current]
+        # Get the actual database index for the current cursor position
+        dl_idx = cursor_to_display[current]
+        _, db_idx = display_lines[dl_idx]
+        selected[db_idx] = not selected[db_idx]
         event.app.layout = make_layout()
 
     @bindings.add(Keys.Enter)
