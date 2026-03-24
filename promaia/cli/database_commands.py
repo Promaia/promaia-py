@@ -994,6 +994,21 @@ async def _handle_database_add_inner(args):
                         print(f"💡 You can add channels later with: maia database channel add {name}")
                 else:
                     print(f"💡 You can add channels later with: maia database channel add {name}")
+
+            # Initial sync
+            qualified = db_config.get_qualified_name() if db_config else name
+            print(f"\n📥 Running initial sync for {qualified}...")
+            try:
+                class _SyncArgs:
+                    def __init__(self):
+                        self.sources = [qualified]
+                        self.workspace = None
+                        self.browse = None
+                        self.limit = None
+                await handle_database_sync(_SyncArgs())
+            except Exception as sync_e:
+                print(f"⚠ Initial sync failed: {sync_e}")
+                print(f"💡 You can sync later with: maia database sync {qualified}")
         else:
             print(f"✗ Failed to add database '{name}' (may already exist)")
 
