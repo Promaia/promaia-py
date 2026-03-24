@@ -89,8 +89,9 @@ def _load_agent_calendars(workspace: str) -> Dict[str, str]:
                 workspace=workspace,
                 databases=[],
                 prompt_file="",
-                mcp_tools=["calendar"],
-                description="Default Maia agent with calendar scheduling",
+                mcp_tools=["calendar", "notion", "gmail", "google_sheets"],
+                is_default_agent=True,
+                description="Default Promaia agent",
             )
 
         # Create dedicated calendar

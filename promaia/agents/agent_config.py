@@ -57,6 +57,9 @@ class AgentConfig:
     calendar_event_ids: Optional[str] = None  # Comma-separated event IDs from Google Calendar
     calendar_id: Optional[str] = None  # Dedicated Google Calendar ID for this agent
 
+    # Default agent flag — gets all tools automatically
+    is_default_agent: bool = False
+
     # Journal memory
     journal_memory_days: int = 7  # Days of journal entries to load as memory
 

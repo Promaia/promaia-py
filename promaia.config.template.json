@@ -41,6 +41,19 @@
   },
   "databases": {},
   "workspaces": {},
-  "default_workspace": null
+  "default_workspace": null,
+  "agents": [
+    {
+      "name": "maia",
+      "workspace": "",
+      "databases": [],
+      "prompt_file": "",
+      "mcp_tools": ["calendar", "notion", "gmail", "google_sheets"],
+      "is_default_agent": true,
+      "max_iterations": 40,
+      "enabled": true,
+      "description": "Default Promaia agent"
+    }
+  ]
 }
 
