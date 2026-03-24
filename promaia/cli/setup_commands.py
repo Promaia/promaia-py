@@ -79,7 +79,10 @@ def ensure_config_file() -> bool:
 
 def handle_setup(args):
     """Entry point for `maia setup`. Sync wrapper around async flow."""
-    asyncio.run(_run_setup(args))
+    try:
+        asyncio.run(_run_setup(args))
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Setup interrupted.[/yellow]")
 
 
 async def _run_setup(args):
@@ -107,7 +110,7 @@ async def _run_setup(args):
         return
 
     # Step 2: Configure the selected AI provider
-    success = await configure_credential(selected, console)
+    success = await _safe_step(configure_credential(selected, console), "AI provider")
     if not success:
         console.print("\n[yellow]Setup cancelled.[/yellow]")
         return
@@ -121,35 +124,57 @@ async def _run_setup(args):
             "skipped config file creation"
         )
 
-    # Step 4: Connect services
+    # Step 4: Connect Notion
     console.print()
     console.print("[bold]Connect your services[/bold]\n")
 
     notion = get_integration("notion")
-    notion_success = await configure_credential(notion, console)
+    notion_success = await _safe_step(configure_credential(notion, console), "Notion")
 
+    # Step 5: Connect Google
     console.print()
     google = get_integration("google")
-    await configure_credential(google, console)
+    await _safe_step(configure_credential(google, console), "Google")
 
-    # Step 5: Set up workspace
+    # Step 6: Set up workspace
     workspace_slug = None
     if notion_success:
         console.print()
         console.print("[bold]Setting up your workspace[/bold]\n")
         workspace_slug = _auto_create_workspace(notion, console)
+    else:
+        # Check if workspace already exists from a prior run
+        from promaia.config.workspaces import get_workspace_manager
+        manager = get_workspace_manager()
+        if manager.default_workspace:
+            workspace_slug = manager.default_workspace
 
-    # Step 6: Select Notion databases
-    if workspace_slug and notion_success:
+    # Step 7: Select Notion databases
+    if workspace_slug:
         console.print()
         console.print("[bold]Select Notion databases to sync[/bold]\n")
-        await _browse_notion_databases(workspace_slug, console)
+        await _safe_step(
+            _browse_notion_databases(workspace_slug, console),
+            "database selection"
+        )
 
-    # Step 7: Next steps
+    # Step 8: Next steps
     console.print()
     from_installer = os.environ.get("PROMAIA_FROM_INSTALLER") == "1"
     maia_installed = os.environ.get("PROMAIA_MAIA_INSTALLED") == "1"
     _print_next_steps(from_installer, maia_installed)
+
+
+async def _safe_step(coro, name="step"):
+    """Run an async step, catching interrupts and errors gracefully."""
+    try:
+        return await coro
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        console.print(f"\n  [dim]{name} skipped[/dim]")
+        return False
+    except Exception as e:
+        console.print(f"\n  [yellow]Warning:[/yellow] {name} failed: {e}")
+        return False
 
 
 def _auto_create_workspace(notion_integration, c=None):
