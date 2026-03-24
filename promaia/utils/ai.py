@@ -38,8 +38,8 @@ from promaia.utils.env_writer import get_data_dir
 def get_anthropic_client():
     """Get a sync Anthropic client, falling back to OpenRouter if no direct key.
 
-    Returns (client, model_prefix) where model_prefix is "" for direct
-    Anthropic or "anthropic/" for OpenRouter.
+    Returns (client, model_prefix) where model_prefix is always ""
+    because OpenRouter's Anthropic skin at /api handles model mapping.
     """
     from anthropic import Anthropic
 
@@ -47,15 +47,15 @@ def get_anthropic_client():
     if api_key:
         return Anthropic(api_key=api_key), ""
 
-    # Fall back to OpenRouter
+    # Fall back to OpenRouter's Anthropic-compatible endpoint
     try:
         from promaia.auth.registry import get_integration
         or_key = get_integration("openrouter").get_default_credential()
         if or_key:
             return Anthropic(
                 api_key=or_key,
-                base_url="https://openrouter.ai/api/v1",
-            ), "anthropic/"
+                base_url="https://openrouter.ai/api",
+            ), ""
     except Exception:
         pass
 
