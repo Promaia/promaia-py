@@ -33,6 +33,33 @@ else:
     logger.debug("ANTHROPIC_API_KEY not set — direct Anthropic calls unavailable.")
 
 from promaia.utils.env_writer import get_data_dir
+
+
+def get_anthropic_client():
+    """Get a sync Anthropic client, falling back to OpenRouter if no direct key.
+
+    Returns (client, model_prefix) where model_prefix is "" for direct
+    Anthropic or "anthropic/" for OpenRouter.
+    """
+    from anthropic import Anthropic
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if api_key:
+        return Anthropic(api_key=api_key), ""
+
+    # Fall back to OpenRouter
+    try:
+        from promaia.auth.registry import get_integration
+        or_key = get_integration("openrouter").get_default_credential()
+        if or_key:
+            return Anthropic(
+                api_key=or_key,
+                base_url="https://openrouter.ai/api/v1",
+            ), "anthropic/"
+    except Exception:
+        pass
+
+    return None, ""
 DEBUG_LOGS_DIR = str(get_data_dir() / "debug_logs" / "ai_calls")
 if DEBUG_MODE:
     try:

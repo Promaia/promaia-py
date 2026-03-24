@@ -4852,20 +4852,10 @@ async def _generate_plan(
     logger.info("[planning] Complex request detected, generating plan...")
 
     try:
-        import os
-        from anthropic import Anthropic
+        from promaia.utils.ai import get_anthropic_client
 
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        base_url = None
-        if not api_key:
-            try:
-                from promaia.auth.registry import get_integration
-                api_key = get_integration("openrouter").get_default_credential()
-                if api_key:
-                    base_url = "https://openrouter.ai/api/v1"
-            except Exception:
-                pass
-        if not api_key:
+        client, prefix = get_anthropic_client()
+        if not client:
             return None
 
         # Build a lightweight decomposition prompt (reuses Planner's style)
@@ -4899,10 +4889,9 @@ Example:
 
 Return ONLY the JSON array, no other text."""
 
-        client = Anthropic(api_key=api_key, base_url=base_url) if base_url else Anthropic(api_key=api_key)
         response = await asyncio.to_thread(
             client.messages.create,
-            model="anthropic/claude-haiku-4-5-20251001" if base_url else "claude-haiku-4-5-20251001",
+            model=f"{prefix}claude-haiku-4-5-20251001",
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -4971,28 +4960,13 @@ async def agentic_turn(
     Returns:
         AgenticTurnResult with plain text response and metadata
     """
-    import os
-    from anthropic import Anthropic
+    from promaia.utils.ai import get_anthropic_client
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    base_url = None
-
-    # Fall back to OpenRouter if no direct Anthropic key
-    if not api_key:
-        try:
-            from promaia.auth.registry import get_integration
-            api_key = get_integration("openrouter").get_default_credential()
-            if api_key:
-                base_url = "https://openrouter.ai/api/v1"
-        except Exception:
-            pass
-
-    if not api_key:
+    client, prefix = get_anthropic_client()
+    if not client:
         return AgenticTurnResult(
             response_text="I'm sorry, I couldn't generate a response (missing API key).",
         )
-
-    client = Anthropic(api_key=api_key, base_url=base_url) if base_url else Anthropic(api_key=api_key)
 
     # Inject plan into system prompt if provided
     if plan:
@@ -5048,7 +5022,7 @@ async def agentic_turn(
 
         # Build API call kwargs
         api_kwargs = dict(
-            model="claude-sonnet-4-6",
+            model=f"{prefix}claude-sonnet-4-6",
             system=trimmed_system,
             messages=internal_messages,
             max_tokens=4096,

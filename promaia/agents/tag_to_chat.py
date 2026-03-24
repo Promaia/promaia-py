@@ -365,15 +365,15 @@ class TagToChatLoop:
                 seconds_since_last=seconds_since_last,
             )
 
-            api_key = os.environ.get("ANTHROPIC_API_KEY")
-            if not api_key:
-                logger.warning("No ANTHROPIC_API_KEY, defaulting to answer_now")
+            from promaia.utils.ai import get_anthropic_client
+            client, prefix = get_anthropic_client()
+            if not client:
+                logger.warning("No API key configured, defaulting to answer_now")
                 return ("answer_now", None)
 
-            client = Anthropic(api_key=api_key)
             response = await asyncio.to_thread(
                 client.messages.create,
-                model="claude-haiku-4-5-20251001",
+                model=f"{prefix}claude-haiku-4-5-20251001",
                 max_tokens=30,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -714,14 +714,14 @@ class TagToChatLoop:
             recent.append(f"{self.state.agent_id}: {response_text[:300]}")
             snippet = "\n".join(recent)
 
-            api_key = os.environ.get("ANTHROPIC_API_KEY")
-            if not api_key:
+            from promaia.utils.ai import get_anthropic_client
+            client, prefix = get_anthropic_client()
+            if not client:
                 return
 
-            client = Anthropic(api_key=api_key)
             title_resp = await asyncio.to_thread(
                 client.messages.create,
-                model="claude-haiku-4-5-20251001",
+                model=f"{prefix}claude-haiku-4-5-20251001",
                 max_tokens=30,
                 messages=[{
                     "role": "user",

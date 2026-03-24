@@ -343,16 +343,15 @@ async def _summarize_old_turns(messages: List[Dict], budget_tokens: int) -> List
 async def _call_haiku_for_summary(prompt: str) -> Optional[str]:
     """Call Haiku to generate a conversation summary."""
     try:
-        from anthropic import Anthropic
+        from promaia.utils.ai import get_anthropic_client
 
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
+        client, prefix = get_anthropic_client()
+        if not client:
             return None
 
-        client = Anthropic(api_key=api_key)
         response = await asyncio.to_thread(
             client.messages.create,
-            model="claude-haiku-4-5-20251001",
+            model=f"{prefix}claude-haiku-4-5-20251001",
             system="You are a conversation summarizer. Output only the summary, no preamble.",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=2048,

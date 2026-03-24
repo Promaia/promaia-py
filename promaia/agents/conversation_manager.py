@@ -641,15 +641,15 @@ class ConversationManager:
                     )
             else:
                 # Fallback: single LLM call (no tool use)
-                api_key = os.environ.get("ANTHROPIC_API_KEY")
-                if not api_key:
-                    logger.error("ANTHROPIC_API_KEY not set")
+                from promaia.utils.ai import get_anthropic_client
+                client, prefix = get_anthropic_client()
+                if not client:
+                    logger.error("No API key configured (Anthropic or OpenRouter)")
                     return "I'm sorry, I couldn't generate a response (missing API key)."
 
-                client = Anthropic(api_key=api_key)
                 response = await asyncio.to_thread(
                     client.messages.create,
-                    model="claude-sonnet-4-6",
+                    model=f"{prefix}claude-sonnet-4-6",
                     max_tokens=2048,
                     system=system_prompt,
                     messages=messages,
