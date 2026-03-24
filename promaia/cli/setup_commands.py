@@ -133,12 +133,19 @@ async def _run_setup(args):
     await configure_credential(google, console)
 
     # Step 5: Set up workspace
+    workspace_slug = None
     if notion_success:
         console.print()
         console.print("[bold]Setting up your workspace[/bold]\n")
-        _auto_create_workspace(notion, console)
+        workspace_slug = _auto_create_workspace(notion, console)
 
-    # Step 6: Next steps
+    # Step 6: Select Notion databases
+    if workspace_slug and notion_success:
+        console.print()
+        console.print("[bold]Select Notion databases to sync[/bold]\n")
+        await _browse_notion_databases(workspace_slug, console)
+
+    # Step 7: Next steps
     console.print()
     from_installer = os.environ.get("PROMAIA_FROM_INSTALLER") == "1"
     maia_installed = os.environ.get("PROMAIA_MAIA_INSTALLED") == "1"
@@ -146,7 +153,10 @@ async def _run_setup(args):
 
 
 def _auto_create_workspace(notion_integration, c=None):
-    """Create or confirm a workspace, letting the user name it."""
+    """Create or confirm a workspace, letting the user name it.
+
+    Returns the workspace slug (str) or None.
+    """
     import re
     import shutil as _shutil
     from rich.prompt import Prompt
@@ -180,9 +190,10 @@ def _auto_create_workspace(notion_integration, c=None):
             manager.remove_workspace(current)
             manager.set_default_workspace(new_name)
             c.print(f"  [green]OK[/green] Renamed workspace to [bold]{new_name}[/bold]")
+            return new_name
         else:
             c.print(f"  [green]OK[/green] Workspace [bold]{current}[/bold] ready")
-        return
+            return current
 
     # First time: ask for name with Notion workspace as suggestion
     slug = Prompt.ask(
@@ -199,6 +210,189 @@ def _auto_create_workspace(notion_integration, c=None):
             _shutil.copy2(global_token, ws_token)
 
         c.print(f"  [green]OK[/green] Created workspace [bold]{slug}[/bold] (set as default)")
+        return slug
+    return None
+
+
+async def _browse_notion_databases(workspace, c=None):
+    """Browse Notion databases and let user select which to sync."""
+    import re
+    import httpx
+    from promaia.auth.registry import get_integration
+    from promaia.config.databases import get_database_manager
+
+    c = c or console
+
+    # Get Notion token for this workspace
+    notion = get_integration("notion")
+    token = notion.get_notion_credentials(workspace)
+    if not token:
+        c.print("  [dim]No Notion credentials found — skipping database selection[/dim]")
+        return
+
+    # Search for all databases the bot has access to
+    c.print("  [dim]Searching for databases...[/dim]")
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                "https://api.notion.com/v1/search",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Notion-Version": "2022-06-28",
+                    "Content-Type": "application/json",
+                },
+                json={"filter": {"value": "database", "property": "object"}},
+            )
+        if resp.status_code != 200:
+            c.print(f"  [yellow]Could not search Notion databases (HTTP {resp.status_code})[/yellow]")
+            return
+
+        results = resp.json().get("results", [])
+    except Exception as e:
+        c.print(f"  [yellow]Could not connect to Notion: {e}[/yellow]")
+        return
+
+    if not results:
+        c.print("  [dim]No databases found. Share databases with your Notion integration to see them here.[/dim]")
+        return
+
+    # Build list of (id, title) from results
+    databases = []
+    for db in results:
+        db_id = db.get("id", "")
+        title_parts = db.get("title", [])
+        title = "".join(t.get("plain_text", "") for t in title_parts).strip()
+        if not title:
+            title = "Untitled"
+        databases.append((db_id, title))
+
+    # Check which are already added
+    db_manager = get_database_manager()
+    existing_ids = set()
+    for db_config in db_manager.get_workspace_databases(workspace):
+        existing_ids.add(db_config.database_id)
+
+    # Filter out already-added databases
+    new_databases = [(db_id, title) for db_id, title in databases if db_id not in existing_ids]
+    already_added = len(databases) - len(new_databases)
+
+    if already_added > 0:
+        c.print(f"  [dim]{already_added} database(s) already configured[/dim]")
+
+    if not new_databases:
+        c.print("  [green]OK[/green] All available databases are already configured")
+        return
+
+    # Multi-select UI using prompt_toolkit
+    selected = await _multi_select_databases(new_databases, c)
+
+    if not selected:
+        c.print("  [dim]No databases selected[/dim]")
+        return
+
+    # Add selected databases
+    added = 0
+    for db_id, title in selected:
+        name = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") or "untitled"
+        config = {
+            "source_type": "notion",
+            "database_id": db_id,
+            "description": title,
+            "workspace": workspace,
+            "sync_enabled": True,
+            "include_properties": True,
+            "default_days": 7,
+            "save_markdown": True,
+        }
+        if db_manager.add_database(name, config, workspace):
+            added += 1
+
+    c.print(f"  [green]OK[/green] Added {added} database(s) to workspace [bold]{workspace}[/bold]")
+
+
+async def _multi_select_databases(databases, c):
+    """Multi-select checkbox UI for database selection.
+
+    Args:
+        databases: list of (id, title) tuples
+    Returns:
+        list of selected (id, title) tuples
+    """
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.layout import Layout
+
+    selected = [False] * len(databases)
+    current = 0
+    confirmed = False
+
+    def get_entry(i):
+        check = "[x]" if selected[i] else "[ ]"
+        arrow = " >" if i == current else "  "
+        return f" {arrow} {check} {databases[i][1]}"
+
+    def get_status():
+        count = sum(selected)
+        return f" SPACE toggle  ENTER confirm ({count} selected)  ESC skip"
+
+    def make_layout():
+        entries = [
+            Window(
+                FormattedTextControl(text=lambda i=i: get_entry(i)),
+                height=1,
+            )
+            for i in range(len(databases))
+        ]
+        status = Window(
+            FormattedTextControl(text=get_status), height=1, style="fg:gray"
+        )
+        return Layout(HSplit([*entries, Window(height=1), status]))
+
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.Up)
+    def up(event):
+        nonlocal current
+        if current > 0:
+            current -= 1
+            event.app.layout = make_layout()
+
+    @bindings.add(Keys.Down)
+    def down(event):
+        nonlocal current
+        if current < len(databases) - 1:
+            current += 1
+            event.app.layout = make_layout()
+
+    @bindings.add(" ")
+    def toggle(event):
+        selected[current] = not selected[current]
+        event.app.layout = make_layout()
+
+    @bindings.add(Keys.Enter)
+    def confirm(event):
+        nonlocal confirmed
+        confirmed = True
+        event.app.exit()
+
+    @bindings.add(Keys.Escape)
+    def cancel(event):
+        event.app.exit()
+
+    app = Application(
+        layout=make_layout(),
+        key_bindings=bindings,
+        full_screen=False,
+        mouse_support=False,
+    )
+    await app.run_async()
+
+    if confirmed:
+        return [databases[i] for i in range(len(databases)) if selected[i]]
+    return []
 
 
 def _print_banner():
