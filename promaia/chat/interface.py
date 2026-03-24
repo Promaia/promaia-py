@@ -8229,7 +8229,7 @@ The user will type `/send` when ready to send the email.
                                 'text': response_text,
                                 'tokens': None
                             }
-                elif current_api == "openrouter" and openrouter_client:
+                elif current_api == "openrouter" and openrouter_client and response_content is None:
                     # OpenRouter uses OpenAI-compatible API
                     if current_message_images:
                         formatted_messages = _format_openai_with_images(current_system_prompt, messages_for_api, current_message_images)
