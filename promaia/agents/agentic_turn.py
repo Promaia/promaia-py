@@ -742,7 +742,8 @@ NOTION_BLOCK_TOOL_DEFINITIONS = [
         "description": (
             "Append structured blocks to a Notion page. Supports markdown: "
             "headings (#, ##), bullet lists (-), numbered lists (1.), "
-            "to-do items (- [ ], - [x]), paragraphs."
+            "to-do items (- [ ], - [x]), paragraphs. "
+            "Use 'after' to insert after a specific block instead of at the end."
         ),
         "input_schema": {
             "type": "object",
@@ -754,6 +755,10 @@ NOTION_BLOCK_TOOL_DEFINITIONS = [
                 "content": {
                     "type": "string",
                     "description": "Markdown content to append as individual blocks"
+                },
+                "after": {
+                    "type": "string",
+                    "description": "Block ID to insert after (omit to append at end)"
                 }
             },
             "required": ["page_id", "content"]
@@ -3746,6 +3751,7 @@ class ToolExecutor:
     async def _notion_append_blocks(self, tool_input: Dict) -> str:
         page_id = tool_input.get("page_id", "")
         content = tool_input.get("content", "")
+        after = tool_input.get("after")
         if not page_id or not content:
             return "Error: 'page_id' and 'content' are required"
 
@@ -3754,10 +3760,11 @@ class ToolExecutor:
             if not blocks:
                 return "No blocks parsed from content."
 
-            await self._notion_client.blocks.children.append(
-                block_id=page_id, children=blocks
-            )
-            return f"Appended {len(blocks)} blocks to page {page_id}"
+            kwargs = {"block_id": page_id, "children": blocks}
+            if after:
+                kwargs["after"] = after
+            await self._notion_client.blocks.children.append(**kwargs)
+            return f"Appended {len(blocks)} blocks to page {page_id}" + (f" after {after}" if after else "")
         except Exception as e:
             return f"Error appending blocks: {e}"
 
