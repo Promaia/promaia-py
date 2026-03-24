@@ -340,8 +340,9 @@ async def _browse_slack_channels(workspace, bot_token, c=None):
         c.print("  [dim]No channels selected[/dim]")
         return
 
-    # Join selected channels
+    # Join selected channels and collect their IDs
     joined = 0
+    selected_channel_ids = []
     async with httpx.AsyncClient(timeout=15.0) as client:
         for ch_id, ch_name, _is_member in selected:
             try:
@@ -352,10 +353,57 @@ async def _browse_slack_channels(workspace, bot_token, c=None):
                 )
                 if resp.json().get("ok"):
                     joined += 1
+                    selected_channel_ids.append(ch_id)
+                elif _is_member:
+                    # Already a member, still count it
+                    selected_channel_ids.append(ch_id)
             except Exception:
                 pass
 
     c.print(f"  [green]OK[/green] Joined {joined} channel(s)")
+
+    # Add Slack as a sync source in the database config
+    if selected_channel_ids:
+        import re
+        from promaia.config.databases import get_database_manager
+
+        db_manager = get_database_manager()
+
+        # Get team ID for database_id
+        team_id = "slack"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    "https://slack.com/api/auth.test",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                )
+                data = resp.json()
+                if data.get("ok"):
+                    team_id = data.get("team_id", "slack")
+        except Exception:
+            pass
+
+        # Check if a Slack database already exists for this workspace
+        existing_slack = None
+        for db_config in db_manager.get_workspace_databases(workspace):
+            if db_config.source_type == "slack":
+                existing_slack = db_config
+                break
+
+        if not existing_slack:
+            config = {
+                "source_type": "slack",
+                "database_id": team_id,
+                "description": "Slack channels",
+                "workspace": workspace,
+                "sync_enabled": True,
+                "include_properties": True,
+                "default_days": 7,
+                "save_markdown": True,
+                "channel_ids": selected_channel_ids,
+            }
+            db_manager.add_database("slack", config, workspace)
+            c.print(f"  [green]OK[/green] Added Slack as sync source with {len(selected_channel_ids)} channel(s)")
 
 
 async def _multi_select_channels(channels, c):
