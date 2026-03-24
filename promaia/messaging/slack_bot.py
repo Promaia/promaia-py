@@ -838,8 +838,20 @@ async def start_slack_bot_async():
     try:
         app = create_slack_bot()
 
-        # Get app token
-        app_token = os.environ.get("SLACK_APP_TOKEN")
+        # Get app token from auth module or env
+        app_token = None
+        try:
+            from promaia.auth.registry import get_integration
+            from promaia.config.workspaces import get_workspace_manager
+            slack_int = get_integration("slack")
+            ws = get_workspace_manager().get_default_workspace()
+            creds = slack_int.get_slack_credentials(ws)
+            if creds:
+                app_token = creds.get("app_token")
+        except Exception:
+            pass
+        if not app_token:
+            app_token = os.environ.get("SLACK_APP_TOKEN")
 
         # Create async Socket Mode handler
         handler = AsyncSocketModeHandler(app, app_token)
