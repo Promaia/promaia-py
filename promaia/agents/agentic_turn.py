@@ -783,6 +783,87 @@ NOTION_BLOCK_TOOL_DEFINITIONS = [
             "required": ["block_ids"]
         }
     },
+    {
+        "name": "notion_get_page",
+        "description": (
+            "Retrieve a single Notion page's properties by ID. "
+            "Returns all property values (title, status, dates, relations, etc.). "
+            "Use notion_get_blocks to read the page's content/body."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "page_id": {
+                    "type": "string",
+                    "description": "Notion page ID"
+                }
+            },
+            "required": ["page_id"]
+        }
+    },
+    {
+        "name": "notion_get_database_schema",
+        "description": (
+            "Get a database's schema — all property names, types, and options. "
+            "Use this to understand what fields exist before creating or updating pages."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "database_id": {
+                    "type": "string",
+                    "description": "Notion database ID"
+                }
+            },
+            "required": ["database_id"]
+        }
+    },
+    {
+        "name": "notion_add_comment",
+        "description": (
+            "Add a discussion comment to a Notion page or specific block."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "page_id": {
+                    "type": "string",
+                    "description": "Notion page ID to comment on"
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Comment text"
+                },
+                "block_id": {
+                    "type": "string",
+                    "description": "Optional: specific block ID to comment on (inline discussion)"
+                }
+            },
+            "required": ["page_id", "text"]
+        }
+    },
+    {
+        "name": "notion_get_page_property",
+        "description": (
+            "Retrieve a specific property value from a Notion page. "
+            "Useful for rollups, relations, and formulas that may not be "
+            "returned inline by notion_get_page."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "page_id": {
+                    "type": "string",
+                    "description": "Notion page ID"
+                },
+                "property_id": {
+                    "type": "string",
+                    "description": "Property ID (from the page's properties object)"
+                }
+            },
+            "required": ["page_id", "property_id"]
+        }
+    },
 ]
 
 
@@ -3528,6 +3609,14 @@ class ToolExecutor:
             return await self._notion_append_blocks(tool_input)
         elif tool_name == "notion_delete_blocks":
             return await self._notion_delete_blocks(tool_input)
+        elif tool_name == "notion_get_page":
+            return await self._notion_get_page(tool_input)
+        elif tool_name == "notion_get_database_schema":
+            return await self._notion_get_database_schema(tool_input)
+        elif tool_name == "notion_add_comment":
+            return await self._notion_add_comment(tool_input)
+        elif tool_name == "notion_get_page_property":
+            return await self._notion_get_page_property(tool_input)
         else:
             return f"Unknown Notion tool: {tool_name}"
 
@@ -3786,6 +3875,115 @@ class ToolExecutor:
         if errors:
             parts.append("Errors: " + "; ".join(errors))
         return ". ".join(parts)
+
+    async def _notion_get_page(self, tool_input: Dict) -> str:
+        import json as _json
+        page_id = tool_input.get("page_id", "")
+        if not page_id:
+            return "Error: 'page_id' is required"
+        try:
+            page = await self._notion_client.pages.retrieve(page_id=page_id)
+            # Extract property values into a readable format
+            props = {}
+            for name, prop in page.get("properties", {}).items():
+                prop_type = prop.get("type", "")
+                if prop_type == "title":
+                    props[name] = "".join(t.get("plain_text", "") for t in prop.get("title", []))
+                elif prop_type == "rich_text":
+                    props[name] = "".join(t.get("plain_text", "") for t in prop.get("rich_text", []))
+                elif prop_type == "number":
+                    props[name] = prop.get("number")
+                elif prop_type == "select":
+                    sel = prop.get("select")
+                    props[name] = sel.get("name") if sel else None
+                elif prop_type == "multi_select":
+                    props[name] = [s.get("name") for s in prop.get("multi_select", [])]
+                elif prop_type == "date":
+                    d = prop.get("date")
+                    props[name] = d.get("start") if d else None
+                elif prop_type == "checkbox":
+                    props[name] = prop.get("checkbox")
+                elif prop_type == "url":
+                    props[name] = prop.get("url")
+                elif prop_type == "email":
+                    props[name] = prop.get("email")
+                elif prop_type == "phone_number":
+                    props[name] = prop.get("phone_number")
+                elif prop_type == "status":
+                    st = prop.get("status")
+                    props[name] = st.get("name") if st else None
+                elif prop_type == "relation":
+                    props[name] = [r.get("id") for r in prop.get("relation", [])]
+                elif prop_type == "formula":
+                    f = prop.get("formula", {})
+                    props[name] = f.get(f.get("type", ""), None)
+                elif prop_type == "rollup":
+                    r = prop.get("rollup", {})
+                    props[name] = f"(rollup: {r.get('type', 'unknown')})"
+                elif prop_type == "people":
+                    props[name] = [p.get("name", p.get("id", "")) for p in prop.get("people", [])]
+                else:
+                    props[name] = f"({prop_type})"
+            result = {"id": page.get("id"), "url": page.get("url"), "properties": props}
+            return _json.dumps(result, indent=2, default=str)
+        except Exception as e:
+            return f"Error retrieving page: {e}"
+
+    async def _notion_get_database_schema(self, tool_input: Dict) -> str:
+        import json as _json
+        database_id = tool_input.get("database_id", "")
+        if not database_id:
+            return "Error: 'database_id' is required"
+        try:
+            db = await self._notion_client.databases.retrieve(database_id=database_id)
+            title = "".join(t.get("plain_text", "") for t in db.get("title", []))
+            schema = {}
+            for name, prop in db.get("properties", {}).items():
+                prop_info = {"type": prop.get("type", "unknown"), "id": prop.get("id", "")}
+                if prop.get("type") == "select":
+                    prop_info["options"] = [o.get("name") for o in prop.get("select", {}).get("options", [])]
+                elif prop.get("type") == "multi_select":
+                    prop_info["options"] = [o.get("name") for o in prop.get("multi_select", {}).get("options", [])]
+                elif prop.get("type") == "status":
+                    prop_info["options"] = [o.get("name") for o in prop.get("status", {}).get("options", [])]
+                    prop_info["groups"] = [g.get("name") for g in prop.get("status", {}).get("groups", [])]
+                schema[name] = prop_info
+            result = {"title": title, "id": db.get("id"), "properties": schema}
+            return _json.dumps(result, indent=2, default=str)
+        except Exception as e:
+            return f"Error retrieving database schema: {e}"
+
+    async def _notion_add_comment(self, tool_input: Dict) -> str:
+        page_id = tool_input.get("page_id", "")
+        text = tool_input.get("text", "")
+        block_id = tool_input.get("block_id")
+        if not page_id or not text:
+            return "Error: 'page_id' and 'text' are required"
+        try:
+            body = {
+                "parent": {"page_id": page_id},
+                "rich_text": [{"type": "text", "text": {"content": text}}],
+            }
+            if block_id:
+                body["discussion_id"] = block_id
+            await self._notion_client.comments.create(**body)
+            return f"Comment added to page {page_id}"
+        except Exception as e:
+            return f"Error adding comment: {e}"
+
+    async def _notion_get_page_property(self, tool_input: Dict) -> str:
+        import json as _json
+        page_id = tool_input.get("page_id", "")
+        property_id = tool_input.get("property_id", "")
+        if not page_id or not property_id:
+            return "Error: 'page_id' and 'property_id' are required"
+        try:
+            result = await self._notion_client.pages.properties.retrieve(
+                page_id=page_id, property_id=property_id
+            )
+            return _json.dumps(result, indent=2, default=str)
+        except Exception as e:
+            return f"Error retrieving property: {e}"
 
     # ── Config tools ────────────────────────────────────────────────────
 
