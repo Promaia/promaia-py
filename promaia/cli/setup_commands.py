@@ -357,6 +357,21 @@ async def _setup_slack(workspace, c=None):
     slack.store_credential(bot_token, app_token=app_token, workspace=workspace)
     c.print(f"  [green]OK[/green] Slack credentials saved")
 
+    # Auto-enable the Slack service
+    try:
+        from promaia.utils.env_writer import get_data_dir
+        import json as _json
+        services_path = get_data_dir() / "services.json"
+        if services_path.exists():
+            svc = _json.loads(services_path.read_text())
+        else:
+            svc = {}
+        svc["slack"] = {"enabled": True}
+        services_path.write_text(_json.dumps(svc, indent=2) + "\n")
+        c.print(f"  [green]OK[/green] Slack service enabled")
+    except Exception:
+        c.print(f"  [dim]Note: enable Slack with 'maia services enable slack'[/dim]")
+
     # Channel selection
     if workspace:
         await _browse_slack_channels(workspace, bot_token, c)

@@ -147,8 +147,10 @@ def create_slack_bot():
     app_token = None
     try:
         from promaia.auth.registry import get_integration
+        from promaia.config.workspaces import get_workspace_manager
         slack_int = get_integration("slack")
-        creds = slack_int.get_slack_credentials()
+        ws = get_workspace_manager().get_default_workspace()
+        creds = slack_int.get_slack_credentials(ws)
         if creds:
             bot_token = creds.get("bot_token")
             app_token = creds.get("app_token")
