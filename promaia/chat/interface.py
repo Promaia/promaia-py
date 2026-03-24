@@ -5584,15 +5584,7 @@ The user will type `/send` to trigger the actual sending process.
                             print_text_fn=print_text,
                         ))
 
-                        display_text = result.response_text
                         response_text = result.response_text
-
-                        # Append tool context summary so future turns can reference
-                        # page IDs and data without re-querying
-                        tool_summary = _build_tool_context_summary(result.tool_calls_made)
-                        if tool_summary:
-                            response_text = response_text + tool_summary
-
                         total_tokens = result.input_tokens + result.output_tokens
 
                         from promaia.utils.ai import calculate_ai_cost
@@ -5605,7 +5597,7 @@ The user will type `/send` to trigger the actual sending process.
                         model_info += ")"
 
                         response_content = {
-                            'text': display_text,
+                            'text': response_text,
                             'tokens': {
                                 'prompt_tokens': result.input_tokens,
                                 'response_tokens': result.output_tokens,
@@ -5613,7 +5605,7 @@ The user will type `/send` to trigger the actual sending process.
                                 'cost': cost_data["total_cost"],
                                 'model': model_info,
                             },
-                            '_history_text': response_text,
+                            '_history_messages': result.history_messages,
                         }
                         # Track sources loaded by agentic query_source calls
                         _track_agentic_query_sources(result.tool_calls_made, context_state)
@@ -8159,15 +8151,7 @@ The user will type `/send` when ready to send the email.
                             else:
                                 break
 
-                        display_text = result.response_text
                         response_text = result.response_text
-
-                        # Append tool context summary so future turns can reference
-                        # page IDs and data without re-querying
-                        tool_summary = _build_tool_context_summary(result.tool_calls_made)
-                        if tool_summary:
-                            response_text = response_text + tool_summary
-
                         total_tokens = result.input_tokens + result.output_tokens
 
                         from promaia.utils.ai import calculate_ai_cost
@@ -8180,7 +8164,7 @@ The user will type `/send` when ready to send the email.
                         model_info += ")"
 
                         response_content = {
-                            'text': display_text,
+                            'text': response_text,
                             'tokens': {
                                 'prompt_tokens': result.input_tokens,
                                 'response_tokens': result.output_tokens,
@@ -8188,7 +8172,7 @@ The user will type `/send` when ready to send the email.
                                 'cost': cost_data["total_cost"],
                                 'model': model_info,
                             },
-                            '_history_text': response_text,
+                            '_history_messages': result.history_messages,
                         }
                         # Track sources loaded by agentic query_source calls
                         _track_agentic_query_sources(result.tool_calls_made, context_state)
@@ -8783,8 +8767,12 @@ The user will type `/send` when ready to send the email.
                             messages.append({"role": "assistant", "content": saved_content})
                         else:
                             # Use enriched text with tool context if available
-                            history_text = response_content.get('_history_text', response_text) if isinstance(response_content, dict) else response_text
-                            messages.append({"role": "assistant", "content": history_text})
+                            # Store full tool_use/tool_result blocks if available
+                            history_msgs = response_content.get('_history_messages') if isinstance(response_content, dict) else None
+                            if history_msgs:
+                                messages.extend(history_msgs)
+                            else:
+                                messages.append({"role": "assistant", "content": response_text})
 
                         # Auto-save messages in draft mode after each response
                         if draft_id and mode:

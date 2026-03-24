@@ -19,14 +19,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AgenticTurnResult:
-    """Result of an agentic turn — only plain text goes back to conversation."""
+    """Result of an agentic turn."""
     response_text: str
     tool_calls_made: List[Dict[str, Any]] = field(default_factory=list)
     iterations_used: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
-    plan: Optional[List[str]] = None  # Plan steps if planning was used
-    signal: Optional[Dict[str, Any]] = None  # Workflow signals (interview_start, interview_end, show_selection)
+    plan: Optional[List[str]] = None
+    signal: Optional[Dict[str, Any]] = None
+    # Full tool_use/tool_result message blocks from the agentic loop.
+    # These can be appended to conversation history so future turns
+    # have access to prior tool calls and results.
+    history_messages: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ── Tool definitions (Anthropic native format) ──────────────────────────
@@ -4929,6 +4933,35 @@ def _format_plan_for_prompt(steps: List[str]) -> str:
     )
 
 
+def _serialize_content_blocks(content):
+    """Convert Anthropic SDK content blocks to serializable dicts."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        result = []
+        for block in content:
+            if hasattr(block, "type"):
+                if block.type == "text":
+                    result.append({"type": "text", "text": block.text})
+                elif block.type == "tool_use":
+                    result.append({
+                        "type": "tool_use",
+                        "id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    })
+                elif block.type == "tool_result":
+                    result.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.tool_use_id,
+                        "content": block.content,
+                    })
+            elif isinstance(block, dict):
+                result.append(block)
+        return result
+    return content
+
+
 # ── Agentic turn ───────────────────────────────────────────────────────
 
 async def agentic_turn(
@@ -4996,6 +5029,7 @@ async def agentic_turn(
     total_input_tokens = 0
     total_output_tokens = 0
     text_parts = []
+    _initial_msg_count = len(internal_messages)  # Track where tool messages start
 
     # Step progress tracking (for plan step callbacks)
     _step_marker_seen = False
@@ -5141,6 +5175,11 @@ async def agentic_turn(
                     )
                 except Exception:
                     pass
+            # Capture tool interaction messages for conversation history
+            new_msgs = internal_messages[_initial_msg_count:]
+            # Add the final assistant text as the last message
+            if text_parts:
+                new_msgs.append({"role": "assistant", "content": "\n".join(text_parts)})
             return AgenticTurnResult(
                 response_text="\n".join(text_parts),
                 tool_calls_made=all_tool_calls,
@@ -5148,12 +5187,13 @@ async def agentic_turn(
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
                 plan=plan,
+                history_messages=new_msgs,
             )
 
-        # ── Tool execution (stays internal to this function) ─────────
+        # ── Tool execution ────────────────────────────────────────────
         internal_messages.append({
             "role": "assistant",
-            "content": response.content,
+            "content": _serialize_content_blocks(response.content),
         })
 
         tool_results = []
@@ -5282,6 +5322,7 @@ async def agentic_turn(
         except Exception:
             pass
 
+    new_msgs = internal_messages[_initial_msg_count:]
     return AgenticTurnResult(
         response_text=last_text,
         tool_calls_made=all_tool_calls,
@@ -5289,6 +5330,7 @@ async def agentic_turn(
         input_tokens=total_input_tokens,
         output_tokens=total_output_tokens,
         plan=plan,
+        history_messages=new_msgs,
     )
 
 
