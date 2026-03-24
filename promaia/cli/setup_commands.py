@@ -146,7 +146,14 @@ async def _run_setup(args):
     google = get_integration("google")
     await _safe_step(configure_credential(google, console), "Google")
 
-    # Step 7: Next steps
+    # Step 7: Connect Slack
+    console.print()
+    slack_success = await _safe_step(
+        _setup_slack(workspace_slug, console),
+        "Slack"
+    )
+
+    # Step 8: Next steps
     console.print()
     from_installer = os.environ.get("PROMAIA_FROM_INSTALLER") == "1"
     maia_installed = os.environ.get("PROMAIA_MAIA_INSTALLED") == "1"
@@ -207,6 +214,239 @@ def _copy_notion_creds_to_workspace(notion_integration, workspace):
     if global_token.exists() and not ws_token.exists():
         ws_token.parent.mkdir(parents=True, exist_ok=True)
         _shutil.copy2(global_token, ws_token)
+
+
+async def _setup_slack(workspace, c=None):
+    """Set up Slack: create bot via manifest redirect, collect tokens, select channels."""
+    import httpx
+    from rich.prompt import Prompt
+    from promaia.auth.registry import get_integration
+
+    c = c or console
+
+    slack = get_integration("slack")
+
+    # Check existing credentials
+    existing = slack.get_slack_credentials(workspace)
+    if existing and existing.get("bot_token") and existing.get("app_token"):
+        c.print("[bold]Slack[/bold]\n")
+        c.print("  [dim]Validating existing connection...[/dim]")
+        valid, msg = await slack.validate_credential(existing["bot_token"])
+        if valid:
+            c.print(f"  [green]OK[/green] {msg}")
+            reconfigure = Prompt.ask("  Reconfigure?", choices=["y", "n"], default="n").strip().lower()
+            if reconfigure != "y":
+                # Still offer channel selection
+                if workspace:
+                    await _browse_slack_channels(workspace, existing["bot_token"], c)
+                return True
+        else:
+            c.print(f"  [yellow]Warning:[/yellow] {msg}")
+            c.print("  [dim]Reconfiguring...[/dim]\n")
+
+    c.print("[bold]Connect Slack[/bold]\n")
+    c.print("  Create your Slack bot:")
+    c.print("  Visit: [link=https://oauth.promaia.workers.dev/slack/install]https://oauth.promaia.workers.dev/slack/install[/link]\n")
+
+    # QR code
+    try:
+        from promaia.auth.flow import _render_qr
+        _render_qr("https://oauth.promaia.workers.dev/slack/install", c)
+    except Exception:
+        pass
+
+    c.print("  [dim]After creating the bot, copy the two tokens below.[/dim]\n")
+
+    # Collect tokens
+    bot_token = Prompt.ask("  Bot Token (xoxb-...)").strip()
+    if not bot_token:
+        c.print("  [dim]Skipped[/dim]")
+        return False
+
+    app_token = Prompt.ask("  App Token (xapp-...)").strip()
+    if not app_token:
+        c.print("  [dim]Skipped[/dim]")
+        return False
+
+    # Validate bot token
+    c.print("  [dim]Validating...[/dim]")
+    valid, msg = await slack.validate_credential(bot_token)
+    if valid:
+        c.print(f"  [green]OK[/green] {msg}")
+    else:
+        c.print(f"  [red]FAIL[/red] {msg}")
+        save_anyway = Prompt.ask("  Save anyway?", choices=["y", "n"], default="n").strip().lower()
+        if save_anyway != "y":
+            return False
+
+    # Validate app token format
+    if not app_token.startswith("xapp-"):
+        c.print("  [yellow]Warning:[/yellow] App token should start with xapp-")
+
+    # Store credentials
+    slack.store_credential(bot_token, app_token=app_token, workspace=workspace)
+    c.print(f"  [green]OK[/green] Slack credentials saved")
+
+    # Channel selection
+    if workspace:
+        await _browse_slack_channels(workspace, bot_token, c)
+
+    return True
+
+
+async def _browse_slack_channels(workspace, bot_token, c=None):
+    """Browse Slack channels and let user select which to join/sync."""
+    import httpx
+
+    c = c or console
+    c.print()
+    c.print("[bold]Select Slack channels[/bold]\n")
+    c.print("  [dim]Searching for channels...[/dim]")
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                "https://slack.com/api/conversations.list",
+                headers={"Authorization": f"Bearer {bot_token}"},
+                json={"types": "public_channel,private_channel", "limit": 200},
+            )
+        data = resp.json()
+        if not data.get("ok"):
+            c.print(f"  [yellow]Could not list channels: {data.get('error')}[/yellow]")
+            return
+        channels = data.get("channels", [])
+    except Exception as e:
+        c.print(f"  [yellow]Could not connect to Slack: {e}[/yellow]")
+        return
+
+    if not channels:
+        c.print("  [dim]No channels found[/dim]")
+        return
+
+    # Build list: (id, name, is_member)
+    channel_list = []
+    for ch in channels:
+        ch_id = ch.get("id", "")
+        ch_name = ch.get("name", "unknown")
+        is_member = ch.get("is_member", False)
+        channel_list.append((ch_id, ch_name, is_member))
+
+    channel_list.sort(key=lambda x: x[1].lower())
+
+    # Multi-select (reuse flat selector pattern)
+    selected = await _multi_select_channels(channel_list, c)
+
+    if not selected:
+        c.print("  [dim]No channels selected[/dim]")
+        return
+
+    # Join selected channels
+    joined = 0
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for ch_id, ch_name, _is_member in selected:
+            try:
+                resp = await client.post(
+                    "https://slack.com/api/conversations.join",
+                    headers={"Authorization": f"Bearer {bot_token}"},
+                    json={"channel": ch_id},
+                )
+                if resp.json().get("ok"):
+                    joined += 1
+            except Exception:
+                pass
+
+    c.print(f"  [green]OK[/green] Joined {joined} channel(s)")
+
+
+async def _multi_select_channels(channels, c):
+    """Multi-select for Slack channels. channels: list of (id, name, is_member)."""
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.layout import Layout
+
+    selected = [ch[2] for ch in channels]  # Pre-select channels bot is already in
+    current = [0]
+    confirmed = False
+    max_visible = 20
+
+    def get_viewport_text():
+        total = len(channels)
+        cur = current[0]
+        half = max_visible // 2
+        if total <= max_visible:
+            start = 0
+        elif cur < half:
+            start = 0
+        elif cur >= total - half:
+            start = max(0, total - max_visible)
+        else:
+            start = cur - half
+        end = min(start + max_visible, total)
+
+        lines = []
+        if start > 0:
+            lines.append("  ... more above")
+        for i in range(start, end):
+            check = "[x]" if selected[i] else "[ ]"
+            arrow = " >" if i == cur else "  "
+            member = " (joined)" if channels[i][2] else ""
+            lines.append(f" {arrow} {check} #{channels[i][1]}{member}")
+        if end < total:
+            lines.append("  ... more below")
+        return "\n".join(lines)
+
+    def get_status():
+        count = sum(selected)
+        return f" SPACE toggle  ENTER confirm ({count} selected)  ESC skip"
+
+    def make_layout():
+        visible = min(len(channels), max_visible) + 3
+        return Layout(HSplit([
+            Window(FormattedTextControl(text=get_viewport_text), height=visible),
+            Window(FormattedTextControl(text=get_status), height=1, style="fg:gray"),
+        ]))
+
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.Up)
+    def up(event):
+        if current[0] > 0:
+            current[0] -= 1
+            event.app.layout = make_layout()
+
+    @bindings.add(Keys.Down)
+    def down(event):
+        if current[0] < len(channels) - 1:
+            current[0] += 1
+            event.app.layout = make_layout()
+
+    @bindings.add(" ")
+    def toggle(event):
+        selected[current[0]] = not selected[current[0]]
+        event.app.layout = make_layout()
+
+    @bindings.add(Keys.Enter)
+    def confirm_sel(event):
+        nonlocal confirmed
+        confirmed = True
+        event.app.exit()
+
+    @bindings.add(Keys.Escape)
+    def cancel(event):
+        event.app.exit()
+
+    app = Application(
+        layout=make_layout(), key_bindings=bindings,
+        full_screen=False, mouse_support=False,
+    )
+    await app.run_async()
+
+    if confirmed:
+        return [channels[i] for i in range(len(channels)) if selected[i]]
+    return []
 
 
 async def _browse_notion_databases(workspace, c=None):

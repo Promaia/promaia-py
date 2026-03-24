@@ -142,14 +142,29 @@ def create_slack_bot():
     from promaia.agents.messaging.slack_platform import SlackPlatform
     from promaia.agents.tag_to_chat import TagToChatLoop
 
-    # Get tokens from environment
-    bot_token = os.environ.get("SLACK_BOT_TOKEN")
-    app_token = os.environ.get("SLACK_APP_TOKEN")
+    # Get tokens: try auth module first, fall back to env vars
+    bot_token = None
+    app_token = None
+    try:
+        from promaia.auth.registry import get_integration
+        slack_int = get_integration("slack")
+        creds = slack_int.get_slack_credentials()
+        if creds:
+            bot_token = creds.get("bot_token")
+            app_token = creds.get("app_token")
+    except Exception:
+        pass
+
+    # Fall back to environment variables
+    if not bot_token:
+        bot_token = os.environ.get("SLACK_BOT_TOKEN")
+    if not app_token:
+        app_token = os.environ.get("SLACK_APP_TOKEN")
 
     if not bot_token or not app_token:
         raise ValueError(
-            "SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in environment.\n"
-            "Add them to your .env file."
+            "Slack tokens not configured. Run 'maia setup' or set\n"
+            "SLACK_BOT_TOKEN and SLACK_APP_TOKEN in your .env file."
         )
 
     # Create Slack app (async version)
