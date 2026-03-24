@@ -102,7 +102,7 @@ async def _run_setup(args):
     from promaia.auth.registry import get_ai_integrations, get_integration
     from promaia.auth.flow import configure_credential
 
-    # Step 1: Ensure config file exists (needed before workspace creation)
+    # Step 1: Ensure config file exists
     if ensure_config_file():
         console.print("[green]OK[/green] promaia.config.json ready")
     else:
@@ -111,28 +111,28 @@ async def _run_setup(args):
             "skipped config file creation"
         )
 
-    # Step 2: AI provider
+    # Step 2: Name your workspace
+    console.print()
+    console.print("[bold]Name your Promaia workspace[/bold]\n")
+    workspace_slug = _setup_workspace(console)
+
+    # Step 3: AI provider
     console.print()
     integrations = get_ai_integrations()
     selected = await _select_provider(integrations)
     if selected:
         await _safe_step(configure_credential(selected, console), "AI provider")
 
-    # Step 3: Connect Notion
+    # Step 4: Connect Notion
     console.print()
     notion = get_integration("notion")
     notion_success = await _safe_step(configure_credential(notion, console), "Notion")
 
-    # Step 4: Select Notion databases
-    workspace_slug = None
-    if notion_success:
-        workspace_slug = _auto_create_workspace(notion, console)
-    else:
-        from promaia.config.workspaces import get_workspace_manager
-        manager = get_workspace_manager()
-        if manager.default_workspace:
-            workspace_slug = manager.default_workspace
+    # Copy Notion credentials to workspace if needed
+    if notion_success and workspace_slug:
+        _copy_notion_creds_to_workspace(notion, workspace_slug)
 
+    # Step 5: Select Notion databases
     if workspace_slug:
         console.print()
         console.print("[bold]Select Notion databases to sync[/bold]\n")
@@ -165,41 +165,23 @@ async def _safe_step(coro, name="step"):
         return False
 
 
-def _auto_create_workspace(notion_integration, c=None):
-    """Create or confirm a workspace, letting the user name it.
-
-    Returns the workspace slug (str) or None.
-    """
+def _setup_workspace(c=None):
+    """Ask the user for a workspace name. Returns the slug or None."""
     import re
-    import shutil as _shutil
     from rich.prompt import Prompt
     from promaia.config.workspaces import get_workspace_manager
 
     c = c or console
-
-    # Suggest a name from the Notion workspace
-    raw_name = getattr(notion_integration, "_last_validated_name", None)
-    default_slug = re.sub(r"[^a-z0-9]+", "-", (raw_name or "default").lower()).strip("-") or "default"
-
     manager = get_workspace_manager()
 
-    # If a workspace already exists, show it and offer to rename
     existing_names = list(manager.workspaces.keys())
     if existing_names:
         current = manager.default_workspace or existing_names[0]
-        new_name = Prompt.ask(
-            f"  Workspace name", default=current
-        ).strip().lower()
+        new_name = Prompt.ask("  Workspace name", default=current).strip().lower()
         new_name = re.sub(r"[^a-z0-9]+", "-", new_name).strip("-") or current
 
         if new_name != current:
-            # Rename: create new, move credentials, remove old
             manager.add_workspace(new_name)
-            old_token = notion_integration._token_path(current)
-            new_token = notion_integration._token_path(new_name)
-            if old_token.exists() and not new_token.exists():
-                new_token.parent.mkdir(parents=True, exist_ok=True)
-                _shutil.copy2(old_token, new_token)
             manager.remove_workspace(current)
             manager.set_default_workspace(new_name)
             c.print(f"  [green]OK[/green] Renamed workspace to [bold]{new_name}[/bold]")
@@ -208,23 +190,23 @@ def _auto_create_workspace(notion_integration, c=None):
             c.print(f"  [green]OK[/green] Workspace [bold]{current}[/bold] ready")
             return current
 
-    # First time: ask for name with Notion workspace as suggestion
-    slug = Prompt.ask(
-        "  Workspace name", default=default_slug
-    ).strip().lower()
-    slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-") or default_slug
+    slug = Prompt.ask("  Workspace name", default="my-workspace").strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-") or "my-workspace"
 
     if manager.add_workspace(slug):
-        # Copy global Notion credential to workspace-specific path
-        global_token = notion_integration._token_path()
-        ws_token = notion_integration._token_path(slug)
-        if global_token.exists() and not ws_token.exists():
-            ws_token.parent.mkdir(parents=True, exist_ok=True)
-            _shutil.copy2(global_token, ws_token)
-
-        c.print(f"  [green]OK[/green] Created workspace [bold]{slug}[/bold] (set as default)")
+        c.print(f"  [green]OK[/green] Created workspace [bold]{slug}[/bold]")
         return slug
     return None
+
+
+def _copy_notion_creds_to_workspace(notion_integration, workspace):
+    """Copy global Notion credential to workspace-specific path if needed."""
+    import shutil as _shutil
+    global_token = notion_integration._token_path()
+    ws_token = notion_integration._token_path(workspace)
+    if global_token.exists() and not ws_token.exists():
+        ws_token.parent.mkdir(parents=True, exist_ok=True)
+        _shutil.copy2(global_token, ws_token)
 
 
 async def _browse_notion_databases(workspace, c=None):
