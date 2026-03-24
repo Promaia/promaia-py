@@ -246,12 +246,12 @@ async def _setup_slack(workspace, c=None):
 
     c.print("[bold]Connect Slack[/bold]\n")
     c.print("  Create your Slack bot:")
-    c.print("  Visit: [link=https://oauth.promaia.workers.dev/slack/install]https://oauth.promaia.workers.dev/slack/install[/link]\n")
+    c.print("  Visit: [link=https://oauth.promaia.workers.dev/slack]https://oauth.promaia.workers.dev/slack[/link]\n")
 
     # QR code
     try:
         from promaia.auth.flow import _render_qr
-        _render_qr("https://oauth.promaia.workers.dev/slack/install", c)
+        _render_qr("https://oauth.promaia.workers.dev/slack", c)
     except Exception:
         pass
 
