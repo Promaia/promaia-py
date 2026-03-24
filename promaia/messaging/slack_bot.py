@@ -227,6 +227,7 @@ def create_slack_bot():
         thread_id: str,
         agent_id: str,
         is_wake: bool = False,
+        dm_key: str = None,
     ) -> TagToChatLoop:
         """Create and register a TagToChatLoop, return it (caller starts it)."""
         loop = TagToChatLoop(
@@ -239,8 +240,9 @@ def create_slack_bot():
             conv_manager=conv_manager,
             is_wake=is_wake,
         )
-        active_loops[thread_id] = loop
-        loop.on_done(lambda: active_loops.pop(thread_id, None))
+        loop_key = dm_key or thread_id
+        active_loops[loop_key] = loop
+        loop.on_done(lambda: active_loops.pop(loop_key, None))
         return loop
 
     async def _wake_dormant_thread(
@@ -387,8 +389,9 @@ def create_slack_bot():
                 loop = _start_loop(
                     conversation_id=conversation_id,
                     channel_id=channel_id,
-                    thread_id=channel_id,  # Use channel_id as key for DMs
+                    thread_id=None,  # DMs don't use threads
                     agent_id=default_agent,
+                    dm_key=channel_id,  # Use channel_id as loop key for DMs
                 )
 
                 username = await _get_username(client, user_id)
