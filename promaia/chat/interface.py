@@ -519,6 +519,8 @@ def get_current_model_name():
     elif current_api == "llama":
         model_id = os.getenv('LLAMA_DEFAULT_MODEL', 'llama3:latest')
         return get_model_display_name(model_id, "llama")
+    elif current_api == "openrouter":
+        return "Claude Sonnet 4.5 (OpenRouter)"
 
     return "Unknown Model"
 
@@ -555,6 +557,16 @@ def switch_model(target_model=None):
                 display_name = get_model_display_name(model_id, "gemini")
                 available_choices[str(choice_num)] = ("gemini", display_name, model_id)
                 choice_num += 1
+
+    # Add OpenRouter models
+    if openrouter_client:
+        for model_id, display in [
+            ("anthropic/claude-sonnet-4-5", "Claude Sonnet 4.5 (OpenRouter)"),
+            ("anthropic/claude-haiku-4-5-20251001", "Claude Haiku 4.5 (OpenRouter)"),
+            ("anthropic/claude-opus-4-5", "Claude Opus 4.5 (OpenRouter)"),
+        ]:
+            available_choices[str(choice_num)] = ("openrouter", display, model_id)
+            choice_num += 1
 
     # Add Llama model
     if os.getenv("LLAMA_BASE_URL"):
@@ -1560,8 +1572,8 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
         'active_workflow': None,  # Active interview workflow name (e.g. "database_add")
     }
     
-    # Detect agentic tools and databases (agent mode is on by default for Anthropic)
-    if current_api == "anthropic":
+    # Detect agentic tools and databases (agent mode is on by default for Anthropic/OpenRouter)
+    if current_api in ("anthropic", "openrouter"):
         from promaia.chat.agentic_adapter import detect_available_tools, _resolve_workspace
         from promaia.config.databases import get_database_manager
         ws = _resolve_workspace(workspace or resolved_workspace or "")
@@ -7103,8 +7115,8 @@ The user will type `/send` to trigger the actual sending process.
                 continue
             elif user_input.strip().lower() == '/agent':
                 # Switch to agentic mode (autonomous multi-tool execution)
-                if current_api != "anthropic":
-                    print_text("Agentic mode requires Anthropic API. Switch with /model first.", style="bold red")
+                if current_api not in ("anthropic", "openrouter"):
+                    print_text("Agentic mode requires Anthropic or OpenRouter. Switch with /model first.", style="bold red")
                     continue
 
                 if context_state.get('agentic_mode'):
@@ -8249,7 +8261,7 @@ The user will type `/send` when ready to send the email.
                                 'text': response_text,
                                 'tokens': {
                                     'prompt_tokens': prompt_tokens,
-                                    'completion_tokens': completion_tokens,
+                                    'response_tokens': completion_tokens,
                                     'total_tokens': total_tokens,
                                     'cost': total_cost
                                 }
