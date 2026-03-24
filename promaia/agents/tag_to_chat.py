@@ -411,13 +411,20 @@ class TagToChatLoop:
             return ("answer_now", None)
 
     async def _get_thread_context(self) -> str:
-        """Get the last few thread messages for decision context."""
+        """Get the last few thread/DM messages for decision context."""
         try:
-            messages = await self.platform.get_thread_messages(
-                channel_id=self.state.channel_id,
-                thread_id=self.state.thread_id,
-            )
-            # Last 5 messages
+            if self.state.thread_id:
+                messages = await self.platform.get_thread_messages(
+                    channel_id=self.state.channel_id,
+                    thread_id=self.state.thread_id,
+                )
+            else:
+                # DM without thread — use conversation history from state
+                messages = [
+                    {"user_id": m.get("role", "?"), "text": m.get("content", "")}
+                    for m in (self.conv_manager._get_state(self.state.conversation_id) or self.state).messages[-5:]
+                    if isinstance(m.get("content"), str)
+                ]
             recent = messages[-5:] if len(messages) > 5 else messages
             return "\n".join(
                 f"[{m.get('user_id', '?')}] {m.get('text', '')}"
@@ -777,12 +784,16 @@ class TagToChatLoop:
             return "Sorry, I encountered an error generating a response."
 
     async def _build_thread_context(self) -> Optional[str]:
-        """Fetch all thread messages and format as context for the AI."""
+        """Fetch all thread/DM messages and format as context for the AI."""
         try:
-            messages = await self.platform.get_thread_messages(
-                channel_id=self.state.channel_id,
-                thread_id=self.state.thread_id,
-            )
+            if self.state.thread_id:
+                messages = await self.platform.get_thread_messages(
+                    channel_id=self.state.channel_id,
+                    thread_id=self.state.thread_id,
+                )
+            else:
+                # DM — no thread to fetch, context comes from conversation state
+                return None
             if not messages:
                 return None
 
