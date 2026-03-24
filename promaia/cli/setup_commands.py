@@ -153,11 +153,36 @@ async def _run_setup(args):
         "Slack"
     )
 
-    # Step 8: Next steps
+    # Step 8: Initial sync
+    if workspace_slug:
+        from promaia.config.databases import get_database_manager
+        db_manager = get_database_manager()
+        workspace_dbs = db_manager.get_workspace_databases(workspace_slug)
+        if workspace_dbs:
+            console.print()
+            console.print("[bold]Syncing your data[/bold]\n")
+            console.print(f"  [dim]Syncing {len(workspace_dbs)} source(s)...[/dim]")
+            await _safe_step(_run_initial_sync(workspace_slug), "initial sync")
+
+    # Step 9: Next steps
     console.print()
     from_installer = os.environ.get("PROMAIA_FROM_INSTALLER") == "1"
     maia_installed = os.environ.get("PROMAIA_MAIA_INSTALLED") == "1"
     _print_next_steps(from_installer, maia_installed)
+
+
+async def _run_initial_sync(workspace):
+    """Run an initial sync for all databases in the workspace."""
+    from promaia.cli.database_commands import handle_database_sync
+
+    class SyncArgs:
+        def __init__(self):
+            self.sources = []
+            self.workspace = workspace
+            self.browse = None
+            self.limit = None
+
+    await handle_database_sync(SyncArgs())
 
 
 async def _safe_step(coro, name="step"):
