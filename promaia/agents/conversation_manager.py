@@ -817,6 +817,15 @@ class ConversationManager:
                 "Don't repeat information already covered. Build on what's been said.",
             ])
 
+        # Inject DM-specific context
+        ctx = state.context or {}
+        if ctx.get("is_dm"):
+            user_name = ctx.get("user_name", "the user")
+            parts.append("")
+            parts.append(f"## Conversation Location")
+            parts.append(f"You are in a direct message with {user_name}. This is a private 1-on-1 conversation.")
+            parts.append("Respond to every message — in DMs there is no need to decide whether to reply.")
+
         return "\n".join(parts)
 
     async def _load_conversation_context(self, agent) -> str:

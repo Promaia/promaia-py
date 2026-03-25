@@ -312,6 +312,12 @@ def create_slack_bot():
 
             logger.info(f"Message from {user_id} in {channel_id}: {text[:50]}...")
 
+            # 0. Handle /new command in DMs — reset conversation
+            if is_1on1_dm and text.strip().lower() in ('/new', '/reset', '/clear'):
+                active_loops.pop(channel_id, None)
+                await say(text="Starting fresh! What can I help with?")
+                return
+
             # 1. Active tag-to-chat loop? Feed message directly.
             # Check thread_ts for threaded conversations, channel_id for DMs
             loop_key = thread_ts if thread_ts else (channel_id if is_1on1_dm else None)
@@ -344,19 +350,37 @@ def create_slack_bot():
                     return
 
             # 3. DMs: always use tag-to-chat for tool animation display
+            # TODO: Store DM messages to local SQLite for queryable history
+            #       (like synced channels but at message-time instead of daemon)
             if is_1on1_dm and default_agent:
+                username = await _get_username(client, user_id)
+
                 # Check for existing DM conversation to resume
                 conversation = await conv_manager.get_active_conversation(
                     platform='slack',
                     channel_id=channel_id,
                     user_id=user_id
                 )
+
+                # 30-minute timeout: if last message was >30min ago, start fresh
+                DM_TIMEOUT_SECONDS = 1800
+                if conversation and conversation.last_message_at:
+                    try:
+                        from datetime import datetime as _dt
+                        last = _dt.fromisoformat(conversation.last_message_at.replace('Z', '+00:00'))
+                        gap = (datetime.now(timezone.utc) - last).total_seconds()
+                        if gap > DM_TIMEOUT_SECONDS:
+                            logger.info(f"DM conversation timed out ({int(gap)}s), starting fresh")
+                            conversation = None  # will create new below
+                    except Exception:
+                        pass
+
                 conv_id = conversation.conversation_id if conversation else f"slack_dm_{channel_id}_{int(datetime.now(timezone.utc).timestamp())}"
                 agent_id = conversation.agent_id if conversation else default_agent
 
                 if not conversation:
                     # New DM — create conversation state
-                    logger.info(f"New DM from {user_id}, starting conversation with {agent_id}")
+                    logger.info(f"New DM from {user_id} ({username}), starting conversation with {agent_id}")
                     now = datetime.now(timezone.utc).isoformat()
                     dm_conversation = ConversationState(
                         conversation_id=conv_id,
@@ -368,8 +392,8 @@ def create_slack_bot():
                         status='active',
                         last_message_at=now,
                         messages=[],
-                        context={},
-                        timeout_seconds=30 * 60,
+                        context={"is_dm": True, "user_name": username},
+                        timeout_seconds=DM_TIMEOUT_SECONDS,
                         max_turns=None,
                         created_at=now,
                         conversation_type='tag_to_chat',
