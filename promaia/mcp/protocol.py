@@ -1,269 +1,228 @@
 """
-MCP (Model Context Protocol) JSON-RPC client implementation.
+MCP protocol client backed by the official ``mcp`` library.
 
-This module provides a real client for communicating with MCP servers 
-using the official MCP protocol over stdio.
+Supports both **stdio** (local subprocess) and **Streamable HTTP** (remote)
+transports.  The public interface (connect / list_tools / call_tool /
+disconnect / is_connected / get_server_info / get_capabilities) is unchanged
+from the previous hand-rolled implementation so that ``client.py`` and
+``execution.py`` continue to work without modification.
 """
-import asyncio
-import json
+import contextlib
 import logging
-import subprocess
-import sys
-from typing import Dict, List, Optional, Any, Tuple
-from dataclasses import dataclass
 import os
-import signal
+import sys
+from datetime import timedelta
+from typing import Any, Dict, List, Optional
+
+from mcp.client.session import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.streamable_http import streamablehttp_client
+from mcp.types import Implementation
+
+from .result_adapter import adapt_call_tool_result, adapt_tool_list
 
 logger = logging.getLogger(__name__)
 
-@dataclass
-class McpResponse:
-    """Represents an MCP JSON-RPC response."""
-    success: bool
-    result: Optional[Dict[str, Any]] = None
-    error: Optional[Dict[str, Any]] = None
-    id: Optional[int] = None
+_CLIENT_INFO = Implementation(name="promaia-mcp-client", version="2.0.0")
+
 
 class McpProtocolClient:
-    """Real MCP protocol client using JSON-RPC over stdio."""
-    
-    def __init__(self):
-        """Initialize the MCP protocol client."""
-        self.process: Optional[subprocess.Popen] = None
-        self.request_id = 0
-        self.initialized = False
+    """MCP client using the official ``mcp`` library.
+
+    Wraps ``mcp.client.session.ClientSession`` and manages the async context
+    manager stack that keeps the underlying transport alive for the lifetime
+    of the connection.
+    """
+
+    def __init__(self) -> None:
+        self._stack: Optional[contextlib.AsyncExitStack] = None
+        self._session: Optional[ClientSession] = None
+        self.initialized: bool = False
         self.server_info: Optional[Dict[str, Any]] = None
         self.capabilities: Optional[Dict[str, Any]] = None
-    
-    async def connect(self, command: List[str], args: List[str] = None, 
-                     working_dir: str = None, env: Dict[str, str] = None) -> bool:
+
+    # ------------------------------------------------------------------
+    # Connection
+    # ------------------------------------------------------------------
+
+    async def connect(
+        self,
+        command: Optional[List[str]] = None,
+        args: Optional[List[str]] = None,
+        working_dir: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        *,
+        transport: str = "stdio",
+        url: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: int = 30,
+    ) -> bool:
         """Connect to an MCP server.
-        
-        Args:
-            command: Command to start the server
-            args: Additional arguments  
-            working_dir: Working directory for the server
-            env: Environment variables
-            
-        Returns:
-            True if connection successful, False otherwise
+
+        For **stdio** transport, *command* (+ optional *args*) is required.
+        For **streamable_http** transport, *url* is required.
+
+        Returns True on success, False on failure.
         """
         try:
-            # Build full command
-            full_command = command + (args or [])
-            
-            logger.info(f"Starting MCP server: {' '.join(full_command)}")
-            
-            # Start the server process
-            process_env = os.environ.copy()
-            if env:
-                process_env.update(env)
-            
-            self.process = subprocess.Popen(
-                full_command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=0,  # Unbuffered
-                cwd=working_dir,
-                env=process_env
-            )
-            
-            # Initialize the connection
-            success = await self._initialize()
-            if success:
-                logger.info("MCP server connected and initialized successfully")
+            self._stack = contextlib.AsyncExitStack()
+            await self._stack.__aenter__()
+
+            if transport == "streamable_http":
+                if not url:
+                    logger.error("URL required for streamable_http transport")
+                    await self._cleanup_stack()
+                    return False
+                session = await self._connect_http(url, headers=headers, timeout=timeout)
             else:
-                logger.error("Failed to initialize MCP server")
-                await self.disconnect()
-            
-            return success
-            
-        except Exception as e:
-            logger.error(f"Error connecting to MCP server: {e}")
-            return False
-    
-    async def _initialize(self) -> bool:
-        """Initialize the MCP connection."""
-        try:
-            # Send initialize request
-            init_request = {
-                "jsonrpc": "2.0",
-                "id": self._next_id(),
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {
-                        "name": "promaia-mcp-client",
-                        "version": "1.0.0"
-                    }
-                }
-            }
-            
-            response = await self._send_request(init_request)
-            
-            if response.success and response.result:
-                self.initialized = True
-                self.server_info = response.result.get('serverInfo', {})
-                self.capabilities = response.result.get('capabilities', {})
-                logger.info(f"Initialized MCP server: {self.server_info.get('name', 'unknown')}")
-                return True
-            else:
-                logger.error(f"Initialize failed: {response.error}")
+                if not command:
+                    logger.error("Command required for stdio transport")
+                    await self._cleanup_stack()
+                    return False
+                session = await self._connect_stdio(command, args, working_dir, env)
+
+            if session is None:
+                await self._cleanup_stack()
                 return False
-                
-        except Exception as e:
-            logger.error(f"Error during initialization: {e}")
-            return False
-    
-    async def list_tools(self) -> Optional[List[Dict[str, Any]]]:
-        """Get the list of available tools from the server.
-        
-        Returns:
-            List of tool definitions or None if failed
-        """
-        if not self.initialized:
-            logger.error("Client not initialized")
-            return None
-        
-        try:
-            request = {
-                "jsonrpc": "2.0",
-                "id": self._next_id(),
-                "method": "tools/list",
-                "params": {}
+
+            self._session = session
+
+            # Initialize the session (MCP handshake)
+            init_result = await self._session.initialize()
+
+            self.initialized = True
+            self.server_info = {
+                "name": init_result.serverInfo.name if init_result.serverInfo else "unknown",
+                "version": getattr(init_result.serverInfo, "version", None),
             }
-            
-            response = await self._send_request(request)
-            
-            if response.success and response.result:
-                tools = response.result.get('tools', [])
-                logger.info(f"Retrieved {len(tools)} tools from MCP server")
-                return tools
-            else:
-                logger.error(f"tools/list failed: {response.error}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error listing tools: {e}")
-            return None
-    
-    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Call a tool on the MCP server.
-        
-        Args:
-            tool_name: Name of the tool to call
-            arguments: Arguments to pass to the tool
-            
-        Returns:
-            Tool result or None if failed
-        """
-        if not self.initialized:
-            logger.error("Client not initialized")
-            return None
-        
-        try:
-            request = {
-                "jsonrpc": "2.0",
-                "id": self._next_id(),
-                "method": "tools/call",
-                "params": {
-                    "name": tool_name,
-                    "arguments": arguments
-                }
-            }
-            
-            response = await self._send_request(request)
-            
-            if response.success and response.result:
-                return response.result
-            else:
-                logger.error(f"Tool call '{tool_name}' failed: {response.error}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error calling tool '{tool_name}': {e}")
-            return None
-    
-    async def _send_request(self, request: Dict[str, Any]) -> McpResponse:
-        """Send a JSON-RPC request to the server.
-        
-        Args:
-            request: JSON-RPC request
-            
-        Returns:
-            Response from the server
-        """
-        if not self.process:
-            return McpResponse(success=False, error={"message": "No process"})
-        
-        try:
-            # Send request
-            request_json = json.dumps(request) + '\n'
-            self.process.stdin.write(request_json)
-            self.process.stdin.flush()
-            
-            # Read response
-            response_line = self.process.stdout.readline()
-            if not response_line:
-                return McpResponse(success=False, error={"message": "No response"})
-            
-            response_data = json.loads(response_line.strip())
-            
-            # Check for JSON-RPC error
-            if 'error' in response_data:
-                return McpResponse(
-                    success=False,
-                    error=response_data['error'],
-                    id=response_data.get('id')
-                )
-            
-            return McpResponse(
-                success=True,
-                result=response_data.get('result'),
-                id=response_data.get('id')
+            self.capabilities = (
+                init_result.capabilities.model_dump() if init_result.capabilities else {}
             )
-            
+
+            logger.info(
+                "Connected to MCP server: %s (transport=%s)",
+                self.server_info.get("name"),
+                transport,
+            )
+            return True
+
+        except BaseException as e:
+            logger.error("Error connecting to MCP server: %s", e)
+            await self._cleanup_stack()
+            return False
+
+    async def _connect_stdio(
+        self,
+        command: List[str],
+        args: Optional[List[str]],
+        working_dir: Optional[str],
+        env: Optional[Dict[str, str]],
+    ) -> Optional[ClientSession]:
+        """Open a stdio transport and return a ClientSession."""
+        full_args = (command[1:] if len(command) > 1 else []) + (args or [])
+
+        # Merge env: parent env + caller overrides
+        merged_env: Optional[Dict[str, str]] = None
+        if env:
+            merged_env = {**os.environ, **env}
+
+        params = StdioServerParameters(
+            command=command[0],
+            args=full_args,
+            env=merged_env,
+            cwd=working_dir,
+        )
+
+        logger.info("Starting MCP server (stdio): %s %s", command[0], " ".join(full_args))
+
+        read_stream, write_stream = await self._stack.enter_async_context(
+            stdio_client(params, errlog=sys.stderr)
+        )
+        session = await self._stack.enter_async_context(
+            ClientSession(read_stream, write_stream, client_info=_CLIENT_INFO)
+        )
+        return session
+
+    async def _connect_http(
+        self,
+        url: str,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: int = 30,
+    ) -> Optional[ClientSession]:
+        """Open a Streamable HTTP transport and return a ClientSession."""
+        logger.info("Connecting to MCP server (HTTP): %s", url)
+
+        read_stream, write_stream, _get_session_id = await self._stack.enter_async_context(
+            streamablehttp_client(url, headers=headers, timeout=timedelta(seconds=timeout))
+        )
+        session = await self._stack.enter_async_context(
+            ClientSession(read_stream, write_stream, client_info=_CLIENT_INFO)
+        )
+        return session
+
+    # ------------------------------------------------------------------
+    # Tool discovery & execution
+    # ------------------------------------------------------------------
+
+    async def list_tools(self) -> Optional[List[Dict[str, Any]]]:
+        """List available tools.  Returns list of dicts or None on failure."""
+        if not self.initialized or not self._session:
+            logger.error("Client not initialized")
+            return None
+        try:
+            result = await self._session.list_tools()
+            tools = adapt_tool_list(result)
+            logger.info("Retrieved %d tools from MCP server", len(tools))
+            return tools
         except Exception as e:
-            logger.error(f"Error sending request: {e}")
-            return McpResponse(success=False, error={"message": str(e)})
-    
+            logger.error("Error listing tools: %s", e)
+            return None
+
+    async def call_tool(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Call a tool.  Returns result dict or None on failure.
+
+        The returned dict has the shape ``{"content": [...], "isError": bool}``
+        matching what ``execution.py`` expects.
+        """
+        if not self.initialized or not self._session:
+            logger.error("Client not initialized")
+            return None
+        try:
+            raw = await self._session.call_tool(tool_name, arguments)
+            return adapt_call_tool_result(raw)
+        except Exception as e:
+            logger.error("Error calling tool '%s': %s", tool_name, e)
+            return None
+
+    # ------------------------------------------------------------------
+    # Lifecycle helpers
+    # ------------------------------------------------------------------
+
     async def disconnect(self) -> None:
-        """Disconnect from the MCP server."""
-        if self.process:
+        """Disconnect and clean up all resources."""
+        await self._cleanup_stack()
+
+    async def _cleanup_stack(self) -> None:
+        if self._stack is not None:
             try:
-                # Try to terminate gracefully
-                self.process.terminate()
-                try:
-                    # Wait up to 5 seconds for graceful shutdown
-                    self.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    # Force kill if it doesn't stop
-                    self.process.kill()
-                    self.process.wait()
-            except Exception as e:
-                logger.error(f"Error disconnecting: {e}")
+                await self._stack.aclose()
+            except BaseException as e:
+                # BaseExceptionGroup from anyio can occur during cleanup
+                logger.debug("Error during disconnect cleanup: %s", e)
             finally:
-                self.process = None
+                self._stack = None
+                self._session = None
                 self.initialized = False
                 self.server_info = None
                 self.capabilities = None
-    
-    def _next_id(self) -> int:
-        """Get the next request ID."""
-        self.request_id += 1
-        return self.request_id
-    
+
     def is_connected(self) -> bool:
-        """Check if connected to a server."""
-        return self.process is not None and self.initialized
-    
+        return self._session is not None and self.initialized
+
     def get_server_info(self) -> Optional[Dict[str, Any]]:
-        """Get server information."""
         return self.server_info
-    
+
     def get_capabilities(self) -> Optional[Dict[str, Any]]:
-        """Get server capabilities."""
-        return self.capabilities 
+        return self.capabilities

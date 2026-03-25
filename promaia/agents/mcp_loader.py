@@ -206,8 +206,18 @@ def load_mcp_servers_for_agent(agent_config) -> Dict[str, Any]:
         for tool_name in agent_config.mcp_tools:
             if tool_name in all_servers:
                 server_config = all_servers[tool_name].copy()
+                transport = server_config.get("transport", "stdio")
 
-                # Convert to SDK format
+                # SDK only supports stdio — skip HTTP servers with a warning
+                if transport == "streamable_http":
+                    logger.warning(
+                        "MCP server '%s' uses streamable_http transport which the "
+                        "Claude Agent SDK does not support — skipping for SDK path",
+                        tool_name,
+                    )
+                    continue
+
+                # Convert to SDK format (stdio)
                 raw_command = server_config["command"]
                 command = raw_command[0] if isinstance(raw_command, list) else raw_command
                 base_args = raw_command[1:] if isinstance(raw_command, list) else []
