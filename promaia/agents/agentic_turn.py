@@ -1243,6 +1243,94 @@ TASK_QUEUE_TOOL_DEFINITIONS = [
 ]
 
 
+# ── Google Drive tools ──────────────────────────────────────────────────
+
+GOOGLE_DRIVE_TOOL_DEFINITIONS = [
+    {
+        "name": "drive_search_files",
+        "description": (
+            "Search Google Drive for files by name or query. "
+            "Pass a plain filename to search by name, or use Drive query syntax "
+            "(e.g. \"mimeType='application/pdf'\" or \"'FOLDER_ID' in parents\"). "
+            "Returns file IDs, names, types, sizes, and modification dates."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Search query. Plain text searches by name. "
+                        "For advanced queries use Drive syntax: "
+                        "\"name contains 'invoice'\", \"mimeType='application/pdf'\", "
+                        "\"'FOLDER_ID' in parents\"."
+                    )
+                },
+                "folder_id": {
+                    "type": "string",
+                    "description": (
+                        "Restrict search to a specific folder by ID. "
+                        "If provided, adds \"'folder_id' in parents\" to the query."
+                    )
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum results to return (default 10)"
+                },
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "drive_download_file",
+        "description": (
+            "Download a file from Google Drive to the local workspace. "
+            "Use the file ID from drive_search_files. Google-native files "
+            "(Docs, Sheets, Slides) are exported to the specified format. "
+            "Returns the local workspace path for use with attachment_paths."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "Google Drive file ID from drive_search_files"
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Override the filename in the workspace (optional, defaults to Drive filename)"
+                },
+                "export_format": {
+                    "type": "string",
+                    "description": (
+                        "Export format for Google-native files: pdf, docx, xlsx, csv, pptx, txt. "
+                        "Ignored for non-native files. Default: pdf."
+                    )
+                },
+            },
+            "required": ["file_id"]
+        }
+    },
+    {
+        "name": "drive_list_folder",
+        "description": (
+            "List all files and subfolders in a Google Drive folder. "
+            "Use to browse Drive directory structure."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "folder_id": {
+                    "type": "string",
+                    "description": "Google Drive folder ID. Use 'root' for the top-level Drive."
+                },
+            },
+            "required": ["folder_id"]
+        }
+    },
+]
+
+
 # ── Config tools (always available) ─────────────────────────────────────
 
 CONFIG_TOOL_DEFINITIONS = [
@@ -1913,6 +2001,8 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     if "google_sheets" in mcp_tools:
         tools.extend(GOOGLE_SHEETS_TOOL_DEFINITIONS)
         tools.extend(GOOGLE_SHEETS_FORMAT_TOOL_DEFINITIONS)
+    if "google_drive" in mcp_tools or "google_sheets" in mcp_tools:
+        tools.extend(GOOGLE_DRIVE_TOOL_DEFINITIONS)
 
     # Task queue is always available
     tools.extend(TASK_QUEUE_TOOL_DEFINITIONS)
@@ -2022,6 +2112,9 @@ class ToolExecutor:
             # Google Sheets tools
             elif tool_name.startswith("sheets_"):
                 return await self._execute_sheets_tool(tool_name, tool_input)
+            # Google Drive tools
+            elif tool_name.startswith("drive_"):
+                return await self._execute_drive_tool(tool_name, tool_input)
             # Notion tools
             elif tool_name.startswith("notion_"):
                 return await self._execute_notion_tool(tool_name, tool_input)
@@ -3498,6 +3591,206 @@ class ToolExecutor:
             f"ID: {spreadsheet_id}\nURL: {ss_url}\n\n"
         )
         return header + content
+
+    # ── Google Drive tools ───────────────────────────────────────────────
+
+    async def _ensure_drive(self):
+        """Lazy-initialize Google Drive service (reuses Sheets init if available)."""
+        if self._drive_service is not None:
+            return
+        # If Sheets is already initialized, Drive comes with it
+        if self._sheets_service is not None:
+            return
+        from googleapiclient.discovery import build
+        creds = self._get_google_creds()
+        self._drive_service = await asyncio.to_thread(
+            build, 'drive', 'v3', credentials=creds
+        )
+        logger.info("Google Drive authenticated")
+
+    async def _execute_drive_tool(self, tool_name: str, tool_input: Dict) -> str:
+        """Route and execute Google Drive tool calls."""
+        await self._ensure_drive()
+
+        if tool_name == "drive_search_files":
+            return await self._drive_search_files(tool_input)
+        elif tool_name == "drive_download_file":
+            return await self._drive_download_file(tool_input)
+        elif tool_name == "drive_list_folder":
+            return await self._drive_list_folder(tool_input)
+        else:
+            return f"Unknown Drive tool: {tool_name}"
+
+    async def _drive_search_files(self, tool_input: Dict) -> str:
+        query = tool_input.get("query", "").strip()
+        folder_id = tool_input.get("folder_id", "").strip()
+        max_results = tool_input.get("max_results", 10)
+
+        if not query and not folder_id:
+            return "Error: query or folder_id is required."
+
+        # Build Drive query
+        q_parts = []
+        if query:
+            # If it looks like raw Drive syntax, use as-is
+            if "'" in query or "=" in query:
+                q_parts.append(query)
+            else:
+                q_parts.append(f"name contains '{query}'")
+        if folder_id:
+            q_parts.append(f"'{folder_id}' in parents")
+        q_parts.append("trashed = false")
+        drive_query = " and ".join(q_parts)
+
+        try:
+            results = await asyncio.to_thread(
+                self._drive_service.files().list(
+                    q=drive_query,
+                    pageSize=max_results,
+                    fields="files(id, name, mimeType, size, modifiedTime, parents)",
+                    orderBy="modifiedTime desc",
+                ).execute
+            )
+
+            files = results.get("files", [])
+            if not files:
+                return f"No files found for query: {query or folder_id}"
+
+            lines = [f"Found {len(files)} file(s):\n"]
+            for f in files:
+                is_native = f["mimeType"].startswith("application/vnd.google-apps.")
+                size = f.get("size")
+                size_str = f"{int(size) / 1024:.1f} KB" if size else "Google native"
+                lines.append(
+                    f"  - **{f['name']}**\n"
+                    f"    ID: {f['id']}\n"
+                    f"    Type: {f['mimeType']}\n"
+                    f"    Size: {size_str}\n"
+                    f"    Modified: {f.get('modifiedTime', 'unknown')}"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error searching Drive: {e}"
+
+    async def _drive_download_file(self, tool_input: Dict) -> str:
+        file_id = tool_input.get("file_id", "").strip()
+        if not file_id:
+            return "Error: file_id is required."
+
+        filename = tool_input.get("filename", "").strip() or None
+        export_format = tool_input.get("export_format", "pdf").strip()
+
+        # Google-native MIME → export MIME mapping
+        export_mime_map = {
+            "application/vnd.google-apps.document": {
+                "pdf": "application/pdf",
+                "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "txt": "text/plain",
+            },
+            "application/vnd.google-apps.spreadsheet": {
+                "pdf": "application/pdf",
+                "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "csv": "text/csv",
+            },
+            "application/vnd.google-apps.presentation": {
+                "pdf": "application/pdf",
+                "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            },
+        }
+        export_extensions = {
+            "pdf": ".pdf", "docx": ".docx", "xlsx": ".xlsx",
+            "csv": ".csv", "pptx": ".pptx", "txt": ".txt",
+        }
+
+        try:
+            import io
+            from googleapiclient.http import MediaIoBaseDownload
+            from pathlib import Path
+
+            # Get file metadata
+            meta = await asyncio.to_thread(
+                self._drive_service.files().get(
+                    fileId=file_id, fields="name, mimeType"
+                ).execute
+            )
+
+            native_mime = meta["mimeType"]
+            is_native = native_mime in export_mime_map
+
+            if is_native:
+                export_mime = export_mime_map[native_mime].get(export_format, "application/pdf")
+                request = self._drive_service.files().export_media(
+                    fileId=file_id, mimeType=export_mime
+                )
+                ext = export_extensions.get(export_format, ".pdf")
+                out_name = filename or (Path(meta["name"]).stem + ext)
+            else:
+                request = self._drive_service.files().get_media(fileId=file_id)
+                out_name = filename or meta["name"]
+
+            # Download to buffer
+            buf = io.BytesIO()
+            downloader = MediaIoBaseDownload(buf, request)
+            done = False
+            while not done:
+                _, done = await asyncio.to_thread(downloader.next_chunk)
+
+            # Write to sandbox
+            out_path = self._sandbox.resolve(out_name)
+            out_path.write_bytes(buf.getvalue())
+
+            import mimetypes
+            mime, _ = mimetypes.guess_type(str(out_path))
+
+            return (
+                f"Downloaded to workspace: {out_name}\n"
+                f"  Size: {out_path.stat().st_size / 1024:.1f} KB\n"
+                f"  Type: {mime or 'application/octet-stream'}"
+            )
+        except Exception as e:
+            return f"Error downloading file: {e}"
+
+    async def _drive_list_folder(self, tool_input: Dict) -> str:
+        folder_id = tool_input.get("folder_id", "root").strip()
+
+        try:
+            results = await asyncio.to_thread(
+                self._drive_service.files().list(
+                    q=f"'{folder_id}' in parents and trashed = false",
+                    pageSize=50,
+                    fields="files(id, name, mimeType, size, modifiedTime)",
+                    orderBy="folder,name",
+                ).execute
+            )
+
+            files = results.get("files", [])
+            if not files:
+                return "Folder is empty."
+
+            folders = []
+            docs = []
+            for f in files:
+                if f["mimeType"] == "application/vnd.google-apps.folder":
+                    folders.append(f)
+                else:
+                    docs.append(f)
+
+            lines = []
+            if folders:
+                lines.append(f"Folders ({len(folders)}):")
+                for f in folders:
+                    lines.append(f"  📁 {f['name']}  (ID: {f['id']})")
+            if docs:
+                lines.append(f"\nFiles ({len(docs)}):")
+                for f in docs:
+                    size = f.get("size")
+                    size_str = f"{int(size) / 1024:.1f} KB" if size else "Google native"
+                    lines.append(
+                        f"  📄 {f['name']}  ({size_str}, ID: {f['id']})"
+                    )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error listing folder: {e}"
 
     # ── Notion tools ────────────────────────────────────────────────────
 
