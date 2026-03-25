@@ -80,9 +80,16 @@ def ensure_config_file() -> bool:
 def handle_setup(args):
     """Entry point for `maia setup`. Sync wrapper around async flow."""
     try:
-        asyncio.run(_run_setup(args))
+        result = asyncio.run(_run_setup(args))
     except KeyboardInterrupt:
         console.print("\n[yellow]Setup interrupted.[/yellow]")
+        return
+
+    # Launch chat for agent creation outside the async context
+    # (chat() uses asyncio.run() internally, can't nest)
+    if isinstance(result, dict) and result.get("launch_chat"):
+        from promaia.chat.interface import chat
+        chat(**result["chat_kwargs"])
 
 
 async def _run_setup(args):
@@ -96,8 +103,8 @@ async def _run_setup(args):
     # Handle single-service setup: maia setup slack, maia setup notion, etc.
     service = getattr(args, "service", None)
     if service:
-        await _run_single_service_setup(service)
-        return
+        result = await _run_single_service_setup(service)
+        return result  # May contain launch_chat signal for agent setup
 
     _print_banner()
 
@@ -160,6 +167,7 @@ async def _run_setup(args):
     )
 
     # Step 8: Initial sync
+    workspace_dbs = []
     if workspace_slug:
         from promaia.config.databases import get_database_manager
         db_manager = get_database_manager()
@@ -170,7 +178,56 @@ async def _run_setup(args):
             console.print(f"  [dim]Syncing {len(workspace_dbs)} source(s)...[/dim]")
             await _safe_step(_run_initial_sync(workspace_slug), "initial sync")
 
-    # Step 9: Next steps
+    # Step 9: Create first agent
+    if selected:  # Only offer if an AI provider was configured
+        console.print()
+        try:
+            create_first = input("Would you like to create your first agent? (Y/n): ").strip().lower()
+            if create_first in ("", "y", "yes"):
+                # Gather context about what was just connected
+                connected = []
+                if notion_success:
+                    connected.append("Notion")
+                connected.append("Google (Gmail, Calendar, Sheets)")
+                if slack_success:
+                    connected.append("Slack")
+
+                db_names = [
+                    getattr(db, 'nickname', getattr(db, 'name', str(db)))
+                    for db in workspace_dbs
+                ]
+
+                from datetime import datetime as _dt
+                local_tz = _dt.now().astimezone().tzname() or "UTC"
+
+                onboarding_context = {
+                    "workspace": workspace_slug or "default",
+                    "integrations": ", ".join(connected),
+                    "databases": ", ".join(db_names) if db_names else "None yet",
+                    "timezone": local_tz,
+                }
+
+                console.print("\n[bold]Let's set up your first agent![/bold]\n")
+
+                # Return signal to launch chat after async context exits
+                # (chat() uses asyncio.run() internally, can't nest)
+                return {
+                    "launch_chat": True,
+                    "chat_kwargs": {
+                        "workspace": workspace_slug,
+                        "initial_messages": [{
+                            "role": "user",
+                            "content": "I just finished setup. Help me create my first agent.",
+                        }],
+                        "auto_respond_to_initial": True,
+                        "active_workflow": "onboarding_agent",
+                        "workflow_context": onboarding_context,
+                    },
+                }
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n  [dim]Skipped — you can create agents anytime with: maia chat[/dim]")
+
+    # Step 10: Next steps
     console.print()
     from_installer = os.environ.get("PROMAIA_FROM_INSTALLER") == "1"
     maia_installed = os.environ.get("PROMAIA_MAIA_INSTALLED") == "1"
@@ -225,9 +282,60 @@ async def _run_single_service_setup(service):
         selected = await _select_provider(integrations)
         if selected:
             await configure_credential(selected, console)
+    elif service == "agent":
+        # Gather context for the onboarding agent workflow
+        from promaia.config.databases import get_database_manager
+        db_manager = get_database_manager()
+        workspace_dbs = db_manager.get_workspace_databases(workspace)
+        db_names = [
+            getattr(db, 'nickname', getattr(db, 'name', str(db)))
+            for db in workspace_dbs
+        ]
+
+        # Detect connected integrations
+        connected = []
+        try:
+            notion = get_integration("notion")
+            if notion.get_default_credential():
+                connected.append("Notion")
+        except Exception:
+            pass
+        connected.append("Google (Gmail, Calendar, Sheets)")
+        try:
+            slack = get_integration("slack")
+            if slack.get_default_credential():
+                connected.append("Slack")
+        except Exception:
+            pass
+
+        from datetime import datetime
+        local_tz = datetime.now().astimezone().tzname() or "UTC"
+
+        onboarding_context = {
+            "workspace": workspace,
+            "integrations": ", ".join(connected) if connected else "None yet",
+            "databases": ", ".join(db_names) if db_names else "None yet",
+            "timezone": local_tz,
+        }
+
+        console.print("[bold]Let's set up an agent![/bold]\n")
+
+        return {
+            "launch_chat": True,
+            "chat_kwargs": {
+                "workspace": workspace,
+                "initial_messages": [{
+                    "role": "user",
+                    "content": "Help me create an agent.",
+                }],
+                "auto_respond_to_initial": True,
+                "active_workflow": "onboarding_agent",
+                "workflow_context": onboarding_context,
+            },
+        }
     else:
         console.print(f"[yellow]Unknown service: {service}[/yellow]")
-        console.print("[dim]Available: slack, notion, google, llm[/dim]")
+        console.print("[dim]Available: slack, notion, google, llm, agent[/dim]")
 
 
 async def _safe_step(coro, name="step"):

@@ -1306,7 +1306,7 @@ def build_system_prompt_with_mode(multi_source_data, mcp_tools_info, mode_system
         return create_system_prompt(multi_source_data, mcp_tools_info, include_query_tools, workspace)
 
 
-def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, non_interactive=False, initial_messages=None, current_thread_id=None, sql_query_content=None, sql_query_prompt=None, original_browse_command=None, browse_selections=None, browse_databases=None, mcp_servers=None, is_vector_search=False, initial_nl_prompt=None, initial_nl_content=None, initial_vs_prompt=None, initial_vs_content=None, mode=None, mode_config=None, draft_id=None, auto_respond_to_initial=False, top_k=None, threshold=None, vector_search_queries=None, initial_vs_per_query_cache=None):
+def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, non_interactive=False, initial_messages=None, current_thread_id=None, sql_query_content=None, sql_query_prompt=None, original_browse_command=None, browse_selections=None, browse_databases=None, mcp_servers=None, is_vector_search=False, initial_nl_prompt=None, initial_nl_content=None, initial_vs_prompt=None, initial_vs_content=None, mode=None, mode_config=None, draft_id=None, auto_respond_to_initial=False, top_k=None, threshold=None, vector_search_queries=None, initial_vs_per_query_cache=None, active_workflow=None, workflow_context=None):
     """
     Main chat function with simplified, unified logic.
 
@@ -1613,7 +1613,8 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
         'agentic_mode': True,  # Agentic loop mode (multi-tool autonomous execution) — on by default
         'agentic_tools': [],  # Detected MCP tools for agentic mode
         'agentic_databases': [],  # Databases available for agentic mode
-        'active_workflow': None,  # Active interview workflow name (e.g. "database_add")
+        'active_workflow': active_workflow,  # Active interview workflow name (e.g. "database_add")
+        'workflow_context': workflow_context,  # Template variables for workflow prompt (e.g. {"workspace": "koii"})
     }
     
     # Detect agentic tools and databases (agent mode is on by default for Anthropic/OpenRouter)
@@ -2048,7 +2049,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
         # Also don't launch browser if we're in a mode (e.g., draft mode)
         user_provided_workspace_only = bool(current_workspace and not sources and not filters and not sql_query_prompt)
 
-        if user_provided_workspace_only and not current_sources and not mode:
+        if user_provided_workspace_only and not current_sources and not mode and not context_state.get('active_workflow'):
             debug_print(f"Opening workspace browser for '{actual_workspace}'.")
             print_text(f"🔍 Launching unified browser for '{actual_workspace}'...", style="bold cyan")
 
@@ -5412,7 +5413,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
     
     # Display previous conversation
     # Skip generic headers if mode is active (mode will display its own)
-    if initial_messages and not mode:
+    if initial_messages and not mode and not context_state.get('active_workflow'):
         print_text("--- Previous Conversation ---", style="bold yellow")
         for msg in initial_messages:
             role = msg.get('role', '')
@@ -5575,6 +5576,18 @@ The user will type `/send` to trigger the actual sending process.
                                 cm["images"] = msg["images"]
                             clean_messages.append(cm)
 
+                        # Inject active workflow prompt if pre-activated (e.g. from setup)
+                        _auto_workflow_prompt = None
+                        _auto_wf = context_state.get('active_workflow')
+                        if _auto_wf:
+                            try:
+                                from promaia.chat.workflows import get_workflow as _get_wf_auto
+                                _wf = _get_wf_auto(_auto_wf, context=context_state.get('workflow_context'))
+                                if _wf:
+                                    _auto_workflow_prompt = _wf["system_prompt_insert"]
+                            except Exception:
+                                pass
+
                         result = asyncio.run(run_agentic_turn(
                             system_prompt=current_system_prompt,
                             messages=clean_messages,
@@ -5582,6 +5595,7 @@ The user will type `/send` to trigger the actual sending process.
                             mcp_tools=context_state.get('agentic_tools', []),
                             databases=context_state.get('agentic_databases', []),
                             print_text_fn=print_text,
+                            workflow_prompt=_auto_workflow_prompt,
                         ))
 
                         response_text = result.response_text
@@ -8043,7 +8057,7 @@ The user will type `/send` when ready to send the email.
                         if _active_wf:
                             try:
                                 from promaia.chat.workflows import get_workflow
-                                wf = get_workflow(_active_wf)
+                                wf = get_workflow(_active_wf, context=context_state.get('workflow_context'))
                                 if wf:
                                     _workflow_prompt = wf["system_prompt_insert"]
                             except Exception:
@@ -8070,7 +8084,7 @@ The user will type `/send` when ready to send the email.
                                 wf_name = result.signal.get("workflow", "")
                                 context_state['active_workflow'] = wf_name
                                 logger.info(f"Interview started: {wf_name}")
-                                wf = _get_wf(wf_name)
+                                wf = _get_wf(wf_name, context=context_state.get('workflow_context'))
                                 _workflow_prompt = wf["system_prompt_insert"] if wf else None
                                 # Re-run with the interview prompt active
                                 result = asyncio.run(run_agentic_turn(
