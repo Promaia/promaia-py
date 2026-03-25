@@ -168,6 +168,14 @@ GMAIL_TOOL_DEFINITIONS = [
                 "cc": {
                     "type": "string",
                     "description": "CC recipients (optional)"
+                },
+                "attachment_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "List of workspace file paths to attach "
+                        "(from drive_download_file or list_workspace_files)"
+                    )
                 }
             },
             "required": ["to", "subject", "body"]
@@ -175,13 +183,22 @@ GMAIL_TOOL_DEFINITIONS = [
     },
     {
         "name": "create_email_draft",
-        "description": "Create an email draft (not sent).",
+        "description": "Create an email draft (not sent). Supports file attachments from the workspace.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "to": {"type": "string", "description": "Recipient email"},
                 "subject": {"type": "string", "description": "Email subject"},
-                "body": {"type": "string", "description": "Email body"}
+                "body": {"type": "string", "description": "Email body"},
+                "cc": {"type": "string", "description": "CC recipients (optional)"},
+                "attachment_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "List of workspace file paths to attach "
+                        "(from drive_download_file or list_workspace_files)"
+                    )
+                }
             },
             "required": ["to", "subject", "body"]
         }
@@ -189,7 +206,7 @@ GMAIL_TOOL_DEFINITIONS = [
     {
         "name": "reply_to_email",
         "description": (
-            "Reply to an email thread. "
+            "Reply to an email thread. Supports file attachments from the workspace. "
             "Use query_sql to find the thread_id and message_id first."
         ),
         "input_schema": {
@@ -197,7 +214,15 @@ GMAIL_TOOL_DEFINITIONS = [
             "properties": {
                 "thread_id": {"type": "string", "description": "Gmail thread ID"},
                 "message_id": {"type": "string", "description": "Original message ID"},
-                "body": {"type": "string", "description": "Reply body text"}
+                "body": {"type": "string", "description": "Reply body text"},
+                "attachment_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "List of workspace file paths to attach "
+                        "(from drive_download_file or list_workspace_files)"
+                    )
+                }
             },
             "required": ["thread_id", "message_id", "body"]
         }
@@ -2510,16 +2535,26 @@ class ToolExecutor:
         if self._gmail_connector is not None:
             return
         from promaia.connectors.gmail_connector import GmailConnector
-        from promaia.config.databases import get_database_config
+        from promaia.config.databases import get_database_config, get_database_manager
 
+        # Try explicit names first, then search for any gmail source in workspace
         gmail_db = (
             get_database_config(f"{self.workspace}.gmail")
             or get_database_config("gmail")
         )
         if not gmail_db:
+            db_manager = get_database_manager()
+            for db in db_manager.get_workspace_databases(self.workspace):
+                if getattr(db, 'source_type', None) == 'gmail':
+                    gmail_db = db
+                    break
+        if not gmail_db:
             raise RuntimeError(f"No Gmail configured for workspace {self.workspace}")
 
-        email = gmail_db.get("database_id")
+        if isinstance(gmail_db, dict):
+            email = gmail_db.get("database_id")
+        else:
+            email = getattr(gmail_db, 'database_id', None)
         config = {"database_id": email, "workspace": self.workspace}
         self._gmail_connector = GmailConnector(config)
         if not await self._gmail_connector.connect(allow_interactive=False):
@@ -2527,31 +2562,64 @@ class ToolExecutor:
             raise RuntimeError(f"Failed to connect to Gmail: {email}")
         logger.info(f"Gmail connected: {email}")
 
+    def _resolve_attachment_paths(self, tool_input: Dict) -> list[str] | None:
+        """Resolve workspace-relative attachment paths to absolute paths."""
+        paths = tool_input.get("attachment_paths")
+        if not paths:
+            return None
+        resolved = []
+        for rel_path in paths:
+            abs_path = self._sandbox.resolve(rel_path)
+            if not abs_path.exists():
+                raise FileNotFoundError(f"Workspace file not found: {rel_path}")
+            resolved.append(str(abs_path))
+        return resolved
+
     async def _send_email(self, tool_input: Dict) -> str:
         await self._ensure_gmail()
+        try:
+            attachments = self._resolve_attachment_paths(tool_input)
+        except (FileNotFoundError, ValueError) as e:
+            return f"Error: {e}"
+
         success = await self._gmail_connector.send_email(
             to=tool_input["to"],
             subject=tool_input["subject"],
             body_text=tool_input["body"],
             cc=tool_input.get("cc"),
+            attachments=attachments,
         )
+        attach_note = f" with {len(attachments)} attachment(s)" if attachments else ""
         if success:
-            return f"Email sent to {tool_input['to']}: {tool_input['subject']}"
+            return f"Email sent to {tool_input['to']}: {tool_input['subject']}{attach_note}"
         return "Failed to send email."
 
     async def _create_email_draft(self, tool_input: Dict) -> str:
         await self._ensure_gmail()
+        try:
+            attachments = self._resolve_attachment_paths(tool_input)
+        except (FileNotFoundError, ValueError) as e:
+            return f"Error: {e}"
+
         draft_id = await self._gmail_connector._create_draft(
             to=tool_input["to"],
             subject=tool_input["subject"],
             body=tool_input["body"],
+            cc=tool_input.get("cc"),
+            attachments=attachments,
         )
+        attach_note = f" with {len(attachments)} attachment(s)" if attachments else ""
         if draft_id:
-            return f"Draft created (ID: {draft_id})"
+            return f"Draft created{attach_note} (ID: {draft_id})"
         return "Failed to create draft."
 
     async def _reply_to_email(self, tool_input: Dict) -> str:
         await self._ensure_gmail()
+        try:
+            attachments = self._resolve_attachment_paths(tool_input)
+        except (FileNotFoundError, ValueError) as e:
+            return f"Error: {e}"
+
         original = await self._gmail_connector._get_message(tool_input["message_id"])
         if not original:
             return "Original message not found."
@@ -2568,9 +2636,11 @@ class ToolExecutor:
             message_id=tool_input["message_id"],
             subject=subject,
             body_text=tool_input["body"],
+            attachments=attachments,
         )
+        attach_note = f" with {len(attachments)} attachment(s)" if attachments else ""
         if success:
-            return f"Reply sent (thread: {tool_input['thread_id']})"
+            return f"Reply sent{attach_note} (thread: {tool_input['thread_id']})"
         return "Failed to send reply."
 
     # ── Gmail read tools ─────────────────────────────────────────────────

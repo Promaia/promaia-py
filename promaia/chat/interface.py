@@ -154,10 +154,6 @@ def check_and_suggest_web_tools(user_input: str, context_state: dict, style: Sty
                   style="cyan")
         print_text(f"   URLs found: {', '.join(urls[:3])}", style="dim cyan")
 
-    # Suggest search if search keywords detected and no search capability
-    if has_search_keywords and 'search' not in mcp_servers and not has_agentic_web and not urls:
-        print_text("💡 Tip: I detected a search request. Enable web search with /mcp search to search the internet.",
-                  style="cyan")
 
 
 # --- API Client Initialization ---
@@ -7837,8 +7833,7 @@ The user will type `/send` to trigger the actual sending process.
                             if document_files and not image_files:
                                 user_input = cleaned_message
                         else:
-                            print_text(f"📄 Detected {len(document_files)} document(s) but {current_api} doesn't support documents yet.", style="bold yellow")
-                            print_text("Document support is currently available with Gemini. Switch with '/model gemini'.", style="dim")
+                            logger.debug(f"Detected {len(document_files)} document(s), skipping (not supported by {current_api})")
 
                 except Exception as e:
                     print_text(f"Error processing detected files: {e}", style="bold red")
@@ -7862,120 +7857,6 @@ The user will type `/send` to trigger the actual sending process.
                     logger.error(f"Failed to auto-save messages after user input: {e}", exc_info=True)
             elif draft_id:
                 logger.warning(f"⚠️  Draft mode detected but mode object is None - cannot auto-save")
-
-            # Automatic email intent detection
-            if not draft_id and not context_state.get('enable_email_send', False):
-                try:
-                    from promaia.mail.intent_detector import EmailIntentDetector
-
-                    detector = EmailIntentDetector()
-                    intent = detector.detect_intent(user_input, messages[:-1])  # Pass conversation without current message
-
-                    # If high-confidence email intent detected, auto-enable email mode
-                    if intent.has_intent and intent.confidence >= 0.85:
-                        logger.info(f"📧 Email intent detected: {intent.intent_type} (confidence: {intent.confidence:.2f})")
-                        logger.info(f"   Reasoning: {intent.reasoning}")
-
-                        # Auto-load Gmail context if not already loaded
-                        current_sources = context_state.get('sources') or []
-                        has_gmail = any('gmail' in str(s).lower() for s in current_sources)
-
-                        if not has_gmail:
-                            print_text(f"\n📧 Email intent detected - loading Gmail context...", style="cyan")
-
-                            # Load Gmail sources (replicate /mail command logic exactly)
-                            try:
-                                from promaia.config.databases import get_database_manager
-                                from promaia.config.workspaces import get_workspace_manager
-
-                                db_manager = get_database_manager()
-                                workspace_manager = get_workspace_manager()
-
-                                # Determine which workspaces to load from
-                                workspaces_to_load = [workspace] if workspace else workspace_manager.list_workspaces()
-
-                                # Find all Gmail databases from selected workspaces
-                                gmail_sources = []
-                                mail_from_accounts = []
-
-                                for ws in workspaces_to_load:
-                                    gmail_dbs = [
-                                        db for db in db_manager.get_workspace_databases(ws)
-                                        if db.source_type == "gmail"
-                                    ]
-                                    for gmail_db in gmail_dbs:
-                                        # Add with workspace prefix and 7 days of history
-                                        if ws == 'default':
-                                            gmail_sources.append(f"{gmail_db.nickname}:7")
-                                        else:
-                                            gmail_sources.append(f"{ws}.{gmail_db.nickname}:7")
-
-                                        # Track account info for /send
-                                        mail_from_accounts.append({
-                                            'workspace': ws,
-                                            'email': gmail_db.database_id,
-                                            'display': f"{gmail_db.database_id} ({ws})" if ws != 'default' else gmail_db.database_id
-                                        })
-
-                                if gmail_sources:
-                                    # Store available accounts
-                                    context_state['mail_from_accounts'] = mail_from_accounts
-
-                                    # Add Gmail sources to current sources (don't replace)
-                                    current_sources = context_state.get('sources') or []
-                                    new_sources = list(set(current_sources + gmail_sources))  # Deduplicate
-                                    context_state['sources'] = new_sources
-
-                                    # Reload context with Gmail data
-                                    if reload_context():
-                                        print_text(f"✅ Gmail context loaded ({len(gmail_sources)} sources)", style="green")
-                                    else:
-                                        print_text("⚠️  Failed to reload context with Gmail data", style="yellow")
-                                else:
-                                    print_text("⚠️  No Gmail accounts configured", style="yellow")
-
-                            except Exception as e:
-                                logger.error(f"Failed to auto-load Gmail context: {e}", exc_info=True)
-                                print_text(f"⚠️  Could not load Gmail context: {e}", style="yellow")
-                        else:
-                            # Gmail already loaded (e.g., from browse), just setup accounts
-                            if not context_state.get('mail_from_accounts'):
-                                try:
-                                    from promaia.config.databases import get_database_manager
-                                    from promaia.config.workspaces import get_workspace_manager
-
-                                    db_manager = get_database_manager()
-                                    workspace_manager = get_workspace_manager()
-
-                                    # Determine which workspaces to check
-                                    workspaces_to_check = [workspace] if workspace else workspace_manager.list_workspaces()
-
-                                    # Find all Gmail databases
-                                    mail_from_accounts = []
-                                    for ws in workspaces_to_check:
-                                        gmail_dbs = [
-                                            db for db in db_manager.get_workspace_databases(ws)
-                                            if db.source_type == "gmail"
-                                        ]
-                                        for gmail_db in gmail_dbs:
-                                            mail_from_accounts.append({
-                                                'workspace': ws,
-                                                'email': gmail_db.database_id,
-                                                'display': f"{gmail_db.database_id} ({ws})" if ws != 'default' else gmail_db.database_id
-                                            })
-
-                                    context_state['mail_from_accounts'] = mail_from_accounts
-                                    logger.info(f"📧 Setup {len(mail_from_accounts)} mail accounts for sending")
-                                except Exception as e:
-                                    logger.error(f"Failed to setup mail accounts: {e}", exc_info=True)
-
-                        # Enable email send mode
-                        context_state['enable_email_send'] = True
-                        logger.info("✅ Email mode auto-enabled")
-
-                except Exception as e:
-                    logger.error(f"Error in email intent detection: {e}", exc_info=True)
-                    # Continue with regular chat if intent detection fails
 
             # Call the appropriate API
             response_content = None
