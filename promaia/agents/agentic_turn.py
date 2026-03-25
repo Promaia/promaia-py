@@ -1603,6 +1603,58 @@ AGENT_TOOL_DEFINITIONS = [
             "required": ["name"]
         }
     },
+    {
+        "name": "create_agent",
+        "description": (
+            "Create a new scheduled agent. Provide a name and optionally "
+            "databases, mcp_tools, description, prompt, schedule, and messaging config. "
+            "Workspace defaults to current. Always confirm with the user first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Agent display name"},
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace (defaults to current)"
+                },
+                "databases": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Sources with day limits (e.g. ['journal:7', 'gmail:all'])"
+                },
+                "mcp_tools": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Tools to enable (e.g. ['gmail', 'calendar', 'notion'])"
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "System prompt / instructions for the agent"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Brief description of what this agent does"
+                },
+                "interval_minutes": {
+                    "type": "integer",
+                    "description": "Run interval in minutes (e.g. 60 for hourly)"
+                },
+                "max_iterations": {
+                    "type": "integer",
+                    "description": "Max iterations per run (default 40)"
+                },
+                "messaging_platform": {
+                    "type": "string",
+                    "enum": ["slack", "discord"],
+                    "description": "Messaging platform for notifications"
+                },
+                "messaging_channel_id": {
+                    "type": "string",
+                    "description": "Channel ID for messaging notifications"
+                },
+            },
+            "required": ["name"]
+        }
+    },
 ]
 
 CHANNEL_TOOL_DEFINITIONS = [
@@ -1665,41 +1717,53 @@ CHANNEL_TOOL_DEFINITIONS = [
     },
 ]
 
-INTERVIEW_TOOL_DEFINITIONS = [
-    {
-        "name": "start_interview",
-        "description": (
-            "Start a guided interview workflow to walk the user through a "
-            "configuration process. Use when the user wants to set up or "
-            "configure something (add a database, create a workspace, etc.). "
-            "This activates a specialized mode with step-by-step guidance."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "workflow": {
-                    "type": "string",
-                    "description": "The workflow to start",
-                    "enum": ["database_add", "edit_channels"],
+def _build_interview_tool_definitions():
+    """Build interview tool definitions with dynamic workflow enum."""
+    try:
+        from promaia.chat.workflows import list_workflows
+        workflows = list_workflows()
+        workflow_names = [wf["name"] for wf in workflows]
+    except Exception:
+        workflow_names = []
+    if not workflow_names:
+        workflow_names = ["database_add", "edit_channels"]
+
+    return [
+        {
+            "name": "start_interview",
+            "description": (
+                "Start a guided interview workflow to walk the user through a "
+                "configuration process. Use when the user wants to set up or "
+                "configure something (add a database, create an agent, edit "
+                "an agent, etc.). This activates a specialized mode with "
+                "step-by-step guidance."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "workflow": {
+                        "type": "string",
+                        "description": "The workflow to start",
+                        "enum": workflow_names,
+                    },
                 },
-            },
-            "required": ["workflow"]
-        }
-    },
-    {
-        "name": "complete_interview",
-        "description": (
-            "Signal that the current interview workflow is complete. "
-            "Call this when all required steps have been finished and "
-            "the user's configuration task is done."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    },
-]
+                "required": ["workflow"]
+            }
+        },
+        {
+            "name": "complete_interview",
+            "description": (
+                "Signal that the current interview workflow is complete. "
+                "Call this when all required steps have been finished and "
+                "the user's configuration task is done."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+    ]
 
 
 def _resolve_spreadsheet_id(identifier: str, workspace: str) -> str:
@@ -1851,7 +1915,7 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     tools.extend(CHANNEL_TOOL_DEFINITIONS)
 
     # Interview tools — always available
-    tools.extend(INTERVIEW_TOOL_DEFINITIONS)
+    tools.extend(_build_interview_tool_definitions())
 
     # UI tools — always available
     tools.append(SHOW_SELECTION_TOOL_DEFINITION)
@@ -1983,6 +2047,8 @@ class ToolExecutor:
                 return await self._remove_agent(tool_input)
             elif tool_name == "run_agent":
                 return await self._run_agent(tool_input)
+            elif tool_name == "create_agent":
+                return await self._create_agent(tool_input)
             # Channel tools
             elif tool_name == "list_channels":
                 return await self._list_channels(tool_input)
@@ -4590,6 +4656,122 @@ class ToolExecutor:
                 return f"Agent '{name}' run failed: {result.get('output', 'unknown error')}"
         except Exception as e:
             return f"Error running agent: {e}"
+
+    async def _create_agent(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip()
+        if not name:
+            return "Error: agent name is required."
+
+        try:
+            from datetime import datetime
+            from promaia.agents.agent_config import (
+                AgentConfig, save_agent, get_agent, load_agents,
+            )
+            from promaia.agents.notion_setup import generate_agent_id
+
+            # Check for name collision
+            existing = get_agent(name)
+            if existing:
+                return f"Error: agent '{name}' already exists."
+
+            workspace = tool_input.get("workspace", self.workspace).strip()
+            databases = tool_input.get("databases", [])
+            mcp_tools = tool_input.get("mcp_tools", [])
+            description = tool_input.get("description", "")
+            max_iterations = tool_input.get("max_iterations", 40)
+            interval_minutes = tool_input.get("interval_minutes")
+
+            # Generate unique agent_id
+            agent_id = generate_agent_id(name, load_agents())
+
+            # Default prompt
+            prompt = tool_input.get("prompt", "")
+            if not prompt:
+                prompt = f"You are {name}."
+                if description:
+                    prompt += f" {description}"
+
+            # Build config
+            agent_config = AgentConfig(
+                name=name,
+                workspace=workspace,
+                databases=databases,
+                prompt_file=prompt,
+                mcp_tools=mcp_tools,
+                agent_id=agent_id,
+                description=description or None,
+                max_iterations=max_iterations,
+                interval_minutes=interval_minutes,
+                enabled=True,
+                created_at=datetime.now().isoformat(),
+            )
+
+            # Set messaging if provided
+            messaging_platform = tool_input.get("messaging_platform")
+            if messaging_platform:
+                agent_config.messaging_platform = messaging_platform
+                agent_config.messaging_enabled = True
+                channel_id = tool_input.get("messaging_channel_id")
+                if channel_id:
+                    agent_config.messaging_channel_id = channel_id
+
+            # Validate
+            errors = agent_config.validate()
+            if errors:
+                return "Validation errors:\n" + "\n".join(f"  - {e}" for e in errors)
+
+            # Save
+            save_agent(agent_config)
+
+            result_parts = [
+                f"Agent '{name}' created successfully.",
+                f"  Agent ID: @{agent_id}",
+                f"  Workspace: {workspace}",
+            ]
+            if databases:
+                result_parts.append(f"  Databases: {', '.join(databases)}")
+            if mcp_tools:
+                result_parts.append(f"  MCP tools: {', '.join(mcp_tools)}")
+            if interval_minutes:
+                result_parts.append(f"  Interval: every {interval_minutes} minutes")
+
+            # Attempt Notion setup (non-blocking)
+            try:
+                from promaia.agents.notion_setup import create_agent_in_notion
+                notion_page_id = await create_agent_in_notion(agent_config, workspace)
+                if notion_page_id:
+                    agent_config.notion_page_id = notion_page_id
+                    save_agent(agent_config)
+                    page_id_clean = notion_page_id.replace("-", "")
+                    result_parts.append(
+                        f"  Notion page: https://www.notion.so/{workspace}/{page_id_clean}"
+                    )
+            except Exception as e:
+                logger.debug(f"Notion setup skipped for agent {name}: {e}")
+
+            # Attempt Calendar creation (non-blocking)
+            try:
+                from promaia.gcal import get_calendar_manager, google_account_for_workspace
+                calendar_mgr = get_calendar_manager(
+                    account=google_account_for_workspace(workspace)
+                )
+                cal_desc = f"Automated schedule for {name} agent"
+                if description:
+                    cal_desc += f"\n\n{description}"
+                calendar_id = calendar_mgr.create_agent_calendar(
+                    agent_name=name, description=cal_desc
+                )
+                if calendar_id:
+                    agent_config.calendar_id = calendar_id
+                    save_agent(agent_config)
+                    result_parts.append(f"  Calendar created: {name}")
+            except Exception as e:
+                logger.debug(f"Calendar setup skipped for agent {name}: {e}")
+
+            return "\n".join(result_parts)
+
+        except Exception as e:
+            return f"Error creating agent: {e}"
 
     # ── Channel tools ───────────────────────────────────────────────────
 
