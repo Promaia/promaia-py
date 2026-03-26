@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 def _get_db_path() -> Path:
     from promaia.utils.env_writer import get_data_dir
-    return get_data_dir() / "data" / "hybrid_metadata.db"
+    return get_data_dir() / "data" / "workflows.db"
 
 
 def _get_conn() -> sqlite3.Connection:

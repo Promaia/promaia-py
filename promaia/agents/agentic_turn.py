@@ -1628,6 +1628,133 @@ WORKSPACE_FILES_TOOL_DEFINITION = {
     }
 }
 
+WORKFLOW_TOOL_DEFINITIONS = [
+    {
+        "name": "create_workflow",
+        "description": (
+            "Save a repeatable workflow. Provide steps generalized from a task "
+            "the user performed, or from a description of what the workflow should do. "
+            "Show the workflow definition to the user as an artifact before calling this. "
+            "Always confirm with the user first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Short workflow name (e.g., 'glacier-part-reorder')"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "What this workflow does, in plain English"
+                },
+                "steps": {
+                    "type": "array",
+                    "description": "Ordered list of workflow steps",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "description": {"type": "string", "description": "What this step does"},
+                            "tool": {"type": "string", "description": "Tool to call (optional — some steps are manual)"},
+                            "params_template": {"type": "object", "description": "Fixed/default parameters for the tool"},
+                            "variable_params": {
+                                "type": "array", "items": {"type": "string"},
+                                "description": "Parameter names that change per run (filled from context)"
+                            },
+                            "notes": {"type": "string", "description": "Guidance for the agent on handling this step"}
+                        },
+                        "required": ["description"]
+                    }
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace scope (omit for global)"
+                },
+                "example_run": {
+                    "type": "object",
+                    "description": "Optional example run from the task just performed",
+                    "properties": {
+                        "tool_calls": {
+                            "type": "array",
+                            "description": "Tool calls made during the run: [{tool, params, result_summary}]"
+                        },
+                        "outcome": {
+                            "type": "string",
+                            "description": "Run outcome: success, partial, or failed"
+                        },
+                        "notes": {
+                            "type": "string",
+                            "description": "Observations about this run"
+                        }
+                    }
+                }
+            },
+            "required": ["name", "description", "steps"]
+        }
+    },
+    {
+        "name": "list_saved_workflows",
+        "description": "List all saved workflows with their names and descriptions.",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "get_workflow_details",
+        "description": (
+            "Load a saved workflow's full definition including steps and example runs. "
+            "Use this before executing a workflow to get the complete instructions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Workflow name"}
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "update_workflow",
+        "description": (
+            "Update an existing workflow. Can change description, steps, "
+            "or add a new example run from a just-completed execution."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Workflow name to update"},
+                "description": {"type": "string", "description": "New description (optional)"},
+                "steps": {
+                    "type": "array",
+                    "description": "New steps array (optional — replaces all steps)"
+                },
+                "add_example_run": {
+                    "type": "object",
+                    "description": "New example run to append",
+                    "properties": {
+                        "tool_calls": {"type": "array"},
+                        "outcome": {"type": "string"},
+                        "notes": {"type": "string"}
+                    }
+                }
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "delete_workflow",
+        "description": (
+            "Delete a saved workflow and all its example runs. "
+            "This is destructive — always confirm with the user first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Workflow name to delete"}
+            },
+            "required": ["name"]
+        }
+    },
+]
+
 AGENT_TOOL_DEFINITIONS = [
     {
         "name": "list_agents",
@@ -2058,6 +2185,9 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     # Workspace files (sandbox) — always available
     tools.append(WORKSPACE_FILES_TOOL_DEFINITION)
 
+    # Saved workflows — always available
+    tools.extend(WORKFLOW_TOOL_DEFINITIONS)
+
     return tools
 
 
@@ -2218,6 +2348,17 @@ class ToolExecutor:
             # Workspace files (sandbox)
             elif tool_name == "list_workspace_files":
                 return await self._list_workspace_files()
+            # Workflow tools
+            elif tool_name == "create_workflow":
+                return await self._create_workflow(tool_input)
+            elif tool_name == "list_saved_workflows":
+                return await self._list_saved_workflows()
+            elif tool_name == "get_workflow_details":
+                return await self._get_workflow_details(tool_input)
+            elif tool_name == "update_workflow":
+                return await self._update_workflow(tool_input)
+            elif tool_name == "delete_workflow":
+                return await self._delete_workflow(tool_input)
             # External MCP tools
             elif tool_name.startswith("mcp__") and self._mcp_client:
                 return await self._execute_mcp_tool(tool_name, tool_input)
@@ -4807,6 +4948,129 @@ class ToolExecutor:
             return "\n".join(lines)
         except Exception as e:
             return f"Error listing workspace files: {e}"
+
+    # ── Workflow tools ───────────────────────────────────────────────────
+
+    async def _create_workflow(self, tool_input: Dict) -> str:
+        try:
+            from promaia.tools.workflow_store import create_workflow
+
+            name = tool_input.get("name", "").strip()
+            description = tool_input.get("description", "").strip()
+            steps = tool_input.get("steps", [])
+
+            if not name:
+                return "Error: workflow name is required."
+            if not description:
+                return "Error: workflow description is required."
+            if not steps:
+                return "Error: at least one step is required."
+
+            result = create_workflow(
+                name=name,
+                description=description,
+                steps=steps,
+                workspace=tool_input.get("workspace", self.workspace),
+                example_run=tool_input.get("example_run"),
+            )
+
+            msg = f"Workflow '{name}' created (ID: {result['id']})."
+            if result.get("example_run_id"):
+                msg += f" Example run saved."
+            return msg
+        except ValueError as e:
+            return f"Error: {e}"
+        except Exception as e:
+            return f"Error creating workflow: {e}"
+
+    async def _list_saved_workflows(self) -> str:
+        try:
+            from promaia.tools.workflow_store import list_saved_workflows
+
+            workflows = list_saved_workflows(self.workspace)
+            if not workflows:
+                return "No saved workflows."
+
+            lines = [f"Saved workflows ({len(workflows)}):\n"]
+            for wf in workflows:
+                ws = f" [{wf['workspace']}]" if wf.get("workspace") else " [global]"
+                lines.append(f"  - **{wf['name']}**{ws}: {wf['description']}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error listing workflows: {e}"
+
+    async def _get_workflow_details(self, tool_input: Dict) -> str:
+        try:
+            from promaia.tools.workflow_store import get_workflow_details
+            import json
+
+            name = tool_input.get("name", "").strip()
+            if not name:
+                return "Error: workflow name is required."
+
+            wf = get_workflow_details(name)
+            if not wf:
+                return f"Workflow '{name}' not found."
+
+            lines = [
+                f"**{wf['name']}**",
+                f"Description: {wf['description']}",
+                f"Workspace: {wf.get('workspace') or 'global'}",
+                f"Created: {wf['created_at']}",
+                f"Updated: {wf['updated_at']}",
+                "",
+                f"**Steps ({len(wf['steps'])}):**",
+            ]
+            for i, step in enumerate(wf["steps"], 1):
+                tool = step.get("tool", "manual")
+                lines.append(f"  {i}. {step['description']} (tool: {tool})")
+                if step.get("params_template"):
+                    lines.append(f"     Params: {json.dumps(step['params_template'])}")
+                if step.get("variable_params"):
+                    lines.append(f"     Variable: {', '.join(step['variable_params'])}")
+                if step.get("notes"):
+                    lines.append(f"     Notes: {step['notes']}")
+
+            runs = wf.get("example_runs", [])
+            if runs:
+                lines.append(f"\n**Example runs ({len(runs)}):**")
+                for run in runs:
+                    lines.append(f"  - [{run['outcome']}] {run.get('notes', 'No notes')}")
+                    for tc in run.get("tool_calls", []):
+                        lines.append(f"    → {tc['tool']}: {tc.get('result_summary', '')}")
+
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error getting workflow details: {e}"
+
+    async def _update_workflow(self, tool_input: Dict) -> str:
+        try:
+            from promaia.tools.workflow_store import update_workflow
+
+            name = tool_input.get("name", "").strip()
+            if not name:
+                return "Error: workflow name is required."
+
+            return update_workflow(
+                name=name,
+                description=tool_input.get("description"),
+                steps=tool_input.get("steps"),
+                add_example_run=tool_input.get("add_example_run"),
+            )
+        except Exception as e:
+            return f"Error updating workflow: {e}"
+
+    async def _delete_workflow(self, tool_input: Dict) -> str:
+        try:
+            from promaia.tools.workflow_store import delete_workflow
+
+            name = tool_input.get("name", "").strip()
+            if not name:
+                return "Error: workflow name is required."
+
+            return delete_workflow(name)
+        except Exception as e:
+            return f"Error deleting workflow: {e}"
 
     # ── External MCP server tools ────────────────────────────────────────
 

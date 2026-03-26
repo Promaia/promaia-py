@@ -477,6 +477,24 @@ def build_agentic_system_prompt(
             mcp_lines.append(f"- **{tool_def['name']}**: {tool_def['description']}")
         filled += "\n\n" + "\n".join(mcp_lines)
 
+    # Load saved workflows for prompt
+    try:
+        from promaia.tools.workflow_store import list_workflows_for_prompt
+        wf_summaries = list_workflows_for_prompt(workspace)
+        if wf_summaries:
+            wf_lines = [
+                "## Saved Workflows\n",
+                "You have saved workflows available. When you recognize a user's request "
+                "matches a saved workflow, mention it and ask if they'd like you to follow it. "
+                "Use `get_workflow_details` to load the full steps and example runs before executing. "
+                "After completing a workflow, offer to save the run as an example.\n",
+            ]
+            for wf in wf_summaries:
+                wf_lines.append(f"- **{wf['name']}**: {wf['description']}")
+            filled += "\n\n" + "\n".join(wf_lines)
+    except Exception as e:
+        logger.debug(f"Could not load saved workflows: {e}")
+
     return base_prompt + "\n\n" + filled
 
 
