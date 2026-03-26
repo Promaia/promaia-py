@@ -65,8 +65,8 @@ class DatabaseConfig:
             # For Slack, use data/md/slack/{workspace}/{nickname} structure
             default_md_dir = f"data/md/slack/{self.workspace}/{self.nickname}"
         else:
-            # For other sources (Notion), use data/md/notion/{workspace}/
-            default_md_dir = f"data/md/notion/{self.workspace}"
+            # For other sources (Notion), use data/md/notion/{workspace}/{nickname}/ per database
+            default_md_dir = f"data/md/notion/{self.workspace}/{self.nickname}"
 
         self.markdown_directory = config_data.get("markdown_directory", default_md_dir)
         
