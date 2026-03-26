@@ -3561,10 +3561,22 @@ async def handle_register_markdown_files(args):
     import glob
     from datetime import datetime
     from promaia.storage.hybrid_storage import get_hybrid_registry
-    
+
     try:
         db_manager = get_database_manager()
         registry = get_hybrid_registry()
+
+        # Initialize vector DB for embedding generation (unless skipped)
+        vector_db = None
+        skip_embeddings = getattr(args, 'skip_embeddings', False)
+        if not skip_embeddings:
+            try:
+                from promaia.storage.vector_db import VectorDBManager
+                vector_db = VectorDBManager(chroma_path="chroma_db")
+                print("Vector embeddings: enabled")
+            except Exception as e:
+                print(f"Warning: Could not initialize vector DB ({e}), skipping embeddings")
+                vector_db = None
         
         # Get databases to process
         databases_to_process = []
@@ -3583,12 +3595,18 @@ async def handle_register_markdown_files(args):
             return
         
         total_registered = 0
-        
+        total_embedded = 0
+
         for db_config in databases_to_process:
             print(f"\nProcessing {db_config.get_qualified_name()}...")
             
-            # Check if markdown directory exists
+            # Check if markdown directory exists (resolve relative paths against data dir)
             md_dir = db_config.markdown_directory
+            if md_dir and not os.path.isabs(md_dir):
+                from promaia.utils.env_writer import get_data_dir
+                resolved = os.path.join(str(get_data_dir()), md_dir)
+                if os.path.exists(resolved):
+                    md_dir = resolved
             if not md_dir or not os.path.exists(md_dir):
                 print(f"  Warning: Markdown directory not found or not configured: {md_dir}")
                 continue
@@ -3606,7 +3624,8 @@ async def handle_register_markdown_files(args):
             print(f"  Found {len(existing_entries)} existing registry entries")
             
             registered_count = 0
-            
+            embedded_count = 0
+
             for md_file in md_files:
                 try:
                     import re  # Import at the beginning to avoid scope issues
@@ -3704,24 +3723,43 @@ async def handle_register_markdown_files(args):
                         success = registry.add_generic_content(content_data)
                         
                         if success:
-                            # print(f"    Registered: {title} ({page_id})")
                             registered_count += 1
+
+                            # Generate vector embedding
+                            if vector_db:
+                                try:
+                                    with open(md_file, 'r', encoding='utf-8') as f:
+                                        file_content = f.read()
+                                    if file_content.strip():
+                                        vector_db.add_content(page_id, file_content, {
+                                            'database_name': db_config.get_qualified_name(),
+                                            'workspace': db_config.workspace,
+                                            'content_type': db_config.source_type,
+                                            'created_time': created_time,
+                                            'title': title,
+                                        })
+                                        embedded_count += 1
+                                except Exception as e:
+                                    logger.debug(f"Embedding failed for {page_id}: {e}")
                         else:
                             print(f"    Failed to register: {title} ({page_id})")
-                            
+
                 except Exception as e:
                     print(f"    Error processing {md_file}: {e}")
                     import traceback
                     traceback.print_exc()
                     continue
-            
+
             action = "Would register" if args.dry_run else "Registered"
-            print(f"  {action} {registered_count} new files")
+            embed_note = f" ({embedded_count} embedded)" if embedded_count else ""
+            print(f"  {action} {registered_count} new files{embed_note}")
             total_registered += registered_count
+            total_embedded += embedded_count
         
         action = "Would register" if args.dry_run else "Registered"
-        print(f"\n{action} {total_registered} total files across all databases.")
-        
+        embed_total = f" ({total_embedded} vector embeddings)" if total_embedded else ""
+        print(f"\n{action} {total_registered} total files across all databases.{embed_total}")
+
         if args.dry_run:
             print("\nRun without --dry-run to actually register the files.")
         
@@ -3900,4 +3938,5 @@ def add_database_commands_to_existing_parser(parent_parser, subparsers):
     register_parser.add_argument('--workspace', help='Workspace to register files for (optional)')
     register_parser.add_argument('--database', help='Database nickname to register files for (optional)')
     register_parser.add_argument('--dry-run', action='store_true', help='Show what would be registered without making changes')
+    register_parser.add_argument('--skip-embeddings', action='store_true', help='Skip vector embedding generation (SQL registry only)')
     register_parser.set_defaults(func=handle_register_markdown_files)
