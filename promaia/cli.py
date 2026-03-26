@@ -38,7 +38,7 @@ from promaia.cli.database_commands import (
     handle_database_list, handle_database_add, handle_database_remove,
     handle_database_test, handle_database_sync, handle_database_info,
     handle_database_push, handle_database_status, handle_database_list_sources,
-    handle_register_markdown_files, handle_validate_registry,
+    handle_register_md, handle_validate_registry,
     handle_database_add_channels, handle_database_remove_channels,
     handle_database_remove_with_data_purge, handle_database_remove_interactive,
     handle_channel_remove_interactive,
@@ -3381,8 +3381,8 @@ def main():
                 asyncio.run(handle_database_status(args))
             elif args.database_command in ["list-sources", "sources"]:
                 asyncio.run(handle_database_list_sources(args))
-            elif args.database_command == "register-markdown-files":
-                asyncio.run(handle_register_markdown_files(args))
+            elif args.database_command in ["register-md", "register-markdown-files"]:
+                asyncio.run(handle_register_md(args))
             elif args.database_command == "validate-registry":
                 asyncio.run(handle_validate_registry(args))
             elif args.database_command == "add-channels":
