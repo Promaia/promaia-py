@@ -55,6 +55,7 @@ class ChatHistoryManager:
         from promaia.utils.env_writer import get_data_dir
         self.history_file = str(get_data_dir() / "chat_history.json")
         self._db_integration_enabled = True  # Flag to enable/disable database integration
+        self._backfill_checked = False
     
     def _load_history(self) -> List[ChatThread]:
         """Load chat threads from file."""
@@ -150,7 +151,7 @@ class ChatHistoryManager:
                 workspaces_used.add(context.get('workspace'))
 
             # Extract workspaces from source specifications
-            for source in context.get('sources', []):
+            for source in (context.get('sources') or []):
                 base_name = source.split(':')[0]  # Remove day specification
                 if '.' in base_name:
                     workspace = base_name.split('.')[0]
@@ -206,11 +207,63 @@ class ChatHistoryManager:
             logging.getLogger(__name__).warning(f"Failed to save conversation to database: {e}")
             return False
     
-    def save_thread(self, 
-                   messages: List[Dict[str, str]], 
+    def backfill_to_database(self) -> int:
+        """
+        Backfill any conversations from chat_history.json that aren't yet in unified storage.
+        Returns the number of threads backfilled.
+        """
+        if not self._db_integration_enabled:
+            return 0
+
+        try:
+            from promaia.config.databases import get_database_config
+            db_config = get_database_config('convos')
+            if not db_config:
+                return 0
+
+            # Check how many conversations are already indexed
+            from promaia.storage.hybrid_storage import get_hybrid_registry
+            registry = get_hybrid_registry()
+            import sqlite3
+            with sqlite3.connect(registry.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT page_id FROM conversation_content WHERE database_id = 'convos'")
+                indexed_ids = {row[0] for row in cursor.fetchall()}
+
+            threads = self._load_history()
+            unindexed = [t for t in threads if t.id not in indexed_ids]
+
+            if not unindexed:
+                return 0
+
+            count = 0
+            for thread in unindexed:
+                if self._save_to_database(thread):
+                    count += 1
+
+            if count > 0:
+                import logging
+                logging.getLogger(__name__).info(f"Backfilled {count} conversations to unified storage")
+
+            return count
+
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Conversation backfill failed: {e}")
+            return 0
+
+    def _ensure_backfill(self) -> None:
+        """Run backfill once per instance if needed."""
+        if not self._backfill_checked:
+            self._backfill_checked = True
+            self.backfill_to_database()
+
+    def save_thread(self,
+                   messages: List[Dict[str, str]],
                    context: Dict[str, Any],
                    thread_name: Optional[str] = None) -> str:
         """Save a new chat thread."""
+        self._ensure_backfill()
         thread_id = f"thread_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         timestamp = datetime.now().isoformat()
         

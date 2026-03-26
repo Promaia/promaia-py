@@ -201,6 +201,7 @@ class HybridContentRegistry:
                     -- File metadata
                     file_size INTEGER,
                     checksum TEXT,
+                    workspaces_used TEXT,
 
                     UNIQUE(page_id),
                     UNIQUE(thread_id)
