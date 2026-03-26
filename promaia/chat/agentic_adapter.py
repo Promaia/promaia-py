@@ -186,6 +186,7 @@ def build_agentic_system_prompt(
     agent_calendar_id: Optional[str] = None,
     agent_calendars: Optional[Dict[str, str]] = None,
     has_platform: bool = False,
+    mcp_tool_descriptions: Optional[List[Dict]] = None,
 ) -> str:
     """Append conversation_mode.md tool guidance to the base terminal prompt.
 
@@ -465,6 +466,17 @@ def build_agentic_system_prompt(
     if workflow_section:
         filled += "\n\n" + workflow_section
 
+    # Add external MCP tool descriptions if any are connected
+    if mcp_tool_descriptions:
+        mcp_lines = [
+            "## External MCP Tools\n",
+            "The following tools are available from external MCP servers. "
+            "Call them by their full name (including the mcp__ prefix).\n",
+        ]
+        for tool_def in mcp_tool_descriptions:
+            mcp_lines.append(f"- **{tool_def['name']}**: {tool_def['description']}")
+        filled += "\n\n" + "\n".join(mcp_lines)
+
     return base_prompt + "\n\n" + filled
 
 
@@ -629,10 +641,22 @@ async def run_agentic_turn(
     # Create tool executor
     executor = ToolExecutor(agent=shim, workspace=workspace)
 
+    # Connect external MCP servers and discover their tools
+    mcp_tool_defs = []
+    try:
+        await executor.connect_mcp_servers()
+        mcp_tool_defs = await executor.get_mcp_tool_definitions()
+        if mcp_tool_defs:
+            tools.extend(mcp_tool_defs)
+            logger.info(f"Added {len(mcp_tool_defs)} MCP tools from external servers")
+    except Exception as e:
+        logger.warning(f"MCP server connection failed (continuing without): {e}")
+
     # Enhance system prompt with conversation_mode.md guidance
     enhanced_prompt = build_agentic_system_prompt(
         system_prompt, workspace, mcp_tools, databases,
         agent_calendars=agent_calendars,
+        mcp_tool_descriptions=mcp_tool_defs if mcp_tool_defs else None,
     )
 
     # Inject active workflow prompt if in an interview
@@ -674,15 +698,18 @@ async def run_agentic_turn(
         )
 
     # Run the agentic loop
-    result = await agentic_turn(
-        system_prompt=enhanced_prompt,
-        messages=messages,
-        tools=tools,
-        tool_executor=executor,
-        max_iterations=40,
-        on_tool_activity=activity_cb,
-        plan=plan,
-        context_data_block=context_data_block,
-    )
+    try:
+        result = await agentic_turn(
+            system_prompt=enhanced_prompt,
+            messages=messages,
+            tools=tools,
+            tool_executor=executor,
+            max_iterations=40,
+            on_tool_activity=activity_cb,
+            plan=plan,
+            context_data_block=context_data_block,
+        )
+    finally:
+        await executor.disconnect_mcp_servers()
 
     return result

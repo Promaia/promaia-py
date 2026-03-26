@@ -2083,6 +2083,9 @@ class ToolExecutor:
         # Ephemeral sandbox for file operations
         from promaia.tools.sandbox import Sandbox
         self._sandbox = Sandbox()
+        # External MCP server connections
+        self._mcp_client = None        # McpClient instance
+        self._mcp_tool_map = {}        # namespaced_name → (server_name, original_name)
 
     async def execute(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         """Execute a tool and return a plain text result."""
@@ -2215,6 +2218,9 @@ class ToolExecutor:
             # Workspace files (sandbox)
             elif tool_name == "list_workspace_files":
                 return await self._list_workspace_files()
+            # External MCP tools
+            elif tool_name.startswith("mcp__") and self._mcp_client:
+                return await self._execute_mcp_tool(tool_name, tool_input)
             else:
                 return f"Unknown tool: {tool_name}"
         except Exception as e:
@@ -4801,6 +4807,116 @@ class ToolExecutor:
             return "\n".join(lines)
         except Exception as e:
             return f"Error listing workspace files: {e}"
+
+    # ── External MCP server tools ────────────────────────────────────────
+
+    # Names of built-in tool servers to skip when connecting external MCP servers
+    _BUILTIN_SERVER_NAMES = {"notion", "gmail", "calendar", "query_tools", "promaia"}
+
+    async def connect_mcp_servers(self):
+        """Connect to enabled external MCP servers and discover their tools."""
+        try:
+            from promaia.mcp.client import McpClient
+            from promaia.agents.mcp_loader import _find_mcp_servers_json
+            from promaia.config.mcp_servers import McpServerManager
+
+            config_path = _find_mcp_servers_json()
+            if not config_path:
+                logger.debug("No mcp_servers.json found, skipping MCP connections")
+                return
+
+            manager = McpServerManager(str(config_path))
+            enabled = manager.get_enabled_servers()
+            if not enabled:
+                return
+
+            self._mcp_client = McpClient()
+
+            for name, config in enabled.items():
+                # Skip built-in servers — those are hardcoded in ToolExecutor
+                if name.lower() in self._BUILTIN_SERVER_NAMES:
+                    continue
+
+                # Inject sandbox path so MCP servers can write files there
+                if config.env is None:
+                    config.env = {}
+                config.env["PROMAIA_SANDBOX_DIR"] = str(self._sandbox.root)
+
+                try:
+                    connected = await self._mcp_client.connect_to_server(config)
+                    if connected:
+                        logger.info(f"MCP server connected: {name}")
+                    else:
+                        logger.warning(f"MCP server failed to connect: {name}")
+                except Exception as e:
+                    logger.warning(f"MCP server {name} connection error: {e}")
+
+        except Exception as e:
+            logger.warning(f"MCP server setup failed (continuing without): {e}")
+
+    async def get_mcp_tool_definitions(self) -> list:
+        """Return Anthropic-formatted tool definitions from connected MCP servers."""
+        if not self._mcp_client:
+            return []
+
+        tools = self._mcp_client.get_all_tools()
+        if not tools:
+            return []
+
+        definitions = []
+        for tool in tools:
+            namespaced = f"mcp__{tool.server_name}__{tool.name}"
+            self._mcp_tool_map[namespaced] = (tool.server_name, tool.name)
+            definitions.append({
+                "name": namespaced,
+                "description": f"[{tool.server_name}] {tool.description}",
+                "input_schema": tool.input_schema,
+            })
+
+        logger.info(f"Discovered {len(definitions)} MCP tools from external servers")
+        return definitions
+
+    async def _execute_mcp_tool(self, tool_name: str, tool_input: Dict) -> str:
+        """Execute a tool on an external MCP server."""
+        mapping = self._mcp_tool_map.get(tool_name)
+        if not mapping:
+            return f"Error: unknown MCP tool '{tool_name}'"
+
+        server_name, original_name = mapping
+        protocol_client = self._mcp_client.connected_servers.get(server_name)
+        if not protocol_client:
+            return f"Error: MCP server '{server_name}' is not connected"
+
+        try:
+            result = await protocol_client.call_tool(original_name, tool_input)
+            if result is None:
+                return "MCP tool returned no result."
+
+            # Extract text from content blocks
+            content_blocks = result.get("content", [])
+            texts = []
+            for block in content_blocks:
+                if block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+
+            output = "\n".join(texts) if texts else "MCP tool returned empty result."
+
+            if result.get("isError"):
+                return f"Error from {server_name}: {output}"
+
+            return output
+        except Exception as e:
+            return f"Error calling MCP tool {original_name} on {server_name}: {e}"
+
+    async def disconnect_mcp_servers(self):
+        """Clean up all MCP server connections."""
+        if self._mcp_client:
+            try:
+                await self._mcp_client.disconnect_all()
+            except Exception as e:
+                logger.debug(f"MCP disconnect error (non-critical): {e}")
+            self._mcp_client = None
+            self._mcp_tool_map = {}
 
     # ── Agent tools ─────────────────────────────────────────────────────
 
