@@ -5639,7 +5639,7 @@ The user will type `/send` to trigger the actual sending process.
                         logger.error(f"Agentic turn failed: {e}", exc_info=True)
                         print_text(f"\n⚠️  Agentic mode error ({type(e).__name__}): {e}", style="bold red")
                         print_text("   Please try again.\n", style="dim yellow")
-                        continue
+                        response_content = {"text": "", "tokens": None, "_skip": True}
 
                 # Standard Anthropic call (or fallback from agentic failure)
                 if response_content is None:
@@ -5880,6 +5880,11 @@ The user will type `/send` to trigger the actual sending process.
                 artifact_manager = context_state['artifact_manager']
 
                 if isinstance(response_content, dict):
+                    # Skip display if this was an error-recovery sentinel
+                    if response_content.get("_skip"):
+                        response_content = None
+                        continue
+
                     response_text = response_content['text']
                     token_data = response_content.get('tokens')
 
@@ -8107,7 +8112,7 @@ The user will type `/send` when ready to send the email.
                         logger.error(f"Agentic turn failed: {e}", exc_info=True)
                         print_text(f"\n⚠️  Agentic mode error ({type(e).__name__}): {e}", style="bold red")
                         print_text("   Please try again.\n", style="dim yellow")
-                        continue
+                        response_content = {"text": "", "tokens": None, "_skip": True}
 
                 # Direct API calls (streaming removed for reliability)
                 if current_api == "anthropic" and anthropic_client and response_content is None:
@@ -8554,6 +8559,10 @@ The user will type `/send` when ready to send the email.
                     artifact_manager = context_state['artifact_manager']
                     
                     if isinstance(response_content, dict):
+                        if response_content.get("_skip"):
+                            response_content = None
+                            continue
+
                         # AI response with token data
                         response_text = response_content['text']
                         token_data = response_content.get('tokens')
