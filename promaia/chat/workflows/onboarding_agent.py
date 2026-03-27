@@ -157,7 +157,9 @@ After everything is set up:
 - Tell them they can run it right now: "Just say 'run agent <name>'"
 - Mention they can edit it anytime: "Say 'edit agent <name>'"
 - Summarize the schedule that was just created
-- Call `complete_interview` to end
+- Ask: "Want me to give you a quick tour of what else I can do? I can show you live demos across your connected apps."
+  - If yes: call `start_interview(workflow="onboard_tutorial")` to launch the tutorial
+  - If no: call `complete_interview` to end
 
 ### Agent Capabilities Reference
 
