@@ -6253,6 +6253,8 @@ class ToolExecutor:
             agent = get_agent(name)
             if not agent:
                 return f"Agent '{name}' not found."
+            if getattr(agent, 'is_default_agent', False):
+                return f"Cannot delete '{name}' — it's the default system agent. You can edit it with update_agent instead."
             deleted = delete_agent(name)
             if deleted:
                 return f"Agent '{name}' removed and resources cleaned up."
