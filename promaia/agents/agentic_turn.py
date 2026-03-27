@@ -31,6 +31,8 @@ class AgenticTurnResult:
     # These can be appended to conversation history so future turns
     # have access to prior tool calls and results.
     history_messages: List[Dict[str, Any]] = field(default_factory=list)
+    # Persistent notepad content (survives across turns)
+    notepad_content: Optional[str] = None
 
 
 # ── Tool definitions (Anthropic native format) ──────────────────────────
@@ -1251,6 +1253,36 @@ COMPACT_CONTEXT_TOOL_DEFINITION = {
 }
 
 
+NOTEPAD_TOOL_DEFINITION = {
+    "name": "notepad",
+    "description": (
+        "Your persistent working notes. Write key facts, plans, references, "
+        "and extracted context here. Notes survive across turns — use them "
+        "to avoid re-reading context. Read your notes before starting work "
+        "on a new turn to remember what you've already learned."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["write", "append", "read", "clear"],
+                "description": (
+                    "write: replace all notes with new content. "
+                    "append: add to existing notes. "
+                    "read: return current notes. "
+                    "clear: erase all notes."
+                )
+            },
+            "content": {
+                "type": "string",
+                "description": "Note content (required for write/append)"
+            },
+        },
+        "required": ["action"]
+    }
+}
+
 TASK_QUEUE_TOOL_DEFINITIONS = [
     {
         "name": "task_queue_add",
@@ -2166,6 +2198,9 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     # Context compact — always available
     tools.append(COMPACT_CONTEXT_TOOL_DEFINITION)
 
+    # Notepad — always available (persistent notes across turns)
+    tools.append(NOTEPAD_TOOL_DEFINITION)
+
     # Config tools — always available
     tools.extend(CONFIG_TOOL_DEFINITIONS)
 
@@ -2217,6 +2252,8 @@ class ToolExecutor:
         # Ephemeral sandbox for file operations
         from promaia.tools.sandbox import Sandbox
         self._sandbox = Sandbox()
+        # Persistent notepad (survives across turns within a conversation)
+        self._notepad = ""
         # External MCP server connections
         self._mcp_client = None        # McpClient instance
         self._mcp_tool_map = {}        # namespaced_name → (server_name, original_name)
@@ -2291,6 +2328,9 @@ class ToolExecutor:
                 if not notes:
                     return "Error: provide either 'notes' to compact or 'restore: true' to expand."
                 return f"__CONTEXT_COMPACT__:{notes}"
+            # Notepad (persistent notes across turns)
+            elif tool_name == "notepad":
+                return self._notepad_action(tool_input)
             # Config tools
             elif tool_name == "list_source_types":
                 return await self._list_source_types()
@@ -4995,6 +5035,35 @@ class ToolExecutor:
             return f"Renamed '{old_name}' to '{new_name}' in workspace '{workspace}'."
         except Exception as e:
             return f"Error renaming database: {e}"
+
+    # ── Notepad (persistent working notes) ─────────────────────────────
+
+    def _notepad_action(self, tool_input: Dict) -> str:
+        action = tool_input.get("action", "read")
+        content = tool_input.get("content", "")
+
+        if action == "write":
+            if not content:
+                return "Error: content is required for write action."
+            self._notepad = content
+            return f"Notes updated ({len(content)} chars)."
+        elif action == "append":
+            if not content:
+                return "Error: content is required for append action."
+            if self._notepad:
+                self._notepad += "\n\n" + content
+            else:
+                self._notepad = content
+            return f"Appended to notes ({len(self._notepad)} chars total)."
+        elif action == "read":
+            if not self._notepad:
+                return "Notepad is empty."
+            return f"Current notes:\n\n{self._notepad}"
+        elif action == "clear":
+            self._notepad = ""
+            return "Notes cleared."
+        else:
+            return f"Unknown notepad action: {action}"
 
     # ── Workspace file tools ────────────────────────────────────────────
 

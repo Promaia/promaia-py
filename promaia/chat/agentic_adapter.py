@@ -630,6 +630,7 @@ async def run_agentic_turn(
     databases: List[str],
     print_text_fn: Callable[..., None],
     workflow_prompt: Optional[str] = None,
+    notepad_content: Optional[str] = None,
 ) -> AgenticTurnResult:
     """Run an agentic turn using the full autonomous tool loop.
 
@@ -659,6 +660,10 @@ async def run_agentic_turn(
     # Create tool executor
     executor = ToolExecutor(agent=shim, workspace=workspace)
 
+    # Restore notepad from previous turn
+    if notepad_content:
+        executor._notepad = notepad_content
+
     # Connect external MCP servers and discover their tools
     mcp_tool_defs = []
     try:
@@ -676,6 +681,10 @@ async def run_agentic_turn(
         agent_calendars=agent_calendars,
         mcp_tool_descriptions=mcp_tool_defs if mcp_tool_defs else None,
     )
+
+    # Inject persistent notepad into system prompt
+    if executor._notepad:
+        enhanced_prompt += f"\n\n## Working Notes\n\n{executor._notepad}"
 
     # Inject active workflow prompt if in an interview
     if workflow_prompt:
@@ -729,5 +738,8 @@ async def run_agentic_turn(
         )
     finally:
         await executor.disconnect_mcp_servers()
+
+    # Persist notepad for next turn
+    result.notepad_content = executor._notepad or None
 
     return result
