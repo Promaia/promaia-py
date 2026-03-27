@@ -2437,7 +2437,7 @@ def _build_suite_index(suite_registry: Dict, mcp_suites: Dict = None, workspace:
             lines.append("## Saved Workflows\n")
             lines.append("If the user's request matches a saved workflow, **always load and follow it**.")
             lines.append("Do NOT improvise from the description — the workflow has specific steps you must follow.")
-            lines.append("`act(suites=[\"admin\"])` → `get_workflow_details(name=\"...\")` → follow the steps exactly.\n")
+            lines.append("Call `get_workflow_details(name=\"...\")` to load the steps, then follow them.\n")
             for wf in wf_summaries:
                 # Truncate description to avoid giving enough info to improvise
                 desc = wf['description']
@@ -6831,11 +6831,17 @@ async def agentic_turn(
             _ws = tool_executor.workspace if tool_executor else ""
             effective_prompt += "\n\n" + _build_suite_index(suite_registry, mcp_suites, workspace=_ws)
 
-            # Think mode tools: query + notepad + memory + context + act
+            # Think mode tools: query + notepad + memory + context + workflows (read) + act
             iteration_tools = list(QUERY_TOOL_DEFINITIONS)
             iteration_tools.append(NOTEPAD_TOOL_DEFINITION)
             iteration_tools.append(MEMORY_TOOL_DEFINITION)
             iteration_tools.append(CONTEXT_TOOL_DEFINITION)
+            # Workflow read tools available in Think mode (planning, not acting)
+            for td in WORKFLOW_TOOL_DEFINITIONS:
+                if td["name"] in ("list_saved_workflows", "get_workflow_details"):
+                    iteration_tools.append(td)
+            # Interview tools available in Think mode (launching guided flows)
+            iteration_tools.extend(_build_interview_tool_definitions())
             iteration_tools.append(ACT_TOOL_DEFINITION)
 
         elif use_think_act and act_mode:
