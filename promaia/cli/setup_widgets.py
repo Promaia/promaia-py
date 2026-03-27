@@ -189,14 +189,16 @@ async def unified_source_selector(
     paste_input_window = Window(FormattedTextControl(text=_get_paste_input), height=1)
 
     def _make_layout():
-        visible = min(len(nav_items) + 2, max_visible) + 3
         header = Window(FormattedTextControl(text=_get_header), height=2, style="bold")
-        viewport = Window(FormattedTextControl(text=_get_viewport_text), height=visible)
         status = Window(FormattedTextControl(text=_get_status), height=1, style="fg:gray")
         if mode == "paste":
-            # In paste mode, focus the input line
-            return Layout(HSplit([header, viewport, paste_input_window, status]), focused_element=paste_input_window)
+            # Paste mode: compact instructions + focused input line
+            instructions = Window(FormattedTextControl(text=_get_paste_instructions), height=4)
+            input_line = Window(FormattedTextControl(text=_get_paste_input), height=1)
+            return Layout(HSplit([header, instructions, input_line, status]), focused_element=input_line)
         else:
+            visible = min(len(nav_items) + 2, max_visible) + 3
+            viewport = Window(FormattedTextControl(text=_get_browse_text), height=visible)
             return Layout(HSplit([header, viewport, status]), focused_element=viewport)
 
     kb = KeyBindings()
