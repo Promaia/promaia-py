@@ -1754,7 +1754,11 @@ WORKFLOW_TOOL_DEFINITIONS = [
                 },
                 "description": {
                     "type": "string",
-                    "description": "What this workflow does, in plain English"
+                    "description": (
+                        "Short topic description (under 50 chars). Say WHAT it's about, "
+                        "not HOW it works. E.g., 'Glacier part spec email' or "
+                        "'Morning/evening routine walkthrough'. The steps contain the details."
+                    ),
                 },
                 "steps": {
                     "type": "array",
