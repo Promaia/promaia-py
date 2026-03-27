@@ -278,6 +278,120 @@ GMAIL_READ_TOOL_DEFINITIONS = [
             "required": ["thread_id"]
         }
     },
+    {
+        "name": "mark_email_read",
+        "description": "Mark one or more emails as read.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gmail message IDs to mark as read"
+                }
+            },
+            "required": ["message_ids"]
+        }
+    },
+    {
+        "name": "mark_email_unread",
+        "description": "Mark one or more emails as unread.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gmail message IDs to mark as unread"
+                }
+            },
+            "required": ["message_ids"]
+        }
+    },
+    {
+        "name": "label_email",
+        "description": "Add or remove labels on emails. Use list_labels to see available labels.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gmail message IDs"
+                },
+                "add_labels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Label names or IDs to add"
+                },
+                "remove_labels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Label names or IDs to remove"
+                }
+            },
+            "required": ["message_ids"]
+        }
+    },
+    {
+        "name": "list_labels",
+        "description": "List all Gmail labels (inbox, sent, custom labels, etc.)",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "archive_email",
+        "description": "Archive emails (remove from inbox but keep in All Mail).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gmail message IDs to archive"
+                }
+            },
+            "required": ["message_ids"]
+        }
+    },
+    {
+        "name": "trash_email",
+        "description": "Move emails to trash.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gmail message IDs to trash"
+                }
+            },
+            "required": ["message_ids"]
+        }
+    },
+    {
+        "name": "forward_email",
+        "description": "Forward an email to another recipient.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "Gmail message ID to forward"},
+                "to": {"type": "string", "description": "Recipient email address"},
+                "body": {"type": "string", "description": "Optional message to prepend (default: empty)"}
+            },
+            "required": ["message_id", "to"]
+        }
+    },
+    {
+        "name": "delete_draft",
+        "description": "Delete an email draft by ID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "draft_id": {"type": "string", "description": "Gmail draft ID"}
+            },
+            "required": ["draft_id"]
+        }
+    },
 ]
 
 MESSAGING_TOOL_DEFINITIONS = [
@@ -2330,7 +2444,7 @@ def _build_tool_suite_registry(agent, has_platform: bool = False) -> Dict[str, D
         tools = list(GMAIL_TOOL_DEFINITIONS) + list(GMAIL_READ_TOOL_DEFINITIONS)
         registry["gmail"] = {
             "tools": tools,
-            "description": "send, draft, reply, search, get threads",
+            "description": "send, draft, reply, forward, search, threads, labels, archive, trash",
             "count": len(tools),
         }
 
@@ -2531,6 +2645,22 @@ class ToolExecutor:
                 return await self._search_emails(tool_input)
             elif tool_name == "get_email_thread":
                 return await self._get_email_thread(tool_input)
+            elif tool_name == "mark_email_read":
+                return await self._mark_email_read(tool_input)
+            elif tool_name == "mark_email_unread":
+                return await self._mark_email_unread(tool_input)
+            elif tool_name == "label_email":
+                return await self._label_email(tool_input)
+            elif tool_name == "list_labels":
+                return await self._list_labels(tool_input)
+            elif tool_name == "archive_email":
+                return await self._archive_email(tool_input)
+            elif tool_name == "trash_email":
+                return await self._trash_email(tool_input)
+            elif tool_name == "forward_email":
+                return await self._forward_email(tool_input)
+            elif tool_name == "delete_draft":
+                return await self._delete_draft(tool_input)
             # Calendar tools
             elif tool_name == "schedule_self":
                 return await self._schedule_self(tool_input)
@@ -3248,6 +3378,175 @@ class ToolExecutor:
             return "\n".join(parts)
         except Exception as e:
             return f"Error fetching thread: {e}"
+
+    async def _mark_email_read(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        ids = tool_input.get("message_ids", [])
+        if not ids:
+            return "Error: missing 'message_ids'"
+        try:
+            for mid in ids:
+                self._gmail_connector.service.users().messages().modify(
+                    userId='me', id=mid,
+                    body={"removeLabelIds": ["UNREAD"]}
+                ).execute()
+            return f"Marked {len(ids)} email(s) as read."
+        except Exception as e:
+            return f"Error: {e}"
+
+    async def _mark_email_unread(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        ids = tool_input.get("message_ids", [])
+        if not ids:
+            return "Error: missing 'message_ids'"
+        try:
+            for mid in ids:
+                self._gmail_connector.service.users().messages().modify(
+                    userId='me', id=mid,
+                    body={"addLabelIds": ["UNREAD"]}
+                ).execute()
+            return f"Marked {len(ids)} email(s) as unread."
+        except Exception as e:
+            return f"Error: {e}"
+
+    async def _label_email(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        ids = tool_input.get("message_ids", [])
+        add = tool_input.get("add_labels", [])
+        remove = tool_input.get("remove_labels", [])
+        if not ids:
+            return "Error: missing 'message_ids'"
+        if not add and not remove:
+            return "Error: provide 'add_labels' and/or 'remove_labels'"
+        try:
+            # Resolve label names to IDs
+            labels_resp = self._gmail_connector.service.users().labels().list(userId='me').execute()
+            all_labels = {l['name'].lower(): l['id'] for l in labels_resp.get('labels', [])}
+            all_labels.update({l['id'].lower(): l['id'] for l in labels_resp.get('labels', [])})
+
+            add_ids = [all_labels.get(l.lower(), l) for l in add]
+            remove_ids = [all_labels.get(l.lower(), l) for l in remove]
+
+            body = {}
+            if add_ids:
+                body["addLabelIds"] = add_ids
+            if remove_ids:
+                body["removeLabelIds"] = remove_ids
+
+            for mid in ids:
+                self._gmail_connector.service.users().messages().modify(
+                    userId='me', id=mid, body=body
+                ).execute()
+            parts = []
+            if add:
+                parts.append(f"added {', '.join(add)}")
+            if remove:
+                parts.append(f"removed {', '.join(remove)}")
+            return f"Labels updated on {len(ids)} email(s): {'; '.join(parts)}."
+        except Exception as e:
+            return f"Error: {e}"
+
+    async def _list_labels(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        try:
+            resp = self._gmail_connector.service.users().labels().list(userId='me').execute()
+            labels = resp.get('labels', [])
+            system = [l for l in labels if l.get('type') == 'system']
+            user = [l for l in labels if l.get('type') == 'user']
+            lines = [f"Gmail labels ({len(labels)} total):\n"]
+            if user:
+                lines.append("Custom labels:")
+                for l in sorted(user, key=lambda x: x['name']):
+                    lines.append(f"  - {l['name']} (id: {l['id']})")
+            if system:
+                lines.append("\nSystem labels:")
+                for l in sorted(system, key=lambda x: x['name']):
+                    lines.append(f"  - {l['name']} (id: {l['id']})")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error: {e}"
+
+    async def _archive_email(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        ids = tool_input.get("message_ids", [])
+        if not ids:
+            return "Error: missing 'message_ids'"
+        try:
+            for mid in ids:
+                self._gmail_connector.service.users().messages().modify(
+                    userId='me', id=mid,
+                    body={"removeLabelIds": ["INBOX"]}
+                ).execute()
+            return f"Archived {len(ids)} email(s)."
+        except Exception as e:
+            return f"Error: {e}"
+
+    async def _trash_email(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        ids = tool_input.get("message_ids", [])
+        if not ids:
+            return "Error: missing 'message_ids'"
+        try:
+            for mid in ids:
+                self._gmail_connector.service.users().messages().trash(
+                    userId='me', id=mid
+                ).execute()
+            return f"Trashed {len(ids)} email(s)."
+        except Exception as e:
+            return f"Error: {e}"
+
+    async def _forward_email(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        message_id = tool_input.get("message_id", "")
+        to = tool_input.get("to", "")
+        prepend_body = tool_input.get("body", "")
+        if not message_id or not to:
+            return "Error: 'message_id' and 'to' are required"
+        try:
+            # Get original message
+            msg = self._gmail_connector.service.users().messages().get(
+                userId='me', id=message_id, format='full'
+            ).execute()
+            headers = {
+                h['name'].lower(): h['value']
+                for h in msg.get('payload', {}).get('headers', [])
+            }
+            original_body = self._gmail_connector._extract_message_body(msg)
+            subject = headers.get('subject', '')
+            if not subject.lower().startswith('fwd:'):
+                subject = f"Fwd: {subject}"
+
+            fwd_body = ""
+            if prepend_body:
+                fwd_body = f"{prepend_body}\n\n"
+            fwd_body += (
+                f"---------- Forwarded message ----------\n"
+                f"From: {headers.get('from', '?')}\n"
+                f"Date: {headers.get('date', '?')}\n"
+                f"Subject: {headers.get('subject', '')}\n\n"
+                f"{original_body}"
+            )
+
+            return await self._send_email({
+                "to": to,
+                "subject": subject,
+                "body": fwd_body,
+            })
+        except Exception as e:
+            return f"Error forwarding: {e}"
+
+    async def _delete_draft(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        draft_id = tool_input.get("draft_id", "")
+        if not draft_id:
+            return "Error: missing 'draft_id'"
+        try:
+            self._gmail_connector.service.users().drafts().delete(
+                userId='me', id=draft_id
+            ).execute()
+            return f"Draft {draft_id} deleted."
+        except Exception as e:
+            return f"Error: {e}"
 
     # ── Calendar tools ───────────────────────────────────────────────────
 
