@@ -550,6 +550,31 @@ def make_terminal_activity_callback(
                     print_text_fn(f"  📝 Context compacted: {preview}", style="dim cyan")
             return
 
+        # Library shelf toggle
+        if tool_name == "library" and completed:
+            action = (tool_input or {}).get("action", "")
+            shelves = (tool_input or {}).get("shelves", [])
+            name = (tool_input or {}).get("name", "")
+            target = ", ".join(shelves) if shelves else name
+            if action in ("on", "all_on"):
+                print_text_fn(f"  📖 Shelf ON: {target or 'all'}", style="dim cyan")
+            elif action in ("off", "all_off"):
+                print_text_fn(f"  📕 Shelf OFF: {target or 'all'}", style="dim cyan")
+            elif action == "add":
+                print_text_fn(f"  📚 Shelf added: {name}", style="dim cyan")
+            elif action == "remove":
+                print_text_fn(f"  🗑️  Shelf removed: {target}", style="dim cyan")
+            return
+
+        # Notepad update
+        if tool_name == "notepad" and completed:
+            action = (tool_input or {}).get("action", "")
+            if action == "clear":
+                print_text_fn("  📝 Notes cleared", style="dim cyan")
+            else:
+                print_text_fn(f"  📝 Notes {action}d", style="dim cyan")
+            return
+
         # Regular tool activity
         if not completed:
             # Tool starting
@@ -613,6 +638,15 @@ def _summarize_tool_input(tool_name: str, tool_input: Dict) -> str:
         if rng:
             parts.append(rng)
         return f": {' '.join(parts)}" if parts else ""
+    elif tool_name == "library":
+        action = tool_input.get("action", "")
+        shelves = tool_input.get("shelves", [])
+        name = tool_input.get("name", "")
+        target = ", ".join(shelves) if shelves else name
+        return f": {action} {target}" if target else f": {action}"
+    elif tool_name == "notepad":
+        action = tool_input.get("action", "")
+        return f": {action}"
     else:
         # Generic: show first key-value
         for k, v in tool_input.items():
@@ -665,8 +699,13 @@ async def run_agentic_turn(
     if notepad_content:
         executor._notepad = notepad_content
 
-    # Shelf states from previous turn (for restoring on/off state)
+    # Restore full shelves from previous turn (content + on/off state)
     context_state_shelves = shelf_states or {}
+    if context_state_shelves:
+        for name, shelf_data in context_state_shelves.items():
+            # Only restore query-created shelves (browser shelves get rebuilt from context)
+            if shelf_data.get("source") != "browser":
+                executor._shelves[name] = dict(shelf_data)
 
     # Connect external MCP servers and discover their tools
     mcp_tool_defs = []
@@ -773,11 +812,8 @@ async def run_agentic_turn(
     finally:
         await executor.disconnect_mcp_servers()
 
-    # Persist notepad and shelf states for next turn
+    # Persist notepad and full shelf data for next turn
     result.notepad_content = executor._notepad or None
-    result.shelf_states = {
-        name: {"on": shelf["on"], "page_count": shelf.get("page_count", 0)}
-        for name, shelf in executor._shelves.items()
-    } if executor._shelves else None
+    result.shelf_states = dict(executor._shelves) if executor._shelves else None
 
     return result
