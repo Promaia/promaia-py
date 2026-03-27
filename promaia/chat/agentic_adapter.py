@@ -659,6 +659,7 @@ async def run_agentic_turn(
     workflow_prompt: Optional[str] = None,
     notepad_content: Optional[str] = None,
     source_states: Optional[Dict[str, Dict]] = None,
+    on_tool_activity: Optional[Callable] = None,
 ) -> AgenticTurnResult:
     """Run an agentic turn using the full autonomous tool loop.
 
@@ -799,7 +800,8 @@ async def run_agentic_turn(
     # (sources change during the loop as tools load/toggle context)
 
     # Build activity callback
-    activity_cb = make_terminal_activity_callback(print_text_fn)
+    # Use external callback if provided (Slack/Discord), otherwise build terminal callback
+    activity_cb = on_tool_activity or make_terminal_activity_callback(print_text_fn)
 
     # Check if planning is needed (extract latest user message)
     user_message = ""

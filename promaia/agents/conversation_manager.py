@@ -626,6 +626,7 @@ class ConversationManager:
                 print_text_fn=_noop_print,
                 notepad_content=notepad_content,
                 source_states=source_states,
+                on_tool_activity=on_tool_activity,
             )
 
             output = result.response_text
