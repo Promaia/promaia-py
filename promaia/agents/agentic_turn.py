@@ -2411,7 +2411,7 @@ def _build_tool_suite_registry(agent, has_platform: bool = False) -> Dict[str, D
     return registry
 
 
-def _build_suite_index(suite_registry: Dict, mcp_suites: Dict = None) -> str:
+def _build_suite_index(suite_registry: Dict, mcp_suites: Dict = None, workspace: str = "") -> str:
     """Build the suite index text for Think mode system prompt."""
     lines = [
         "## Tool Suites\n",
@@ -2423,6 +2423,33 @@ def _build_suite_index(suite_registry: Dict, mcp_suites: Dict = None) -> str:
     if mcp_suites:
         for name, info in mcp_suites.items():
             lines.append(f"- **{name}** ({info['count']} tools) — {info['description']}")
+
+    # Saved workflows (user-created automation recipes)
+    try:
+        from promaia.tools.workflow_store import list_workflows_for_prompt
+        wf_summaries = list_workflows_for_prompt(workspace) if workspace else []
+        if wf_summaries:
+            lines.append("")
+            lines.append("## Saved Workflows\n")
+            lines.append("Use `get_workflow_details` (admin suite) to load steps before running.\n")
+            for wf in wf_summaries:
+                lines.append(f"- **{wf['name']}**: {wf['description']}")
+    except Exception:
+        pass
+
+    # Interview workflows (guided configuration flows)
+    try:
+        from promaia.chat.workflows import list_workflows
+        interviews = list_workflows()
+        if interviews:
+            lines.append("")
+            lines.append("## Configuration Interviews\n")
+            lines.append("Use `start_interview(workflow=\"name\")` to begin.\n")
+            for wf in interviews:
+                lines.append(f"- **{wf['name']}**: {wf['description']}")
+    except Exception:
+        pass
+
     return "\n".join(lines)
 
 
@@ -6791,7 +6818,8 @@ async def agentic_turn(
                 if active_content:
                     effective_prompt += "\n\n" + active_content
 
-            effective_prompt += "\n\n" + _build_suite_index(suite_registry, mcp_suites)
+            _ws = tool_executor.workspace if tool_executor else ""
+            effective_prompt += "\n\n" + _build_suite_index(suite_registry, mcp_suites, workspace=_ws)
 
             # Think mode tools: query + notepad + memory + context + act
             iteration_tools = list(QUERY_TOOL_DEFINITIONS)
