@@ -5879,12 +5879,7 @@ The user will type `/send` to trigger the actual sending process.
 
                 artifact_manager = context_state['artifact_manager']
 
-                if isinstance(response_content, dict):
-                    # Skip display if this was an error-recovery sentinel
-                    if response_content.get("_skip"):
-                        response_content = None
-                        continue
-
+                if isinstance(response_content, dict) and not response_content.get("_skip"):
                     response_text = response_content['text']
                     token_data = response_content.get('tokens')
 
@@ -8558,11 +8553,7 @@ The user will type `/send` when ready to send the email.
                     
                     artifact_manager = context_state['artifact_manager']
                     
-                    if isinstance(response_content, dict):
-                        if response_content.get("_skip"):
-                            response_content = None
-                            continue
-
+                    if isinstance(response_content, dict) and not response_content.get("_skip"):
                         # AI response with token data
                         response_text = response_content['text']
                         token_data = response_content.get('tokens')
