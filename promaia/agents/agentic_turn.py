@@ -2555,7 +2555,16 @@ class ToolExecutor:
 
         time_range = f"last {days} days" if days else "all time"
         formatted = format_context_data({database: pages})
-        return f"Loaded {len(pages)} pages from '{database}' ({time_range})\n\n{formatted}"
+
+        # Store in library shelf instead of returning full content
+        shelf_name = database.split(".")[-1] if "." in database else database
+        self._shelves[shelf_name] = {
+            "content": formatted,
+            "on": True,  # ON immediately so agent can read it
+            "page_count": len(pages),
+            "source": "query_source",
+        }
+        return f"Loaded {len(pages)} pages from '{database}' ({time_range}) → shelf '{shelf_name}' [ON]"
 
     async def _write_journal(self, tool_input: Dict) -> str:
         from promaia.agents.notion_journal import write_journal_entry
