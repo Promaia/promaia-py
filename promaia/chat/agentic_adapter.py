@@ -718,8 +718,8 @@ async def run_agentic_turn(
             end = matches[i + 1].start() if i + 1 < len(matches) else len(context_data_block)
             shelf_content = context_data_block[start:end]
 
-            # Restore shelves from previous turn if they exist
-            prev_state = context_state_shelves.get(db_name, {}).get("on", False) if context_state_shelves else False
+            # Restore shelf state from previous turn, default ON for browser-loaded
+            prev_state = context_state_shelves.get(db_name, {}).get("on", True) if context_state_shelves else True
 
             executor._shelves[db_name] = {
                 "content": shelf_content,
