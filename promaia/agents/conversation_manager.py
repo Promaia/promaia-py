@@ -562,12 +562,25 @@ class ConversationManager:
                     "content": "Got it, I have the background context. I'm ready to continue our conversation."
                 })
 
-            # Add conversation history (last 20 messages)
+            # Add conversation history (last 20 messages, plain text only)
+            # Strip tool_use/tool_result blocks to avoid mismatched pairs
             for msg in state.messages[-20:]:
-                messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"]
-                })
+                content = msg.get("content", "")
+                # Skip messages with tool_use/tool_result content blocks
+                if isinstance(content, list):
+                    # Extract only text blocks from structured content
+                    text_parts = []
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_parts.append(block["text"])
+                        elif isinstance(block, str):
+                            text_parts.append(block)
+                    content = "\n".join(text_parts) if text_parts else ""
+                if content and isinstance(content, str) and content.strip():
+                    messages.append({
+                        "role": msg["role"],
+                        "content": content
+                    })
 
             # Save context log for debugging
             try:
@@ -581,88 +594,58 @@ class ConversationManager:
             except Exception as e:
                 logger.debug(f"Failed to save context log: {e}")
 
-            # Generate response: agentic loop (with tools) or single LLM call
-            agentic_enabled = getattr(agent, 'agentic_loop_enabled', True)
+            # Generate response using the shared agentic adapter
+            # This gives Slack/Discord the same Think/Act mode, context sources,
+            # memory, suite registry, and conversation_mode.md prompt as terminal chat.
+            from promaia.chat.agentic_adapter import run_agentic_turn
 
-            if agentic_enabled:
-                from promaia.agents.agentic_turn import (
-                    agentic_turn, ToolExecutor, build_tool_definitions,
-                    _generate_plan,
+            # Auto-add calendar to mcp_tools if agent has a dedicated calendar
+            if getattr(agent, 'calendar_id', None):
+                agent_mcp = getattr(agent, 'mcp_tools', None) or []
+                if "calendar" not in agent_mcp:
+                    agent.mcp_tools = list(agent_mcp) + ["calendar"]
+
+            mcp_tools = getattr(agent, 'mcp_tools', []) or []
+            databases = getattr(agent, 'databases', []) or []
+
+            # Restore persisted notepad and source states from conversation context
+            notepad_content = state.context.get('notepad_content')
+            source_states = state.context.get('source_states')
+
+            # Create a no-op print function for non-terminal contexts
+            # (the on_tool_activity callback handles UX for Slack/Discord)
+            def _noop_print(*args, **kwargs):
+                pass
+
+            result = await run_agentic_turn(
+                system_prompt=system_prompt,
+                messages=messages,
+                workspace=agent.workspace,
+                mcp_tools=mcp_tools,
+                databases=databases,
+                print_text_fn=_noop_print,
+                notepad_content=notepad_content,
+                source_states=source_states,
+            )
+
+            output = result.response_text
+
+            # Persist notepad and source states for next turn
+            if result.notepad_content is not None:
+                state.context['notepad_content'] = result.notepad_content
+            if result.source_states is not None:
+                state.context['source_states'] = result.source_states
+
+            # Store tool_use/tool_result blocks for conversation history
+            if hasattr(result, 'history_messages') and result.history_messages:
+                state.messages.extend(result.history_messages)
+                state._skip_response_append = True
+            if result.tool_calls_made:
+                logger.info(
+                    f"Agentic turn: {result.iterations_used} iterations, "
+                    f"{len(result.tool_calls_made)} tool calls, "
+                    f"{result.input_tokens}+{result.output_tokens} tokens"
                 )
-                # Auto-add calendar to mcp_tools if agent has a dedicated calendar
-                if getattr(agent, 'calendar_id', None):
-                    agent_mcp = getattr(agent, 'mcp_tools', None) or []
-                    if "calendar" not in agent_mcp:
-                        agent.mcp_tools = list(agent_mcp) + ["calendar"]
-
-                has_platform = platform is not None
-                tools = build_tool_definitions(agent, has_platform=has_platform)
-                executor = ToolExecutor(
-                    agent=agent,
-                    workspace=agent.workspace,
-                    platform=platform,
-                    channel_context=channel_context,
-                )
-
-                # Planning: decompose complex requests before the agentic loop
-                tool_names = [t["name"] for t in tools]
-                plan = await _generate_plan(user_message, agent, tool_names)
-
-                # Emit plan to UX callback so tag_to_chat can display it
-                if plan and on_tool_activity:
-                    try:
-                        await on_tool_activity(
-                            tool_name="__plan__",
-                            tool_input={"steps": plan},
-                            completed=True,
-                            summary=None,
-                        )
-                    except Exception:
-                        pass
-
-                # Proactive context trimming before agentic turn
-                from promaia.agents.context_trimmer import trim_context_to_fit
-                system_prompt, messages = await trim_context_to_fit(
-                    system_prompt, messages, tools=tools
-                )
-
-                result = await agentic_turn(
-                    system_prompt=system_prompt,
-                    messages=messages,
-                    tools=tools,
-                    tool_executor=executor,
-                    max_iterations=agent.max_iterations or 40,
-                    on_tool_activity=on_tool_activity,
-                    plan=plan,
-                )
-                output = result.response_text
-                # Store tool_use/tool_result blocks for conversation history
-                if hasattr(result, 'history_messages') and result.history_messages:
-                    state.messages.extend(result.history_messages)
-                    # Don't append plain text below — history_messages includes it
-                    state._skip_response_append = True
-                if result.tool_calls_made:
-                    logger.info(
-                        f"Agentic turn: {result.iterations_used} iterations, "
-                        f"{len(result.tool_calls_made)} tool calls, "
-                        f"{result.input_tokens}+{result.output_tokens} tokens"
-                    )
-            else:
-                # Fallback: single LLM call (no tool use)
-                from promaia.utils.ai import get_anthropic_client
-                client, prefix = get_anthropic_client()
-                if not client:
-                    logger.error("No API key configured (Anthropic or OpenRouter)")
-                    return "I'm sorry, I couldn't generate a response (missing API key)."
-
-                response = await asyncio.to_thread(
-                    client.messages.create,
-                    model=f"{prefix}claude-sonnet-4-6",
-                    max_tokens=2048,
-                    system=system_prompt,
-                    messages=messages,
-                )
-                output = response.content[0].text if response.content else ""
 
             if not output:
                 logger.warning(f"Agent {state.agent_id} returned empty response")
