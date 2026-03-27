@@ -8,10 +8,11 @@ import asyncio
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from prompt_toolkit.application import Application
+from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout.containers import HSplit, Window
-from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.layout import Layout
 from rich.console import Console
 
@@ -162,8 +163,8 @@ async def unified_source_selector(
             lines.append("")
         return "\n".join(lines)
 
-    def _get_paste_input():
-        return f"  > {paste_input[0]}"
+    # Buffer for paste input — gives us a real cursor
+    paste_buffer = Buffer(name="paste_input")
 
     def _get_viewport_text():
         if mode == "browse":
@@ -192,9 +193,9 @@ async def unified_source_selector(
         header = Window(FormattedTextControl(text=_get_header), height=2, style="bold")
         status = Window(FormattedTextControl(text=_get_status), height=1, style="fg:gray")
         if mode == "paste":
-            # Paste mode: compact instructions + focused input line
+            # Paste mode: compact instructions + real text input with cursor
             instructions = Window(FormattedTextControl(text=_get_paste_instructions), height=4)
-            input_line = Window(FormattedTextControl(text=_get_paste_input), height=1)
+            input_line = Window(BufferControl(buffer=paste_buffer), height=1)
             return Layout(HSplit([header, instructions, input_line, status]), focused_element=input_line)
         else:
             visible = min(len(nav_items) + 2, max_visible) + 3
@@ -265,10 +266,7 @@ async def unified_source_selector(
     def _toggle(event):
         nonlocal nav_items, selected, load_more_callback
         if mode == "paste":
-            # Type space in paste mode
-            paste_input[0] += " "
-            event.app.layout = _make_layout()
-            return
+            return  # Buffer handles typing natively
         if mode != "browse" or current[0] >= len(nav_items):
             return
         itype, value = nav_items[current[0]]
@@ -299,7 +297,7 @@ async def unified_source_selector(
         if paste_link_callback is None:
             return
         mode = "paste" if mode == "browse" else "browse"
-        paste_input[0] = ""
+        paste_buffer.reset()
         paste_status[0] = ""
         event.app.layout = _make_layout()
 
@@ -310,45 +308,18 @@ async def unified_source_selector(
             confirmed = True
             event.app.exit()
         else:
-            # Paste mode: submit the URL
-            if paste_input[0].strip():
+            # Paste mode: read from buffer and submit
+            text = paste_buffer.text.strip()
+            if text:
+                paste_input[0] = text  # sync for the handler below
                 event.app.exit(result="__PASTE__")
 
     @kb.add(Keys.Escape)
     def _cancel(event):
         event.app.exit()
 
-    @kb.add(Keys.Backspace)
-    def _backspace(event):
-        if mode == "paste":
-            paste_input[0] = paste_input[0][:-1]
-            event.app.layout = _make_layout()
-
-    @kb.add(Keys.ControlV)
-    def _paste_clipboard(event):
-        if mode != "paste":
-            return
-        # Get clipboard content via prompt_toolkit
-        try:
-            from prompt_toolkit.clipboard import ClipboardData
-            clip = event.app.clipboard.get_data()
-            if clip and clip.text:
-                paste_input[0] += clip.text.strip()
-        except Exception:
-            pass
-        event.app.layout = _make_layout()
-
-    @kb.add(Keys.Any)
-    def _char(event):
-        if mode != "paste":
-            return
-        data = event.data
-        # Handle pasted multi-character input (some terminals send paste as bulk text)
-        if len(data) > 1:
-            paste_input[0] += data.strip()
-        elif len(data) == 1 and ord(data) >= 32:
-            paste_input[0] += data
-        event.app.layout = _make_layout()
+    # In paste mode, the Buffer handles typing, backspace, and clipboard natively.
+    # No manual character handling needed.
 
     # Main loop — handles load_more and paste re-entry
     while True:
@@ -382,6 +353,7 @@ async def unified_source_selector(
         elif result == "__PASTE__" and paste_link_callback is not None:
             url = paste_input[0].strip()
             paste_input[0] = ""
+            paste_buffer.reset()
             resolved = await paste_link_callback(url)
             if resolved:
                 # Add to items as pre-selected
