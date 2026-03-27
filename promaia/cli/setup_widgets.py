@@ -190,7 +190,8 @@ async def unified_source_selector(
         header = Window(FormattedTextControl(text=_get_header), height=2, style="bold")
         viewport = Window(FormattedTextControl(text=_get_viewport_text), height=visible)
         status = Window(FormattedTextControl(text=_get_status), height=1, style="fg:gray")
-        return Layout(HSplit([header, viewport, status]))
+        # Focus the viewport so the cursor appears in the content area, not the header
+        return Layout(HSplit([header, viewport, status]), focused_element=viewport)
 
     kb = KeyBindings()
 
