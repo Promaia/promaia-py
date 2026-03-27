@@ -255,6 +255,11 @@ async def unified_source_selector(
     @kb.add(" ")
     def _toggle(event):
         nonlocal nav_items, selected, load_more_callback
+        if mode == "paste":
+            # Type space in paste mode
+            paste_input[0] += " "
+            event.app.layout = _make_layout()
+            return
         if mode != "browse" or current[0] >= len(nav_items):
             return
         itype, value = nav_items[current[0]]
@@ -304,14 +309,18 @@ async def unified_source_selector(
     def _cancel(event):
         event.app.exit()
 
+    @kb.add(Keys.Backspace)
+    def _backspace(event):
+        if mode == "paste":
+            paste_input[0] = paste_input[0][:-1]
+            event.app.layout = _make_layout()
+
     @kb.add(Keys.Any)
     def _char(event):
         if mode != "paste":
             return
         data = event.data
-        if data == "\x7f":  # backspace
-            paste_input[0] = paste_input[0][:-1]
-        elif len(data) == 1 and ord(data) >= 32:
+        if len(data) == 1 and ord(data) >= 32:
             paste_input[0] += data
         event.app.layout = _make_layout()
 

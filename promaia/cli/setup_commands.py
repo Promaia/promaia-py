@@ -851,16 +851,26 @@ async def _browse_notion_databases(workspace, c=None):
             "Content-Type": "application/json",
         }
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                "https://api.notion.com/v1/search",
-                headers=headers,
-                json={"filter": {"value": "database", "property": "object"}},
-            )
-            if resp.status_code != 200:
-                c.print(f"  [yellow]Could not search Notion databases (HTTP {resp.status_code})[/yellow]")
-                return
-
-            results = resp.json().get("results", [])
+            # Paginate through all databases (Notion returns max 100 per page)
+            results = []
+            start_cursor = None
+            while True:
+                body = {"filter": {"value": "database", "property": "object"}, "page_size": 100}
+                if start_cursor:
+                    body["start_cursor"] = start_cursor
+                resp = await client.post(
+                    "https://api.notion.com/v1/search",
+                    headers=headers,
+                    json=body,
+                )
+                if resp.status_code != 200:
+                    c.print(f"  [yellow]Could not search Notion databases (HTTP {resp.status_code})[/yellow]")
+                    return
+                data = resp.json()
+                results.extend(data.get("results", []))
+                if not data.get("has_more") or not data.get("next_cursor"):
+                    break
+                start_cursor = data["next_cursor"]
             if not results:
                 c.print("  [dim]No databases found. Share databases with your Notion integration to see them here.[/dim]")
                 return
@@ -1020,7 +1030,7 @@ async def _browse_notion_databases(workspace, c=None):
 
 
 async def _browse_google_drive(workspace, c=None):
-    """Browse Google Drive and let user select folders/sheets to sync."""
+    """Browse Google Sheets and let user select which to sync."""
     import re
     from promaia.auth.registry import get_integration
     from promaia.config.databases import get_database_manager
@@ -1036,10 +1046,11 @@ async def _browse_google_drive(workspace, c=None):
             if creds:
                 break
     if not creds:
-        c.print("  [dim]No Google credentials found — skipping Drive browser[/dim]")
+        c.print("  [dim]No Google credentials found — skipping[/dim]")
         return
 
-    google_account = google.get_authenticated_email(creds) or ""
+    accounts = google.list_authenticated_accounts()
+    google_account = accounts[0] if accounts else ""
 
     try:
         from googleapiclient.discovery import build
@@ -1048,196 +1059,137 @@ async def _browse_google_drive(workspace, c=None):
         c.print(f"  [yellow]Could not connect to Google Drive: {e}[/yellow]")
         return
 
-    FOLDER_MIME = "application/vnd.google-apps.folder"
     SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 
-    # Track navigation state
-    current_folder_id = "root"
-    breadcrumb = [("My Drive", "root")]
+    c.print("  [dim]Loading spreadsheets...[/dim]")
 
     db_manager = get_database_manager()
     existing_ids = set()
     for db_config in db_manager.get_workspace_databases(workspace):
         existing_ids.add(db_config.database_id)
 
-    all_selected = []
+    # Fetch recent/accessible spreadsheets
+    try:
+        results = drive_service.files().list(
+            q=f"mimeType='{SHEET_MIME}' and trashed = false",
+            pageSize=50,
+            fields="nextPageToken, files(id, name, modifiedTime, starred)",
+            orderBy="modifiedTime desc",
+        ).execute()
+        files = results.get("files", [])
+        next_page_token = results.get("nextPageToken")
+    except Exception as e:
+        c.print(f"  [yellow]Could not list spreadsheets: {e}[/yellow]")
+        return
 
-    while True:
-        # Fetch current folder contents
-        c.print(f"  [dim]Loading {'> '.join(name for name, _ in breadcrumb)}...[/dim]")
-        try:
-            results = drive_service.files().list(
-                q=f"'{current_folder_id}' in parents and trashed = false",
-                pageSize=50,
-                fields="files(id, name, mimeType, size, modifiedTime)",
-                orderBy="folder,name",
-            ).execute()
-            files = results.get("files", [])
-        except Exception as e:
-            c.print(f"  [yellow]Could not list Drive contents: {e}[/yellow]")
-            break
+    if not files:
+        c.print("  [dim]No spreadsheets found in your Google Drive[/dim]")
+        return
 
-        # Also fetch starred items if we're at root
-        starred_ids = set()
-        if current_folder_id == "root":
-            try:
-                starred_resp = drive_service.files().list(
-                    q="starred = true and trashed = false",
-                    pageSize=20,
-                    fields="files(id, name, mimeType, size, modifiedTime)",
-                    orderBy="modifiedTime desc",
-                ).execute()
-                starred = starred_resp.get("files", [])
-                starred_ids = {f["id"] for f in starred}
-                # Prepend starred items that aren't already in the listing
-                existing_file_ids = {f["id"] for f in files}
-                for sf in starred:
-                    if sf["id"] not in existing_file_ids:
-                        files.insert(0, sf)
-            except Exception:
-                pass
-
-        if not files:
-            c.print("  [dim]This folder is empty[/dim]")
-            if len(breadcrumb) > 1:
-                breadcrumb.pop()
-                current_folder_id = breadcrumb[-1][1]
-                continue
-            break
-
-        # Build items for the unified selector
-        items = []
-        folder_id_map = {}  # index → folder_id for cd-into
-        for f in files:
-            fid = f["id"]
-            name = f["name"]
-            mime = f.get("mimeType", "")
-            is_folder = mime == FOLDER_MIME
-            is_sheet = mime == SHEET_MIME
-
-            if fid in existing_ids:
-                continue  # already configured
-
-            icon = "📁" if is_folder else "📊" if is_sheet else "📄"
-            star = "⭐ " if fid in starred_ids else ""
-            meta = ""
-            if f.get("modifiedTime"):
-                meta = f["modifiedTime"][:10]
-
-            items.append({
-                "id": fid,
-                "label": f"{star}{name}",
-                "group": "",
-                "icon": icon,
-                "meta": meta,
-                "is_folder": is_folder,
-                "is_sheet": is_sheet,
-                "mime_type": mime,
-                "name": name,
-            })
-
-        if not items:
-            c.print("  [dim]All items in this folder are already configured[/dim]")
-            if len(breadcrumb) > 1:
-                breadcrumb.pop()
-                current_folder_id = breadcrumb[-1][1]
-                continue
-            break
-
-        # Add navigation items
-        if len(breadcrumb) > 1:
-            items.insert(0, {
-                "id": "__BACK__",
-                "label": ".. back",
-                "group": "",
-                "icon": "⬆️",
-                "meta": "",
-                "is_folder": True,
-            })
-
-        breadcrumb_str = " > ".join(name for name, _ in breadcrumb)
-
-        async def _resolve_drive_link(url):
-            """Extract file/folder ID from a Drive URL and look up metadata."""
-            import re as _re
-            # Try folder URL: drive.google.com/drive/folders/FOLDER_ID
-            m = _re.search(r'/folders/([a-zA-Z0-9_-]+)', url)
-            if not m:
-                # Try file URL: drive.google.com/file/d/FILE_ID
-                m = _re.search(r'/d/([a-zA-Z0-9_-]+)', url)
-            if not m:
-                # Try spreadsheet URL: docs.google.com/spreadsheets/d/ID
-                m = _re.search(r'/spreadsheets/d/([a-zA-Z0-9_-]+)', url)
-            if not m:
-                return None
-            file_id = m.group(1)
-            try:
-                meta = drive_service.files().get(
-                    fileId=file_id,
-                    fields="id, name, mimeType"
-                ).execute()
-                return {
-                    "id": meta["id"],
-                    "label": meta["name"],
-                    "group": "",
-                    "icon": "📁" if meta["mimeType"] == FOLDER_MIME else "📊" if meta["mimeType"] == SHEET_MIME else "📄",
-                    "is_folder": meta["mimeType"] == FOLDER_MIME,
-                    "is_sheet": meta["mimeType"] == SHEET_MIME,
-                    "mime_type": meta["mimeType"],
-                    "name": meta["name"],
-                }
-            except Exception:
-                return None
-
-        selected = await unified_source_selector(
-            title=f"Google Drive — {breadcrumb_str}",
-            items=items,
-            paste_link_callback=_resolve_drive_link,
-        )
-
-        if not selected:
-            break  # User cancelled
-
-        # Process selections
-        navigated = False
-        for item in selected:
-            if item["id"] == "__BACK__":
-                breadcrumb.pop()
-                current_folder_id = breadcrumb[-1][1]
-                navigated = True
-                break
-            if item.get("is_folder") and not item.get("selected", False):
-                # If only one folder selected and no files, cd into it
-                folder_selections = [s for s in selected if s.get("is_folder") and s["id"] != "__BACK__"]
-                non_folder = [s for s in selected if not s.get("is_folder")]
-                if len(folder_selections) == 1 and not non_folder:
-                    breadcrumb.append((item["name"], item["id"]))
-                    current_folder_id = item["id"]
-                    navigated = True
-                    break
-
-        if navigated:
+    # Build items for unified selector
+    items = []
+    for f in files:
+        fid = f["id"]
+        if fid in existing_ids:
             continue
+        star = "⭐ " if f.get("starred") else ""
+        meta = f.get("modifiedTime", "")[:10] if f.get("modifiedTime") else ""
+        items.append({
+            "id": fid,
+            "label": f"{star}{f['name']}",
+            "group": "",
+            "icon": "📊",
+            "meta": meta,
+            "name": f["name"],
+        })
 
-        # Add selected items as database configs
-        all_selected.extend(selected)
-        break
+    already_added = len(files) - len(items)
+    if already_added > 0:
+        c.print(f"  [dim]{already_added} sheet(s) already configured[/dim]")
 
-    if not all_selected:
-        c.print("  [dim]No sources selected[/dim]")
+    if not items and not next_page_token:
+        c.print("  [green]OK[/green] All spreadsheets are already configured")
+        return
+
+    # Load more callback for pagination
+    async def _load_more_sheets():
+        nonlocal next_page_token
+        if not next_page_token:
+            return []
+        try:
+            more = drive_service.files().list(
+                q=f"mimeType='{SHEET_MIME}' and trashed = false",
+                pageSize=50,
+                fields="nextPageToken, files(id, name, modifiedTime, starred)",
+                orderBy="modifiedTime desc",
+                pageToken=next_page_token,
+            ).execute()
+            next_page_token = more.get("nextPageToken")
+            new_items = []
+            for f in more.get("files", []):
+                if f["id"] in existing_ids:
+                    continue
+                star = "⭐ " if f.get("starred") else ""
+                meta = f.get("modifiedTime", "")[:10] if f.get("modifiedTime") else ""
+                new_items.append({
+                    "id": f["id"],
+                    "label": f"{star}{f['name']}",
+                    "group": "",
+                    "icon": "📊",
+                    "meta": meta,
+                    "name": f["name"],
+                })
+            return new_items
+        except Exception:
+            return []
+
+    # Paste link callback
+    async def _resolve_sheets_link(url):
+        import re as _re
+        m = _re.search(r'/spreadsheets/d/([a-zA-Z0-9_-]+)', url)
+        if not m:
+            m = _re.search(r'/d/([a-zA-Z0-9_-]+)', url)
+        if not m:
+            return None
+        file_id = m.group(1)
+        try:
+            meta = drive_service.files().get(
+                fileId=file_id, fields="id, name, mimeType"
+            ).execute()
+            if meta.get("mimeType") != SHEET_MIME:
+                return None  # Not a spreadsheet
+            return {
+                "id": meta["id"],
+                "label": meta["name"],
+                "group": "",
+                "icon": "📊",
+                "name": meta["name"],
+            }
+        except Exception:
+            return None
+
+    load_more_cb = _load_more_sheets if next_page_token else None
+
+    selected = await unified_source_selector(
+        title="Google Sheets — Select Spreadsheets",
+        items=items,
+        load_more_callback=load_more_cb,
+        load_more_label="Load more spreadsheets",
+        paste_link_callback=_resolve_sheets_link,
+    )
+
+    if not selected:
+        c.print("  [dim]No spreadsheets selected[/dim]")
         return
 
     added = 0
-    for item in all_selected:
-        if item["id"] == "__BACK__":
-            continue
-        name = re.sub(r"[^a-z0-9]+", "_", item.get("name", item["label"]).lower()).strip("_") or "untitled"
-        source_type = "google_sheets" if item.get("is_sheet") else "google_drive"
+    for item in selected:
+        name = re.sub(r"[^a-z0-9]+", "_", item["name"].lower()).strip("_") or "untitled"
         config = {
-            "source_type": source_type,
+            "source_type": "google_sheets",
             "database_id": item["id"],
             "google_account": google_account,
-            "description": item.get("name", item["label"]),
+            "description": item["name"],
             "workspace": workspace,
             "sync_enabled": True,
             "default_days": 7,
@@ -1245,7 +1197,7 @@ async def _browse_google_drive(workspace, c=None):
         if db_manager.add_database(name, config, workspace):
             added += 1
 
-    c.print(f"  [green]OK[/green] Added {added} source(s) to workspace [bold]{workspace}[/bold]")
+    c.print(f"  [green]OK[/green] Added {added} spreadsheet(s) to workspace [bold]{workspace}[/bold]")
 
 
 async def _multi_select_flat(databases, c):
