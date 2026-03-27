@@ -7037,8 +7037,17 @@ async def agentic_turn(
                 except Exception as e:
                     logger.debug(f"Tool activity callback error: {e}")
 
-            # Execute tool
-            result_text = await tool_executor.execute(tool_use.name, tool_use.input)
+            # Validate tool is in current iteration's tool list
+            valid_tool_names = {t["name"] for t in iteration_tools} if iteration_tools else set()
+            if valid_tool_names and tool_use.name not in valid_tool_names:
+                result_text = (
+                    f"Error: tool '{tool_use.name}' is not available in the current mode. "
+                    f"Available tools: {', '.join(sorted(valid_tool_names))}"
+                )
+                logger.warning(f"[think/act] Rejected tool '{tool_use.name}' — not in current mode")
+            else:
+                # Execute tool
+                result_text = await tool_executor.execute(tool_use.name, tool_use.input)
 
             # Handle Think/Act mode switching sentinels (stay in loop)
             if result_text.startswith("__ACT__:"):
