@@ -48,12 +48,34 @@ CONNECTOR_DESCRIPTIONS = {
 
 
 def _has_valid_credentials(integration_name: str) -> bool:
-    """Check if an integration already has valid credentials."""
+    """Check if an integration already has valid credentials.
+
+    Checks both global and workspace-specific credential paths.
+    """
     try:
         from promaia.auth.registry import get_integration
+        from promaia.config.workspaces import get_workspace_manager
         integration = get_integration(integration_name)
-        if integration and integration.get_default_credential():
+        if not integration:
+            return False
+        # Check global/default credential
+        if integration.get_default_credential():
             return True
+        # Check workspace-specific credentials
+        manager = get_workspace_manager()
+        workspace = manager.get_default_workspace()
+        if workspace and integration_name == "notion":
+            cred = integration.get_notion_credentials(workspace)
+            if cred:
+                return True
+        elif workspace and integration_name == "slack":
+            cred = integration.get_slack_credentials(workspace)
+            if cred and cred.get("bot_token"):
+                return True
+        elif workspace and integration_name == "google":
+            accounts = integration.list_authenticated_accounts()
+            if accounts:
+                return True
     except Exception:
         pass
     return False
@@ -230,6 +252,10 @@ async def _run_setup(args):
         if not _confirm_skip_auth("google"):
             google = get_integration("google")
             await _safe_step(configure_credential(google, console), "Google")
+        # Browse Drive for sheets and folders
+        console.print()
+        console.print(f"[bold]{CONNECTOR_DESCRIPTIONS['google']}[/bold]\n")
+        await _safe_step(_browse_google_drive(workspace_slug, console), "Drive browser")
         progress.advance()
     else:
         progress.skip()
@@ -375,6 +401,9 @@ async def _run_single_service_setup(service):
         if not _confirm_skip_auth("google"):
             google = get_integration("google")
             await configure_credential(google, console)
+        console.print()
+        console.print(f"[bold]{CONNECTOR_DESCRIPTIONS['google']}[/bold]\n")
+        await _browse_google_drive(workspace, console)
     elif service in ("llm", "ai", "openrouter", "anthropic"):
         from promaia.auth.registry import get_ai_integrations
         integrations = get_ai_integrations()
@@ -853,99 +882,131 @@ async def _browse_notion_databases(workspace, c=None):
         c.print(f"  [yellow]Could not connect to Notion: {e}[/yellow]")
         return
 
-    # Start with top-level databases only
-    all_databases = list(top_level)
-
     # Check which are already added
     db_manager = get_database_manager()
     existing_ids = set()
     for db_config in db_manager.get_workspace_databases(workspace):
         existing_ids.add(db_config.database_id)
 
-    # Filter and select from top-level first
-    new_databases = [(db_id, title, group) for db_id, title, group in all_databases if db_id not in existing_ids]
-    already_added = len(all_databases) - len(new_databases)
+    # Build items for unified selector (top-level only initially)
+    from promaia.cli.setup_widgets import unified_source_selector
 
+    items = []
+    for db_id, title, group in top_level:
+        if db_id in existing_ids:
+            continue
+        items.append({
+            "id": db_id,
+            "label": title,
+            "group": group,
+            "icon": "📓",
+            "name": title,
+        })
+    items.sort(key=lambda x: x["label"].lower())
+
+    already_added = len(top_level) - len(items)
     if already_added > 0:
         c.print(f"  [dim]{already_added} database(s) already configured[/dim]")
 
-    if not new_databases and nested_count == 0:
+    if not items and nested_count == 0:
         c.print("  [green]OK[/green] All available databases are already configured")
         return
 
-    all_selected = []
-
-    if new_databases:
-        new_databases.sort(key=lambda x: x[1].lower())
-        if nested_count > 0:
-            c.print(f"  [dim]Showing {len(new_databases)} top-level databases ({nested_count} more in sub-pages)[/dim]")
-
-        selected = await _multi_select_flat(new_databases, c)
-        if selected:
-            all_selected.extend(selected)
-
-    # Offer to load nested databases
-    if nested_count > 0:
-        from rich.prompt import Prompt
-        show_more = Prompt.ask(
-            f"\n  Show {nested_count} more databases from sub-pages?",
-            choices=["y", "n"], default="n"
-        ).strip().lower()
-
-        if show_more == "y":
-            c.print("  [dim]Loading nested databases...[/dim]")
-            try:
-                async with httpx.AsyncClient(timeout=60.0) as client2:
-                    parent_names = {}
-                    parent_page_ids = set()
-                    for _db, _db_id, _title, p in nested_raw:
-                        if p.get("type") == "page_id":
-                            parent_page_ids.add(p["page_id"])
-
-                    for pid in parent_page_ids:
-                        try:
-                            pr = await client2.get(f"https://api.notion.com/v1/pages/{pid}", headers=headers)
-                            if pr.status_code == 200:
-                                for _pname, pval in pr.json().get("properties", {}).items():
-                                    if pval.get("type") == "title":
-                                        parts = pval.get("title", [])
-                                        parent_names[pid] = "".join(t.get("plain_text", "") for t in parts).strip() or ""
-                                        break
-                        except Exception:
-                            pass
-
-                nested_databases = []
-                for _db, db_id, title, p in nested_raw:
-                    if db_id in existing_ids:
-                        continue
+    # Load more callback: loads nested databases on demand
+    async def _load_nested():
+        c.print("  [dim]Loading nested databases...[/dim]")
+        new_items = []
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client2:
+                parent_names = {}
+                parent_page_ids = set()
+                for _db, _db_id, _title, p in nested_raw:
                     if p.get("type") == "page_id":
-                        group = parent_names.get(p["page_id"], "(other)")
-                    else:
-                        group = "(other)"
-                    nested_databases.append((db_id, title, group))
+                        parent_page_ids.add(p["page_id"])
 
-                if nested_databases:
-                    nested_databases.sort(key=lambda x: (x[2].lower(), x[1].lower()))
-                    selected2 = await _multi_select_flat(nested_databases, c)
-                    if selected2:
-                        all_selected.extend(selected2)
+                for pid in parent_page_ids:
+                    try:
+                        pr = await client2.get(f"https://api.notion.com/v1/pages/{pid}", headers=headers)
+                        if pr.status_code == 200:
+                            for _pname, pval in pr.json().get("properties", {}).items():
+                                if pval.get("type") == "title":
+                                    parts = pval.get("title", [])
+                                    parent_names[pid] = "".join(t.get("plain_text", "") for t in parts).strip() or ""
+                                    break
+                    except Exception:
+                        pass
+
+            for _db, db_id, title, p in nested_raw:
+                if db_id in existing_ids:
+                    continue
+                if p.get("type") == "page_id":
+                    group = parent_names.get(p["page_id"], "(other)")
                 else:
-                    c.print("  [dim]All nested databases already configured[/dim]")
-            except Exception as e:
-                c.print(f"  [yellow]Could not load nested databases: {e}[/yellow]")
+                    group = "(other)"
+                new_items.append({
+                    "id": db_id,
+                    "label": title,
+                    "group": group,
+                    "icon": "📓",
+                    "name": title,
+                })
+            new_items.sort(key=lambda x: (x["group"].lower(), x["label"].lower()))
+        except Exception as e:
+            c.print(f"  [yellow]Could not load nested databases: {e}[/yellow]")
+        return new_items
 
-    if not all_selected:
+    # Paste link callback: resolve Notion database URL
+    async def _resolve_notion_link(url):
+        import re as _re
+        # Extract 32-char hex ID from Notion URL
+        m = _re.search(r'([a-f0-9]{32})', url.replace("-", ""))
+        if not m:
+            return None
+        raw_hex = m.group(1)
+        db_id = f"{raw_hex[:8]}-{raw_hex[8:12]}-{raw_hex[12:16]}-{raw_hex[16:20]}-{raw_hex[20:]}"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client3:
+                resp = await client3.get(
+                    f"https://api.notion.com/v1/databases/{db_id}",
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    title = "".join(t.get("plain_text", "") for t in data.get("title", [])).strip() or "Untitled"
+                    return {
+                        "id": db_id,
+                        "label": title,
+                        "group": "",
+                        "icon": "📓",
+                        "name": title,
+                    }
+        except Exception:
+            pass
+        return None
+
+    load_more_cb = _load_nested if nested_count > 0 else None
+    load_more_label = f"Load {nested_count} more from sub-pages"
+
+    selected = await unified_source_selector(
+        title="Notion — Select Databases",
+        items=items,
+        load_more_callback=load_more_cb,
+        load_more_label=load_more_label,
+        paste_link_callback=_resolve_notion_link,
+    )
+
+    if not selected:
         c.print("  [dim]No databases selected[/dim]")
         return
 
     # Add selected databases
     added = 0
-    for db_id, title, _group in all_selected:
-        name = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") or "untitled"
+    for item in selected:
+        name = re.sub(r"[^a-z0-9]+", "_", item["name"].lower()).strip("_") or "untitled"
         config = {
             "source_type": "notion",
-            "database_id": db_id,
-            "description": title,
+            "database_id": item["id"],
+            "description": item["name"],
             "workspace": workspace,
             "sync_enabled": True,
             "include_properties": True,
@@ -956,6 +1017,235 @@ async def _browse_notion_databases(workspace, c=None):
             added += 1
 
     c.print(f"  [green]OK[/green] Added {added} database(s) to workspace [bold]{workspace}[/bold]")
+
+
+async def _browse_google_drive(workspace, c=None):
+    """Browse Google Drive and let user select folders/sheets to sync."""
+    import re
+    from promaia.auth.registry import get_integration
+    from promaia.config.databases import get_database_manager
+    from promaia.cli.setup_widgets import unified_source_selector
+
+    c = c or console
+
+    google = get_integration("google")
+    creds = google.get_google_credentials()
+    if not creds:
+        for acct in google.list_authenticated_accounts():
+            creds = google.get_google_credentials(acct)
+            if creds:
+                break
+    if not creds:
+        c.print("  [dim]No Google credentials found — skipping Drive browser[/dim]")
+        return
+
+    google_account = google.get_authenticated_email(creds) or ""
+
+    try:
+        from googleapiclient.discovery import build
+        drive_service = build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        c.print(f"  [yellow]Could not connect to Google Drive: {e}[/yellow]")
+        return
+
+    FOLDER_MIME = "application/vnd.google-apps.folder"
+    SHEET_MIME = "application/vnd.google-apps.spreadsheet"
+
+    # Track navigation state
+    current_folder_id = "root"
+    breadcrumb = [("My Drive", "root")]
+
+    db_manager = get_database_manager()
+    existing_ids = set()
+    for db_config in db_manager.get_workspace_databases(workspace):
+        existing_ids.add(db_config.database_id)
+
+    all_selected = []
+
+    while True:
+        # Fetch current folder contents
+        c.print(f"  [dim]Loading {'> '.join(name for name, _ in breadcrumb)}...[/dim]")
+        try:
+            results = drive_service.files().list(
+                q=f"'{current_folder_id}' in parents and trashed = false",
+                pageSize=50,
+                fields="files(id, name, mimeType, size, modifiedTime)",
+                orderBy="folder,name",
+            ).execute()
+            files = results.get("files", [])
+        except Exception as e:
+            c.print(f"  [yellow]Could not list Drive contents: {e}[/yellow]")
+            break
+
+        # Also fetch starred items if we're at root
+        starred_ids = set()
+        if current_folder_id == "root":
+            try:
+                starred_resp = drive_service.files().list(
+                    q="starred = true and trashed = false",
+                    pageSize=20,
+                    fields="files(id, name, mimeType, size, modifiedTime)",
+                    orderBy="modifiedTime desc",
+                ).execute()
+                starred = starred_resp.get("files", [])
+                starred_ids = {f["id"] for f in starred}
+                # Prepend starred items that aren't already in the listing
+                existing_file_ids = {f["id"] for f in files}
+                for sf in starred:
+                    if sf["id"] not in existing_file_ids:
+                        files.insert(0, sf)
+            except Exception:
+                pass
+
+        if not files:
+            c.print("  [dim]This folder is empty[/dim]")
+            if len(breadcrumb) > 1:
+                breadcrumb.pop()
+                current_folder_id = breadcrumb[-1][1]
+                continue
+            break
+
+        # Build items for the unified selector
+        items = []
+        folder_id_map = {}  # index → folder_id for cd-into
+        for f in files:
+            fid = f["id"]
+            name = f["name"]
+            mime = f.get("mimeType", "")
+            is_folder = mime == FOLDER_MIME
+            is_sheet = mime == SHEET_MIME
+
+            if fid in existing_ids:
+                continue  # already configured
+
+            icon = "📁" if is_folder else "📊" if is_sheet else "📄"
+            star = "⭐ " if fid in starred_ids else ""
+            meta = ""
+            if f.get("modifiedTime"):
+                meta = f["modifiedTime"][:10]
+
+            items.append({
+                "id": fid,
+                "label": f"{star}{name}",
+                "group": "",
+                "icon": icon,
+                "meta": meta,
+                "is_folder": is_folder,
+                "is_sheet": is_sheet,
+                "mime_type": mime,
+                "name": name,
+            })
+
+        if not items:
+            c.print("  [dim]All items in this folder are already configured[/dim]")
+            if len(breadcrumb) > 1:
+                breadcrumb.pop()
+                current_folder_id = breadcrumb[-1][1]
+                continue
+            break
+
+        # Add navigation items
+        if len(breadcrumb) > 1:
+            items.insert(0, {
+                "id": "__BACK__",
+                "label": ".. back",
+                "group": "",
+                "icon": "⬆️",
+                "meta": "",
+                "is_folder": True,
+            })
+
+        breadcrumb_str = " > ".join(name for name, _ in breadcrumb)
+
+        async def _resolve_drive_link(url):
+            """Extract file/folder ID from a Drive URL and look up metadata."""
+            import re as _re
+            # Try folder URL: drive.google.com/drive/folders/FOLDER_ID
+            m = _re.search(r'/folders/([a-zA-Z0-9_-]+)', url)
+            if not m:
+                # Try file URL: drive.google.com/file/d/FILE_ID
+                m = _re.search(r'/d/([a-zA-Z0-9_-]+)', url)
+            if not m:
+                # Try spreadsheet URL: docs.google.com/spreadsheets/d/ID
+                m = _re.search(r'/spreadsheets/d/([a-zA-Z0-9_-]+)', url)
+            if not m:
+                return None
+            file_id = m.group(1)
+            try:
+                meta = drive_service.files().get(
+                    fileId=file_id,
+                    fields="id, name, mimeType"
+                ).execute()
+                return {
+                    "id": meta["id"],
+                    "label": meta["name"],
+                    "group": "",
+                    "icon": "📁" if meta["mimeType"] == FOLDER_MIME else "📊" if meta["mimeType"] == SHEET_MIME else "📄",
+                    "is_folder": meta["mimeType"] == FOLDER_MIME,
+                    "is_sheet": meta["mimeType"] == SHEET_MIME,
+                    "mime_type": meta["mimeType"],
+                    "name": meta["name"],
+                }
+            except Exception:
+                return None
+
+        selected = await unified_source_selector(
+            title=f"Google Drive — {breadcrumb_str}",
+            items=items,
+            paste_link_callback=_resolve_drive_link,
+        )
+
+        if not selected:
+            break  # User cancelled
+
+        # Process selections
+        navigated = False
+        for item in selected:
+            if item["id"] == "__BACK__":
+                breadcrumb.pop()
+                current_folder_id = breadcrumb[-1][1]
+                navigated = True
+                break
+            if item.get("is_folder") and not item.get("selected", False):
+                # If only one folder selected and no files, cd into it
+                folder_selections = [s for s in selected if s.get("is_folder") and s["id"] != "__BACK__"]
+                non_folder = [s for s in selected if not s.get("is_folder")]
+                if len(folder_selections) == 1 and not non_folder:
+                    breadcrumb.append((item["name"], item["id"]))
+                    current_folder_id = item["id"]
+                    navigated = True
+                    break
+
+        if navigated:
+            continue
+
+        # Add selected items as database configs
+        all_selected.extend(selected)
+        break
+
+    if not all_selected:
+        c.print("  [dim]No sources selected[/dim]")
+        return
+
+    added = 0
+    for item in all_selected:
+        if item["id"] == "__BACK__":
+            continue
+        name = re.sub(r"[^a-z0-9]+", "_", item.get("name", item["label"]).lower()).strip("_") or "untitled"
+        source_type = "google_sheets" if item.get("is_sheet") else "google_drive"
+        config = {
+            "source_type": source_type,
+            "database_id": item["id"],
+            "google_account": google_account,
+            "description": item.get("name", item["label"]),
+            "workspace": workspace,
+            "sync_enabled": True,
+            "default_days": 7,
+        }
+        if db_manager.add_database(name, config, workspace):
+            added += 1
+
+    c.print(f"  [green]OK[/green] Added {added} source(s) to workspace [bold]{workspace}[/bold]")
 
 
 async def _multi_select_flat(databases, c):

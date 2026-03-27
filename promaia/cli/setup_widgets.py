@@ -377,6 +377,8 @@ class SetupProgress:
     """Tracks and renders setup progress as a footer line."""
 
     FULL_STEPS = ["Workspace", "AI", "Notion", "Google", "Slack", "Sync", "Agent"]
+    # Compact labels for narrow terminals
+    COMPACT_LABELS = {"Workspace": "WS", "Notion": "Not", "Google": "Goo", "Slack": "Slk", "Agent": "Agt"}
 
     def __init__(self, steps: Optional[List[str]] = None, console: Optional[Console] = None):
         self.steps = steps or self.FULL_STEPS
@@ -415,18 +417,29 @@ class SetupProgress:
             "pending": "[dim]○[/dim]",
             "skipped": "[dim]–[/dim]",
         }
+        # Use compact labels if terminal is narrow
+        try:
+            term_width = self.console.width or 80
+        except Exception:
+            term_width = 80
+        use_compact = term_width < 75
+
         parts = []
         for step in self.steps:
             icon = icons.get(self.states[step], "○")
-            style = "bold" if self.states[step] == "current" else "dim" if self.states[step] in ("pending", "skipped") else ""
-            if style:
-                parts.append(f"[{style}]{step}[/{style}] {icon}")
+            label = self.COMPACT_LABELS.get(step, step) if use_compact else step
+            state = self.states[step]
+            if state == "current":
+                parts.append(f"[bold]{label}[/bold] {icon}")
+            elif state in ("pending", "skipped"):
+                parts.append(f"[dim]{label}[/dim] {icon}")
             else:
-                parts.append(f"{step} {icon}")
+                parts.append(f"{label} {icon}")
 
-        line = " ── ".join(parts)
+        sep = "─" if use_compact else "──"
+        line = f" {sep} ".join(parts)
         self.console.print()
-        self.console.print(f"  [dim]{'─' * 60}[/dim]")
+        self.console.print(f"  [dim]{'─' * min(60, term_width - 4)}[/dim]")
         self.console.print(f"  {line}")
 
         # Show current step description
