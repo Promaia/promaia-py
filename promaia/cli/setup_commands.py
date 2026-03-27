@@ -36,6 +36,44 @@ from promaia.utils.env_writer import (
 console = Console()
 
 
+# ── Connector descriptions ────────────────────────────────────────────
+
+CONNECTOR_DESCRIPTIONS = {
+    "notion": "Select the databases you use most",
+    "google": "Select the sheets and folders you use often",
+    "slack": "Option 1 for where you'll interact with Promaia — select the channels you want Promaia to have access to",
+    "discord": "Option 2 for where you'll interact with Promaia — select the channels you want Promaia to have access to",
+    "ai": "Which AI model powers Promaia's brain — we recommend Anthropic or OpenRouter",
+}
+
+
+def _has_valid_credentials(integration_name: str) -> bool:
+    """Check if an integration already has valid credentials."""
+    try:
+        from promaia.auth.registry import get_integration
+        integration = get_integration(integration_name)
+        if integration and integration.get_default_credential():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _confirm_skip_auth(name: str) -> bool:
+    """Check if credentials exist and ask whether to reconfigure.
+
+    Returns True if auth should be skipped (already configured + user says no to reconfigure).
+    """
+    if _has_valid_credentials(name):
+        console.print(f"  [green]✓[/green] {name.title()} already connected")
+        try:
+            answer = input("  Reconfigure? [y/N]: ").strip().lower()
+            return answer not in ("y", "yes")
+        except (KeyboardInterrupt, EOFError):
+            return True
+    return False
+
+
 # ── Docker detection ─────────────────────────────────────────────────
 
 
@@ -114,6 +152,17 @@ async def _run_setup(args):
 
     from promaia.auth.registry import get_ai_integrations, get_integration
     from promaia.auth.flow import configure_credential
+    from promaia.cli.setup_widgets import SetupProgress
+
+    # Progress footer
+    progress = SetupProgress(console=console)
+    progress.set_description("Workspace", "Name your Promaia workspace")
+    progress.set_description("AI", CONNECTOR_DESCRIPTIONS["ai"])
+    progress.set_description("Notion", CONNECTOR_DESCRIPTIONS["notion"])
+    progress.set_description("Google", CONNECTOR_DESCRIPTIONS["google"])
+    progress.set_description("Slack", CONNECTOR_DESCRIPTIONS["slack"])
+    progress.set_description("Sync", "Syncing your data sources")
+    progress.set_description("Agent", "Create your first agent")
 
     # Step 1: Ensure config file exists
     if ensure_config_file():
@@ -125,58 +174,96 @@ async def _run_setup(args):
         )
 
     # Step 2: Name your workspace
-    console.print()
-    console.print("[bold]Name your Promaia workspace[/bold]\n")
+    progress.render()
     workspace_slug = _setup_workspace(console)
+    progress.advance()
 
     # Step 3: AI provider
-    console.print()
-    integrations = get_ai_integrations()
-    selected = await _select_provider(integrations)
-    if selected:
-        await _safe_step(configure_credential(selected, console), "AI provider")
+    progress.render()
+    try:
+        skip_ai = input("  Connect an AI provider? [Y/n]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        skip_ai = "n"
+    if skip_ai not in ("n", "no"):
+        integrations = get_ai_integrations()
+        selected = await _select_provider(integrations)
+        if selected:
+            await _safe_step(configure_credential(selected, console), "AI provider")
+    else:
+        selected = None
+    progress.advance()
 
     # Step 4: Connect Notion
-    console.print()
-    notion = get_integration("notion")
-    notion_success = await _safe_step(configure_credential(notion, console), "Notion")
+    progress.render()
+    notion_success = False
+    try:
+        skip_notion = input("  Connect Notion? [Y/n]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        skip_notion = "n"
+    if skip_notion not in ("n", "no"):
+        if _confirm_skip_auth("notion"):
+            notion_success = True
+        else:
+            notion = get_integration("notion")
+            notion_success = await _safe_step(configure_credential(notion, console), "Notion")
+            if notion_success and workspace_slug:
+                _copy_notion_creds_to_workspace(notion, workspace_slug)
 
-    # Copy Notion credentials to workspace if needed
-    if notion_success and workspace_slug:
-        _copy_notion_creds_to_workspace(notion, workspace_slug)
+        if workspace_slug:
+            console.print()
+            console.print("[bold]Select Notion databases to sync[/bold]\n")
+            await _safe_step(
+                _browse_notion_databases(workspace_slug, console),
+                "database selection"
+            )
+        progress.advance()
+    else:
+        progress.skip()
 
-    # Step 5: Select Notion databases
-    if workspace_slug:
-        console.print()
-        console.print("[bold]Select Notion databases to sync[/bold]\n")
-        await _safe_step(
-            _browse_notion_databases(workspace_slug, console),
-            "database selection"
-        )
+    # Step 5: Connect Google
+    progress.render()
+    try:
+        skip_google = input("  Connect Google? [Y/n]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        skip_google = "n"
+    if skip_google not in ("n", "no"):
+        if not _confirm_skip_auth("google"):
+            google = get_integration("google")
+            await _safe_step(configure_credential(google, console), "Google")
+        progress.advance()
+    else:
+        progress.skip()
 
-    # Step 6: Connect Google
-    console.print()
-    google = get_integration("google")
-    await _safe_step(configure_credential(google, console), "Google")
+    # Step 6: Connect Slack
+    progress.render()
+    slack_success = False
+    try:
+        skip_slack = input("  Connect Slack? [Y/n]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        skip_slack = "n"
+    if skip_slack not in ("n", "no"):
+        if not _confirm_skip_auth("slack"):
+            slack_success = await _safe_step(
+                _setup_slack(workspace_slug, console),
+                "Slack"
+            )
+        else:
+            slack_success = True
+        progress.advance()
+    else:
+        progress.skip()
 
-    # Step 7: Connect Slack
-    console.print()
-    slack_success = await _safe_step(
-        _setup_slack(workspace_slug, console),
-        "Slack"
-    )
-
-    # Step 8: Initial sync
+    # Step 7: Initial sync
+    progress.render()
     workspace_dbs = []
     if workspace_slug:
         from promaia.config.databases import get_database_manager
         db_manager = get_database_manager()
         workspace_dbs = db_manager.get_workspace_databases(workspace_slug)
         if workspace_dbs:
-            console.print()
-            console.print("[bold]Syncing your data[/bold]\n")
             console.print(f"  [dim]Syncing {len(workspace_dbs)} source(s)...[/dim]")
             await _safe_step(_run_initial_sync(workspace_slug), "initial sync")
+    progress.advance()
 
     # Step 9: Create first agent
     if selected:  # Only offer if an AI provider was configured
@@ -265,17 +352,29 @@ async def _run_single_service_setup(service):
     service = service.lower().strip()
 
     if service == "slack":
-        await _setup_slack(workspace, console)
+        if not _confirm_skip_auth("slack"):
+            await _setup_slack(workspace, console)
+        else:
+            # Already authed — jump to channel selection
+            try:
+                slack = get_integration("slack")
+                cred = slack.get_default_credential()
+                if cred:
+                    await _browse_slack_channels(workspace, cred, console)
+            except Exception:
+                pass
     elif service == "notion":
-        notion = get_integration("notion")
-        await configure_credential(notion, console)
-        _copy_notion_creds_to_workspace(notion, workspace)
+        if not _confirm_skip_auth("notion"):
+            notion = get_integration("notion")
+            await configure_credential(notion, console)
+            _copy_notion_creds_to_workspace(notion, workspace)
         console.print()
-        console.print("[bold]Select Notion databases to sync[/bold]\n")
+        console.print(f"[bold]{CONNECTOR_DESCRIPTIONS['notion']}[/bold]\n")
         await _browse_notion_databases(workspace, console)
     elif service == "google":
-        google = get_integration("google")
-        await configure_credential(google, console)
+        if not _confirm_skip_auth("google"):
+            google = get_integration("google")
+            await configure_credential(google, console)
     elif service in ("llm", "ai", "openrouter", "anthropic"):
         from promaia.auth.registry import get_ai_integrations
         integrations = get_ai_integrations()
@@ -423,7 +522,15 @@ async def _setup_slack(workspace, c=None):
             c.print("  [dim]Reconfiguring...[/dim]\n")
 
     c.print("[bold]Connect Slack[/bold]\n")
-    c.print("  Create your Slack bot:")
+    c.print(f"  [dim]{CONNECTOR_DESCRIPTIONS['slack']}[/dim]\n")
+    c.print("  To connect Slack, you'll create a bot app:\n")
+    c.print("    1. Click the link below (or scan the QR code)")
+    c.print("    2. Pick your Slack workspace when prompted")
+    c.print("    3. Click \"Create\" to install the bot")
+    c.print("    4. Go to \"OAuth & Permissions\" → copy the Bot Token (starts with xoxb-)")
+    c.print("    5. Go to \"Basic Information\" → scroll to \"App-Level Tokens\"")
+    c.print("       → create one with [bold]connections:write[/bold] scope → copy it (starts with xapp-)")
+    c.print("    6. Paste both tokens below\n")
     c.print("  Visit: [link=https://oauth.promaia.workers.dev/slack]https://oauth.promaia.workers.dev/slack[/link]\n")
 
     # QR code
@@ -433,7 +540,7 @@ async def _setup_slack(workspace, c=None):
     except Exception:
         pass
 
-    c.print("  [dim]After creating the bot, copy the two tokens below.[/dim]\n")
+    c.print()
 
     # Collect tokens
     bot_token = Prompt.ask("  Bot Token (xoxb-...)").strip()
