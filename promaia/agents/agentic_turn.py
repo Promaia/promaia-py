@@ -786,6 +786,37 @@ CALENDAR_READ_TOOL_DEFINITIONS = [
     },
 ]
 
+CALENDAR_MANAGEMENT_TOOL_DEFINITIONS = [
+    {
+        "name": "list_calendars",
+        "description": "List all calendars the user has access to (owned, subscribed, agent calendars).",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "create_calendar",
+        "description": "Create a new calendar.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Calendar name"},
+                "description": {"type": "string", "description": "Calendar description (optional)"},
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "delete_calendar",
+        "description": "Delete a calendar by ID. Cannot delete the user's primary calendar.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "calendar_id": {"type": "string", "description": "Calendar ID to delete"}
+            },
+            "required": ["calendar_id"]
+        }
+    },
+]
+
 WEB_SEARCH_TOOL_DEFINITIONS = [{
     "name": "web_search",
     "description": (
@@ -2365,6 +2396,7 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     if "calendar" in mcp_tools:
         tools.extend(CALENDAR_TOOL_DEFINITIONS)
         tools.extend(CALENDAR_READ_TOOL_DEFINITIONS)
+        tools.extend(CALENDAR_MANAGEMENT_TOOL_DEFINITIONS)
         if getattr(agent, 'calendar_id', None):
             tools.append(SCHEDULE_SELF_TOOL_DEFINITION)
         # Always include schedule_agent_event — calendar may be created mid-session
@@ -2450,13 +2482,13 @@ def _build_tool_suite_registry(agent, has_platform: bool = False) -> Dict[str, D
 
     # Calendar
     if "calendar" in mcp_tools:
-        tools = list(CALENDAR_TOOL_DEFINITIONS) + list(CALENDAR_READ_TOOL_DEFINITIONS)
+        tools = list(CALENDAR_TOOL_DEFINITIONS) + list(CALENDAR_READ_TOOL_DEFINITIONS) + list(CALENDAR_MANAGEMENT_TOOL_DEFINITIONS)
         tools.append(SCHEDULE_AGENT_EVENT_TOOL_DEFINITION)
         if getattr(agent, 'calendar_id', None):
             tools.append(SCHEDULE_SELF_TOOL_DEFINITION)
         registry["calendar"] = {
             "tools": tools,
-            "description": "create/update/delete events, list, schedule",
+            "description": "events, scheduling, calendar management (list/create/delete calendars)",
             "count": len(tools),
         }
 
@@ -2677,6 +2709,13 @@ class ToolExecutor:
                 return await self._list_calendar_events(tool_input)
             elif tool_name == "get_calendar_event":
                 return await self._get_calendar_event(tool_input)
+            # Calendar management
+            elif tool_name == "list_calendars":
+                return await self._list_calendars(tool_input)
+            elif tool_name == "create_calendar":
+                return await self._create_calendar(tool_input)
+            elif tool_name == "delete_calendar":
+                return await self._delete_calendar(tool_input)
             # Web search & fetch
             elif tool_name == "web_search":
                 return await self._web_search(tool_input)
@@ -3787,6 +3826,60 @@ class ToolExecutor:
             return "\n".join(parts)
         except Exception as e:
             return f"Error getting calendar event: {e}"
+
+    # ── Calendar management tools ────────────────────────────────────────
+
+    async def _list_calendars(self, tool_input: Dict) -> str:
+        await self._ensure_calendar()
+        try:
+            resp = await asyncio.to_thread(
+                self._calendar_service.calendarList().list().execute
+            )
+            calendars = resp.get("items", [])
+            lines = [f"Calendars ({len(calendars)}):\n"]
+            for cal in calendars:
+                primary = " (primary)" if cal.get("primary") else ""
+                access = cal.get("accessRole", "")
+                lines.append(
+                    f"- **{cal.get('summary', '(untitled)')}**{primary}\n"
+                    f"  ID: {cal['id']}\n"
+                    f"  Access: {access}"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error listing calendars: {e}"
+
+    async def _create_calendar(self, tool_input: Dict) -> str:
+        await self._ensure_calendar()
+        name = tool_input.get("name", "").strip()
+        if not name:
+            return "Error: calendar name is required."
+        description = tool_input.get("description", "")
+        try:
+            body = {"summary": name}
+            if description:
+                body["description"] = description
+            cal = await asyncio.to_thread(
+                self._calendar_service.calendars().insert(body=body).execute
+            )
+            return f"Calendar created: **{cal['summary']}** (ID: {cal['id']})"
+        except Exception as e:
+            return f"Error creating calendar: {e}"
+
+    async def _delete_calendar(self, tool_input: Dict) -> str:
+        await self._ensure_calendar()
+        calendar_id = tool_input.get("calendar_id", "").strip()
+        if not calendar_id:
+            return "Error: calendar_id is required."
+        if calendar_id == "primary":
+            return "Cannot delete the primary calendar."
+        try:
+            await asyncio.to_thread(
+                self._calendar_service.calendars().delete(calendarId=calendar_id).execute
+            )
+            return f"Calendar deleted: {calendar_id}"
+        except Exception as e:
+            return f"Error deleting calendar: {e}"
 
     # ── Google Sheets tools ─────────────────────────────────────────────
 
