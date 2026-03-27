@@ -106,19 +106,64 @@ Stored in `conversation_content` table (same as terminal):
 - `created_time`: conversation start
 - `last_edited_time`: last message
 
-## Open Questions
+## Incognito Mode
 
-1. **Should channel conversations (not just DMs) also save?** When Promaia is @mentioned in #general and has a multi-turn thread, should that save too?
+### Design
 
-2. **Privacy**: Should there be a flag to disable conversation saving for specific users or channels?
+Incognito is **per-conversation, not persistent.** No toggle to forget about.
 
-3. **Deduplication**: If Slack channels are already synced via the Slack connector daemon, DM saves could duplicate. Need to ensure the conversation save path and the sync daemon don't collide.
+- User types `/incognito` → that conversation becomes incognito
+- Next conversation (after 30-min timeout or `/new`) → back to normal automatically
+- No way to make it "default on" — always a conscious choice
 
-4. **Summary generation**: Should we use Haiku to generate a one-liner summary when saving? Or just use the first message as the title?
+### UX
+
+**Turning on:**
+```
+User: /incognito
+Maia: 🕶️ Incognito mode — this conversation won't be saved. Resets next conversation.
+```
+
+**During incognito conversation:**
+- Subtle 🕶️ indicator in thinking/status updates so user remembers
+- Promaia functions normally — just doesn't save when the conversation ends
+
+**When conversation ends (timeout or /new):**
+```
+Maia: 🕶️ Incognito conversation ended — nothing was saved.
+```
+
+**Next conversation starts (normal):**
+```
+Maia: 💬 Conversation saving is on. (Type /incognito to go private.)
+```
+
+### Scope
+
+- **DMs only** — channels are synced via the Slack connector, not through conversation saving
+- Incognito skips the save-to-database step at conversation boundary
+- Implementation: `state.context["incognito"] = True` → save trigger checks and skips
+
+### Why per-conversation not persistent
+
+Forces intentionality. User must actively choose incognito each time. No risk of "forgot it was on" and losing weeks of conversation history.
+
+## Answered Questions
+
+1. **Channel conversations**: Channels sync via Slack connector daemon, not conversation saving. Only DMs save through this path. Channel @mention threads are already captured by sync.
+
+2. **Privacy**: Incognito mode (above). Per-conversation, DMs only.
+
+3. **Deduplication**: Not an issue — DMs don't sync via the Slack connector (only channels do). DM save path and channel sync path are separate.
+
+4. **Summary generation**: TBD — Haiku auto-summary or first message as title. Can start simple (first message) and add Haiku later.
 
 ## Implementation Order
 
 1. Add `_save_conversation_to_history()` to conversation_manager
 2. Trigger on DM timeout and `/new` command
-3. Verify conversations appear in `query_source("convos")`
-4. Test cross-platform recall
+3. Add `/incognito` command to slack_bot.py
+4. Check `state.context["incognito"]` before saving
+5. Clear communication on mode transitions
+6. Verify conversations appear in `query_source("convos")`
+7. Test cross-platform recall
