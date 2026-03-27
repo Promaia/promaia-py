@@ -630,6 +630,29 @@ class ConversationManager:
 
             output = result.response_text
 
+            # Log the turn for debugging (separate from terminal logs)
+            try:
+                from promaia.utils.env_writer import get_data_dir
+                platform_name = state.platform or "messaging"
+                log_dir = get_data_dir() / "context_logs" / f"{platform_name}_turn_logs"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                agent_name = getattr(agent, 'name', state.agent_id)
+                log_path = log_dir / f"{ts}_{agent_name}.md"
+                log_content = (
+                    f"# {platform_name} turn — {agent_name}\n\n"
+                    f"## System Prompt\n\n{system_prompt[:2000]}...\n\n"
+                    f"## Messages ({len(messages)})\n\n"
+                )
+                for msg in messages[-5:]:
+                    content = msg.get('content', '')
+                    if isinstance(content, str):
+                        log_content += f"**{msg['role']}**: {content[:200]}\n\n"
+                log_content += f"## Response\n\n{output[:1000]}\n"
+                log_path.write_text(log_content)
+            except Exception:
+                pass
+
             # Persist notepad and source states for next turn
             if result.notepad_content is not None:
                 state.context['notepad_content'] = result.notepad_content
@@ -659,17 +682,26 @@ class ConversationManager:
             return f"I'm sorry, I encountered an error ({type(e).__name__}: {e}). Please try again."
 
     def _build_conversation_system_prompt(self, agent, state: ConversationState) -> str:
-        """Build the system prompt for conversation mode.
+        """Build the base system prompt for conversation mode.
 
-        Loads the agent's personality prompt and the conversation_mode.md
-        template from the prompts directory, filling in dynamic variables.
+        Uses the same create_system_prompt() as terminal chat for the base
+        (prompt.md + database preview), then adds platform-specific context.
+        The conversation_mode.md template is added later by run_agentic_turn()
+        via build_agentic_system_prompt().
         """
-        from promaia.utils.env_writer import get_prompts_dir
+        from promaia.ai.prompts import create_system_prompt
 
-        # ── Agent personality ──────────────────────────────────────────
+        # Build the same base prompt as terminal chat
+        # (prompt.md + database preview + context data)
+        base_prompt = create_system_prompt(
+            multi_source_data={},  # No pre-loaded context — agentic loop handles this
+            mcp_tools_info=None,
+            include_query_tools=False,  # agentic loop has its own tools
+            workspace=agent.workspace,
+        )
+
+        # Add agent personality if it has one
         prompt_value = agent.prompt_file or ""
-
-        # Check if it's a file path
         looks_like_path = (
             isinstance(prompt_value, str)
             and "\n" not in prompt_value
@@ -686,130 +718,21 @@ class ConversationManager:
             except OSError:
                 pass
 
-        # ── Date/time ──────────────────────────────────────────────────
-        try:
-            import zoneinfo
-            local_tz = zoneinfo.ZoneInfo("America/Los_Angeles")
-        except Exception:
-            local_tz = timezone.utc
-        now = datetime.now(local_tz)
+        if prompt_value:
+            base_prompt = prompt_value + "\n\n" + base_prompt
 
-        # ── Header ─────────────────────────────────────────────────────
-        parts = [
-            prompt_value,
-            "",
-            f"Current date: {now.strftime('%A, %B %d, %Y %I:%M %p %Z')}",
-            "",
-        ]
-
-        # ── Conversation mode template ─────────────────────────────────
-        agentic_enabled = getattr(agent, 'agentic_loop_enabled', True)
-
-        if agentic_enabled:
-            conv_prompt_path = get_prompts_dir() / "conversation_mode.md"
-            if conv_prompt_path.is_file():
-                template = conv_prompt_path.read_text(encoding="utf-8")
-
-                # Fill in template variables
-                queryable = agent.get_queryable_sources()
-                sources_list = ", ".join(queryable) if queryable else "(none configured)"
-
-                # Build conditional tool sections
-                mcp_tools = getattr(agent, 'mcp_tools', []) or []
-                tool_sections_parts = []
-
-                if "gmail" in mcp_tools:
-                    tool_sections_parts.append(
-                        "## Gmail Tools (Write)\n\n"
-                        "- **send_email**: Send email (to, subject, body)\n"
-                        "- **create_email_draft**: Create draft (not sent)\n"
-                        "- **reply_to_email**: Reply to a thread (thread_id, message_id, body)\n"
-                        "  Always search for the thread first to get the thread_id and message_id."
-                    )
-                if "calendar" in mcp_tools:
-                    cal_section = (
-                        "## Calendar Tools (Write)\n\n"
-                        "- **create_calendar_event**: Create event on the **user's** calendar (summary, start_time, end_time)\n"
-                        "- **update_calendar_event**: Update event (event_id + fields to change)\n"
-                        "- **delete_calendar_event**: Delete event (event_id)\n"
-                        "  Always check for conflicts with query_sql before creating events."
-                    )
-                    if getattr(agent, 'calendar_id', None):
-                        cal_section += (
-                            "\n\n## Self-Scheduling\n\n"
-                            "- **schedule_self**: Schedule a future task for **yourself**. Creates an event "
-                            "on your own dedicated calendar that will trigger you to run at the specified time.\n"
-                            "  - Use for: reminders, follow-ups, multi-step workflows spanning hours/days\n"
-                            "  - Params: summary (required), start_time (required), end_time (optional), "
-                            "description (optional — include context for your future self)\n\n"
-                            "### Which calendar tool to use\n\n"
-                            "- User says \"put X on my calendar\" / \"schedule a meeting\" → **create_calendar_event** (user's calendar)\n"
-                            "- You need to follow up later / check on something tomorrow / continue a workflow → **schedule_self** (your calendar)"
-                        )
-                    tool_sections_parts.append(cal_section)
-                if "notion" in mcp_tools:
-                    tool_sections_parts.append(
-                        "## Notion Tools (Read & Write)\n\n"
-                        "- **notion_search**: Search Notion for pages/databases by title\n"
-                        "- **notion_create_page**: Create a new page in a Notion database\n"
-                        "- **notion_update_page**: Update an existing page's properties or content\n"
-                        "- **notion_query_database**: Query a Notion database with filters"
-                    )
-
-                tool_sections = "\n\n".join(tool_sections_parts)
-
-                # Notion-specific guidance
-                notion_guidance = ""
-                if "notion" in mcp_tools:
-                    notion_guidance = (
-                        "## Built-in query tools vs Notion tools\n\n"
-                        "- **Prefer built-in query tools** (query_sql, query_vector, query_source) "
-                        "for loading large chunks of context from synced data. They are cheaper, "
-                        "faster, and more effective for anything that has had time to be synced.\n"
-                        "- **Use Notion tools** for transient, specific pages — especially ones "
-                        "you are actively creating or editing in this session, or anything that "
-                        "may have been updated very recently and not yet synced.\n"
-                        "- After creating a Notion page, use the URL from the create response "
-                        "to share links — do not construct Notion URLs manually."
-                    )
-
-                # Apply template substitutions
-                agent_name = getattr(agent, 'name', None) or getattr(agent, 'agent_id', 'Agent')
-                filled = template.replace("{agent_name}", agent_name)
-                filled = filled.replace("{platform}", state.platform or "chat")
-                filled = filled.replace("{sources}", sources_list)
-                filled = filled.replace("{tool_sections}", tool_sections)
-                filled = filled.replace("{notion_guidance}", notion_guidance)
-
-                parts.append(filled)
-            else:
-                # Fallback: minimal instructions if template file is missing
-                logger.warning(f"conversation_mode.md not found at {conv_prompt_path}")
-                parts.extend([
-                    "# Conversation Mode",
-                    "",
-                    f"You are in a {state.platform} conversation.",
-                    "Keep responses concise, warm, and natural.",
-                ])
-        else:
-            parts.extend([
-                "# Conversation Mode",
-                "",
-                f"You are in a {state.platform} conversation.",
-                "Keep responses concise, warm, and natural — like messaging a colleague.",
-                "Don't repeat information already covered. Build on what's been said.",
-            ])
-
-        # Inject DM-specific context
+        # Add platform-specific context
         ctx = state.context or {}
         if ctx.get("is_dm"):
             user_name = ctx.get("user_name", "the user")
-            parts.append("")
-            parts.append(f"## Conversation Location")
-            parts.append(f"You are in a direct message with {user_name}. This is a private 1-on-1 conversation.")
-            parts.append("Respond to every message — in DMs there is no need to decide whether to reply.")
+            base_prompt += (
+                f"\n\n## Conversation Location\n"
+                f"You are in a direct message with {user_name}. "
+                f"This is a private 1-on-1 conversation. "
+                f"Respond to every message — in DMs there is no need to decide whether to reply."
+            )
 
-        return "\n".join(parts)
+        return base_prompt
 
     async def _load_conversation_context(self, agent) -> str:
         """Load preloaded context for conversation (lighter than full executor)."""
