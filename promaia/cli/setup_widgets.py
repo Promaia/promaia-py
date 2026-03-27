@@ -315,12 +315,29 @@ async def unified_source_selector(
             paste_input[0] = paste_input[0][:-1]
             event.app.layout = _make_layout()
 
+    @kb.add(Keys.ControlV)
+    def _paste_clipboard(event):
+        if mode != "paste":
+            return
+        # Get clipboard content via prompt_toolkit
+        try:
+            from prompt_toolkit.clipboard import ClipboardData
+            clip = event.app.clipboard.get_data()
+            if clip and clip.text:
+                paste_input[0] += clip.text.strip()
+        except Exception:
+            pass
+        event.app.layout = _make_layout()
+
     @kb.add(Keys.Any)
     def _char(event):
         if mode != "paste":
             return
         data = event.data
-        if len(data) == 1 and ord(data) >= 32:
+        # Handle pasted multi-character input (some terminals send paste as bulk text)
+        if len(data) > 1:
+            paste_input[0] += data.strip()
+        elif len(data) == 1 and ord(data) >= 32:
             paste_input[0] += data
         event.app.layout = _make_layout()
 
