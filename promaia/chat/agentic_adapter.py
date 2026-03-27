@@ -690,7 +690,8 @@ async def run_agentic_turn(
     if workflow_prompt:
         enhanced_prompt = workflow_prompt + "\n\n" + enhanced_prompt
 
-    # Split prompt into base + context block for compact_context support
+    # Split prompt into base + context block (library architecture)
+    # Context goes to library (available on demand), NOT injected by default
     context_marker = "\n\n## Context ("
     context_data_block = ""
     if context_marker in enhanced_prompt:
@@ -698,6 +699,27 @@ async def run_agentic_turn(
         base_prompt_part = enhanced_prompt[:split_idx]
         context_data_block = enhanced_prompt[split_idx:]
         enhanced_prompt = base_prompt_part
+
+        # Store full context in library on the executor
+        executor._library_context = context_data_block
+
+        # Build library index for the prompt (source names + page counts)
+        import re
+        db_headers = re.findall(
+            r'### === (.+?) DATABASE \((\d+) entries\) ===',
+            context_data_block,
+        )
+        if db_headers:
+            index_lines = [
+                "## Library (available context)\n",
+                "You have these sources loaded in your library. Use query tools "
+                "(query_sql, query_vector) for targeted lookups, or call "
+                "visit_library to read through everything and take notes.\n",
+            ]
+            for db_name, count in db_headers:
+                index_lines.append(f"- {db_name}: {count} entries")
+            executor._library_index = "\n".join(index_lines)
+            enhanced_prompt += "\n\n" + executor._library_index
 
     # Build activity callback
     activity_cb = make_terminal_activity_callback(print_text_fn)

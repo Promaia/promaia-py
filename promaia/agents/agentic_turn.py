@@ -1283,6 +1283,22 @@ NOTEPAD_TOOL_DEFINITION = {
     }
 }
 
+VISIT_LIBRARY_TOOL_DEFINITION = {
+    "name": "visit_library",
+    "description": (
+        "Enter the library to see ALL loaded context from the browser-selected "
+        "sources. Use this when you need the big picture or your notes don't "
+        "cover what the user is asking about. Full context is only visible for "
+        "one step — read through it and take notes on what's relevant using "
+        "the notepad tool, then continue working from your notes."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+}
+
 TASK_QUEUE_TOOL_DEFINITIONS = [
     {
         "name": "task_queue_add",
@@ -2201,6 +2217,9 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     # Notepad — always available (persistent notes across turns)
     tools.append(NOTEPAD_TOOL_DEFINITION)
 
+    # Library visit — always available
+    tools.append(VISIT_LIBRARY_TOOL_DEFINITION)
+
     # Config tools — always available
     tools.extend(CONFIG_TOOL_DEFINITIONS)
 
@@ -2254,6 +2273,9 @@ class ToolExecutor:
         self._sandbox = Sandbox()
         # Persistent notepad (survives across turns within a conversation)
         self._notepad = ""
+        # Library context (full loaded context, available on demand)
+        self._library_context = ""
+        self._library_index = ""
         # External MCP server connections
         self._mcp_client = None        # McpClient instance
         self._mcp_tool_map = {}        # namespaced_name → (server_name, original_name)
@@ -2331,6 +2353,11 @@ class ToolExecutor:
             # Notepad (persistent notes across turns)
             elif tool_name == "notepad":
                 return self._notepad_action(tool_input)
+            # Library visit (sentinel — handled by the agentic loop)
+            elif tool_name == "visit_library":
+                if not self._library_context:
+                    return "Library is empty — no sources were loaded in the browser."
+                return "__VISIT_LIBRARY__"
             # Config tools
             elif tool_name == "list_source_types":
                 return await self._list_source_types()
@@ -6357,6 +6384,8 @@ async def agentic_turn(
 
     # Context compact tracking — agent can compact with notes or restore
     context_notes: Optional[str] = None
+    # Library visit tracking — when True, next iteration includes full library context
+    visiting_library: bool = False
 
     # Copy messages — tool_use/tool_result blocks stay internal only
     # Format any messages with images into Anthropic multimodal content blocks
@@ -6391,12 +6420,15 @@ async def agentic_turn(
             f"iterations remaining]"
         )
 
-        # Build effective prompt: include context block only when not muted
+        # Build effective prompt based on context state
         effective_prompt = system_prompt
-        if context_data_block and context_notes is None:
+        if visiting_library and context_data_block:
+            # Library visit: inject full context for this one iteration
             effective_prompt = system_prompt + context_data_block
+            visiting_library = False  # One-shot: remove after this iteration
         elif context_notes is not None:
             effective_prompt = system_prompt + "\n\n## Context (compacted)\n\n" + context_notes
+        # Note: if not visiting and no notes, context stays out of prompt (library model)
 
         # Proactive context trimming before API call
         from promaia.agents.context_trimmer import trim_context_to_fit
@@ -6569,6 +6601,11 @@ async def agentic_turn(
             elif result_text == "__CONTEXT_RESTORE__":
                 context_notes = None
                 result_text = "Context restored to full loaded data. Query tools still work normally."
+
+            # Library visit — inject full library for the NEXT iteration only
+            elif result_text == "__VISIT_LIBRARY__":
+                visiting_library = True
+                result_text = "Entering library — full context will be available on your next step. Read through it and take notes with the notepad tool."
 
             # Handle interview sentinels — break out of loop and return with signal
             elif result_text.startswith("__INTERVIEW_START__:"):
