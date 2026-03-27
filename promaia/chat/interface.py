@@ -36,7 +36,7 @@ from promaia.storage.chat_history import ChatHistoryManager
 from promaia.storage.recents import RecentsManager
 from promaia.utils.query_parsing import parse_vs_queries_with_params
 
-import google.generativeai as genai
+from google import genai
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -245,15 +245,24 @@ if not openrouter_client and os.getenv("OPENROUTER_API_KEY"):
     )
 
 gemini_client = None
+_gemini_genai_client = None
+_gemini_model_name = None
 if os.getenv("GOOGLE_API_KEY"):
-    genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+    _gemini_genai_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
     from promaia.ai.models import get_current_google_model, GOOGLE_MODELS
-    # Use selected model ID if available, otherwise use default
     selected_model = os.getenv("SELECTED_MODEL_ID")
     if selected_model and "gemini" in selected_model.lower():
-        gemini_client = genai.GenerativeModel(selected_model)
+        _gemini_model_name = selected_model
     else:
-        gemini_client = genai.GenerativeModel(get_current_google_model())
+        _gemini_model_name = get_current_google_model()
+
+def _gemini_generate(prompt, model_name=None):
+    """Generate content using the new google-genai SDK."""
+    if not _gemini_genai_client:
+        raise RuntimeError("Gemini not configured")
+    model = model_name or _gemini_model_name
+    response = _gemini_genai_client.models.generate_content(model=model, contents=prompt)
+    return response
 
 current_api = get_api_preference()
 os.environ["API_TYPE"] = current_api
@@ -5735,19 +5744,21 @@ The user will type `/send` to trigger the actual sending process.
                 response_text_with_tools = None
                 try:
                     if current_message_images:
-                        current_gemini_model, gemini_messages = _format_gemini_with_images(current_system_prompt, messages, current_message_images)
-                        response = current_gemini_model.generate_content(
+                        _gmodel, _gsys, gemini_messages = _format_gemini_with_images(current_system_prompt, messages, current_message_images)
+                        from google.genai import types as genai_types
+                        response = _gemini_genai_client.models.generate_content(
+                            model=_gmodel,
                             contents=gemini_messages,
-                            generation_config={
-                                "temperature": current_temperature,
-                            }
+                            config=genai_types.GenerateContentConfig(
+                                system_instruction=_gsys,
+                                temperature=current_temperature,
+                            ),
                         )
                     else:
-                        # Format message for Gemini
                         formatted_prompt = f"System: {current_system_prompt}\n\nConversation:\n"
                         for msg in messages:
                             formatted_prompt += f"{msg['role'].title()}: {msg['content']}\n"
-                        response = gemini_client.generate_content(formatted_prompt)
+                        response = _gemini_generate(formatted_prompt)
 
                     if response.text:
                         response_text = response.text
@@ -8326,17 +8337,19 @@ The user will type `/send` when ready to send the email.
                                 return None
 
                             if current_message_images:
-                                current_gemini_model, gemini_messages = _format_gemini_with_images(updated_system_prompt, messages, current_message_images)
-                                regen_response = current_gemini_model.generate_content(
+                                _gmodel, _gsys, gemini_messages = _format_gemini_with_images(updated_system_prompt, messages, current_message_images)
+                                from google.genai import types as genai_types
+                                regen_response = _gemini_genai_client.models.generate_content(
+                                    model=_gmodel,
                                     contents=gemini_messages,
-                                    generation_config={"temperature": current_temperature}
+                                    config=genai_types.GenerateContentConfig(system_instruction=_gsys, temperature=current_temperature),
                                 )
                             else:
                                 formatted_prompt = f"System: {updated_system_prompt}\n\nConversation:\n"
                                 for msg in messages:
                                     if msg and isinstance(msg, dict):
                                         formatted_prompt += f"{msg.get('role', 'user').title()}: {msg.get('content', '')}\n"
-                                regen_response = gemini_client.generate_content(formatted_prompt)
+                                regen_response = _gemini_generate(formatted_prompt)
 
                             if regen_response.text:
                                 return regen_response.text
@@ -8348,20 +8361,19 @@ The user will type `/send` when ready to send the email.
                     response_text_with_tools = None
                     try:
                         if current_message_images:
-                            # Handle images with Gemini
-                            current_gemini_model, gemini_messages = _format_gemini_with_images(current_system_prompt, messages_for_api, current_message_images)
-                            response = current_gemini_model.generate_content(
+                            _gmodel, _gsys, gemini_messages = _format_gemini_with_images(current_system_prompt, messages_for_api, current_message_images)
+                            from google.genai import types as genai_types
+                            response = _gemini_genai_client.models.generate_content(
+                                model=_gmodel,
                                 contents=gemini_messages,
-                                generation_config={
-                                    "temperature": current_temperature,
-                                }
+                                config=genai_types.GenerateContentConfig(system_instruction=_gsys, temperature=current_temperature),
                             )
                         else:
                             # Regular text-only message
                             formatted_prompt = f"System: {current_system_prompt}\n\nConversation:\n"
                             for msg in messages_for_api:
                                 formatted_prompt += f"{msg['role'].title()}: {msg['content']}\n"
-                            response = gemini_client.generate_content(formatted_prompt)
+                            response = _gemini_generate(formatted_prompt)
                         if response.text:
                             response_text = response.text
 
@@ -9099,7 +9111,7 @@ def _format_openai_with_images(system_prompt, messages_for_api, current_message_
 def _format_gemini_with_images(system_prompt, messages_for_api, current_message_images):
     """Format Gemini content with image support (base64 and File API)."""
     from promaia.utils.image_processing import format_image_for_gemini
-    import google.generativeai as genai
+    from google import genai
     from promaia.ai.models import get_current_google_model
     import os
 
@@ -9113,12 +9125,8 @@ def _format_gemini_with_images(system_prompt, messages_for_api, current_message_
     else:
         model_name = get_current_google_model()
 
-    current_gemini_model = genai.GenerativeModel(
-        model_name=model_name,
-        system_instruction=system_prompt
-    )
-
-    # Build conversation history
+    # Build conversation history — new SDK uses client.models.generate_content()
+    # We'll return (model_name, system_prompt, messages) and generate at the call site
     gemini_messages = []
     total_images = 0
     file_api_count = 0
@@ -9173,7 +9181,7 @@ def _format_gemini_with_images(system_prompt, messages_for_api, current_message_
 
     method_info = f" ({file_api_count} via File API)" if file_api_count > 0 else " (all base64)"
     debug_print(f"Calling Gemini with {len(gemini_messages)} messages and {total_images} total images{method_info} ({len(current_message_images)} current)")
-    return current_gemini_model, gemini_messages
+    return model_name, system_prompt, gemini_messages
 
 def _format_llama_with_images(system_prompt, messages_for_api, current_message_images):
     """Format Llama messages with image support (OpenAI-compatible format)."""

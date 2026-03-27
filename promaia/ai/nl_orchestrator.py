@@ -32,9 +32,7 @@ from .query_strategies import QueryStrategy, SQLQueryStrategy, VectorQueryStrate
 # LLM Adapter (copied to avoid langchain dependencies)
 from anthropic import Anthropic
 from openai import OpenAI
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning, module="google")
-import google.generativeai as genai
+from google import genai
 
 
 class MockResponse:
@@ -73,9 +71,9 @@ class PromaiLLMAdapter:
                             return
                         elif client_type == "gemini":
                             self.client_type = "gemini"
-                            genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+                            self.client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
                             from promaia.ai.models import get_current_google_model
-                            self.client = genai.GenerativeModel(get_current_google_model())
+                            self._gemini_model = get_current_google_model()
                             return
                     except Exception as e:
                         print(f"⚠️  Failed to setup {client_type} client: {e}")
@@ -126,7 +124,9 @@ class PromaiLLMAdapter:
             return MockResponse(response.content[0].text)
             
         elif self.client_type == "gemini":
-            response = self.client.generate_content(prompt.strip())
+            response = self.client.models.generate_content(
+                model=self._gemini_model, contents=prompt.strip()
+            )
             return MockResponse(response.text)
         
         else:

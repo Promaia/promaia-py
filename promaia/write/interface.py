@@ -492,37 +492,26 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
                 }, indent=2))
                 
         elif api_type == "gemini":
-            # Google sync client used here
-            import google.generativeai as genai
-            
-            # Configure API Key
+            from google import genai
+            from google.genai import types as genai_types
+
             google_api_key = os.getenv("GOOGLE_API_KEY")
             if not google_api_key:
                 console.print("[error]GOOGLE_API_KEY environment variable not set.[/error]")
                 return
-            genai.configure(api_key=google_api_key)
 
-            # Initialize Model
             from promaia.ai.models import get_current_google_model
-            model = genai.GenerativeModel(get_current_google_model())
-
-            # Start chat session
-            chat = model.start_chat(history=[])
-            
-            # Combine system prompt and main prompt for Gemini
-            # The API expects a list of content parts
-            gemini_contents = [
-                system_prompt, # System instructions first
-                "Please write a blog post based on the journal entries and webflow content provided." # Then the standard user request
-            ]
-            
-            response = model.generate_content(
-                # Pass combined prompts in contents
-                contents=gemini_contents,
-                generation_config={
-                    "temperature": 0.7,
-                    "max_output_tokens": 4000
-                }
+            client = genai.Client(api_key=google_api_key)
+            response = client.models.generate_content(
+                model=get_current_google_model(),
+                contents=[
+                    system_prompt,
+                    "Please write a blog post based on the journal entries and webflow content provided.",
+                ],
+                config=genai_types.GenerateContentConfig(
+                    temperature=0.7,
+                    max_output_tokens=4000,
+                ),
             )
             blog_content = response.text
             # Save the response to a file without output
