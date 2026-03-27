@@ -170,7 +170,7 @@ class ConversationManager:
         if self._agent_cache_mtime is None or current_mtime > self._agent_cache_mtime:
             logger.info("🔄 Reloading agent cache (config changed)")
             agents = load_agents()
-            self._agent_cache = {a.agent_id: a for a in agents}
+            self._agent_cache = {(a.agent_id or a.name): a for a in agents}
             self._agent_cache_mtime = current_mtime
             logger.info(f"✅ Cached {len(self._agent_cache)} agents")
 
@@ -467,8 +467,8 @@ class ConversationManager:
             response = await self._get_ai_response(state, user_message)
         except Exception as e:
             logger.error(f"Error generating AI response: {e}", exc_info=True)
-            response = "I'm sorry, I encountered an error generating a response. Please try again."
-        
+            response = f"I'm sorry, I encountered an error generating a response ({type(e).__name__}: {e}). Please try again."
+
         # Add response to conversation (skip if agentic turn already stored history_messages)
         if not getattr(state, '_skip_response_append', False):
             response_time = datetime.now(timezone.utc).isoformat()
@@ -673,7 +673,7 @@ class ConversationManager:
 
         except Exception as e:
             logger.error(f"Error generating response for {state.agent_id}: {e}", exc_info=True)
-            return "I'm sorry, I encountered an error. Please try again."
+            return f"I'm sorry, I encountered an error ({type(e).__name__}: {e}). Please try again."
 
     def _build_conversation_system_prompt(self, agent, state: ConversationState) -> str:
         """Build the system prompt for conversation mode.
@@ -1073,7 +1073,7 @@ class ConversationManager:
             )
         except Exception as e:
             logger.error(f"Error generating batched response: {e}", exc_info=True)
-            response = "I'm sorry, I encountered an error generating a response. Please try again."
+            response = f"I'm sorry, I encountered an error generating a response ({type(e).__name__}: {e}). Please try again."
 
         # Save response to conversation (skip if agentic turn already stored history_messages)
         if not getattr(state, '_skip_response_append', False):

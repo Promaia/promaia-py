@@ -175,7 +175,7 @@ def create_slack_bot():
     # Load available agents
     from promaia.agents.agent_config import load_agents
     agents = load_agents()
-    available_agent_names = [a.agent_id or a.name for a in agents if a.agent_id or a.name]
+    available_agent_names = [a.name or a.agent_id for a in agents if a.name or a.agent_id]
 
     if not available_agent_names:
         logger.warning("No agents configured! Bot will have limited functionality.")
