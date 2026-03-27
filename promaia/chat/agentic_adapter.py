@@ -631,6 +631,7 @@ async def run_agentic_turn(
     print_text_fn: Callable[..., None],
     workflow_prompt: Optional[str] = None,
     notepad_content: Optional[str] = None,
+    shelf_states: Optional[Dict[str, Dict]] = None,
 ) -> AgenticTurnResult:
     """Run an agentic turn using the full autonomous tool loop.
 
@@ -664,6 +665,9 @@ async def run_agentic_turn(
     if notepad_content:
         executor._notepad = notepad_content
 
+    # Shelf states from previous turn (for restoring on/off state)
+    context_state_shelves = shelf_states or {}
+
     # Connect external MCP servers and discover their tools
     mcp_tool_defs = []
     try:
@@ -690,8 +694,8 @@ async def run_agentic_turn(
     if workflow_prompt:
         enhanced_prompt = workflow_prompt + "\n\n" + enhanced_prompt
 
-    # Split prompt into base + context block (library architecture)
-    # Context goes to library (available on demand), NOT injected by default
+    # Split prompt into base + context block → create library shelves
+    # Each database source becomes its own shelf, OFF by default
     context_marker = "\n\n## Context ("
     context_data_block = ""
     if context_marker in enhanced_prompt:
@@ -700,26 +704,34 @@ async def run_agentic_turn(
         context_data_block = enhanced_prompt[split_idx:]
         enhanced_prompt = base_prompt_part
 
-        # Store full context in library on the executor
-        executor._library_context = context_data_block
-
-        # Build library index for the prompt (source names + page counts)
+        # Parse individual database sections into shelves
         import re
-        db_headers = re.findall(
-            r'### === (.+?) DATABASE \((\d+) entries\) ===',
-            context_data_block,
+        db_pattern = re.compile(
+            r'### === (.+?) DATABASE \((\d+) entries\) ===\n',
         )
-        if db_headers:
-            index_lines = [
-                "## Library (available context)\n",
-                "You have these sources loaded in your library. Use query tools "
-                "(query_sql, query_vector) for targeted lookups, or call "
-                "visit_library to read through everything and take notes.\n",
-            ]
-            for db_name, count in db_headers:
-                index_lines.append(f"- {db_name}: {count} entries")
-            executor._library_index = "\n".join(index_lines)
-            enhanced_prompt += "\n\n" + executor._library_index
+        matches = list(db_pattern.finditer(context_data_block))
+        for i, match in enumerate(matches):
+            db_name = match.group(1).lower()
+            page_count = int(match.group(2))
+            # Extract content from this match to the next (or end)
+            start = match.start()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(context_data_block)
+            shelf_content = context_data_block[start:end]
+
+            # Restore shelves from previous turn if they exist
+            prev_state = context_state_shelves.get(db_name, {}).get("on", False) if context_state_shelves else False
+
+            executor._shelves[db_name] = {
+                "content": shelf_content,
+                "on": prev_state,
+                "page_count": page_count,
+                "source": "browser",
+            }
+
+    # Inject library index into prompt (always visible)
+    library_index = executor.build_library_index()
+    if library_index:
+        enhanced_prompt += "\n\n" + library_index
 
     # Build activity callback
     activity_cb = make_terminal_activity_callback(print_text_fn)
@@ -761,7 +773,11 @@ async def run_agentic_turn(
     finally:
         await executor.disconnect_mcp_servers()
 
-    # Persist notepad for next turn
+    # Persist notepad and shelf states for next turn
     result.notepad_content = executor._notepad or None
+    result.shelf_states = {
+        name: {"on": shelf["on"], "page_count": shelf.get("page_count", 0)}
+        for name, shelf in executor._shelves.items()
+    } if executor._shelves else None
 
     return result

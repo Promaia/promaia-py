@@ -33,6 +33,8 @@ class AgenticTurnResult:
     history_messages: List[Dict[str, Any]] = field(default_factory=list)
     # Persistent notepad content (survives across turns)
     notepad_content: Optional[str] = None
+    # Library shelf states (on/off, survives across turns)
+    shelf_states: Optional[Dict[str, Dict]] = None
 
 
 # ── Tool definitions (Anthropic native format) ──────────────────────────
@@ -1282,19 +1284,45 @@ NOTEPAD_TOOL_DEFINITION = {
     }
 }
 
-VISIT_LIBRARY_TOOL_DEFINITION = {
-    "name": "visit_library",
+LIBRARY_TOOL_DEFINITION = {
+    "name": "library",
     "description": (
-        "Enter the library to see ALL loaded context from the browser-selected "
-        "sources. Use this when you need the big picture or your notes don't "
-        "cover what the user is asking about. Full context is only visible for "
-        "one step — read through it and take notes on what's relevant using "
-        "the notepad tool, then continue working from your notes."
+        "Manage your context library. The library has shelves — each shelf holds "
+        "a named bucket of context (browser sources, query results, etc.). "
+        "Toggle shelves ON to include their content in your prompt, OFF to remove. "
+        "Your library index is always visible showing all shelves and their state. "
+        "Use this to control exactly what context you're working with."
     ),
     "input_schema": {
         "type": "object",
-        "properties": {},
-        "required": []
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["on", "off", "all_on", "all_off", "add", "remove"],
+                "description": (
+                    "on: turn specific shelves on (content visible in prompt). "
+                    "off: turn specific shelves off (content hidden). "
+                    "all_on: turn ALL shelves on. "
+                    "all_off: turn ALL shelves off. "
+                    "add: create a new shelf with content. "
+                    "remove: delete a shelf entirely."
+                )
+            },
+            "shelves": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Shelf names to toggle (for on/off/remove actions)"
+            },
+            "name": {
+                "type": "string",
+                "description": "Name for a new shelf (for add action)"
+            },
+            "content": {
+                "type": "string",
+                "description": "Content for a new shelf (for add action)"
+            },
+        },
+        "required": ["action"]
     }
 }
 
@@ -2216,8 +2244,8 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     # Notepad — always available (persistent notes across turns)
     tools.append(NOTEPAD_TOOL_DEFINITION)
 
-    # Library visit — always available
-    tools.append(VISIT_LIBRARY_TOOL_DEFINITION)
+    # Library — always available (shelved context management)
+    tools.append(LIBRARY_TOOL_DEFINITION)
 
     # Config tools — always available
     tools.extend(CONFIG_TOOL_DEFINITIONS)
@@ -2272,9 +2300,8 @@ class ToolExecutor:
         self._sandbox = Sandbox()
         # Persistent notepad (survives across turns within a conversation)
         self._notepad = ""
-        # Library context (full loaded context, available on demand)
-        self._library_context = ""
-        self._library_index = ""
+        # Library shelves: name → {"content": str, "on": bool, "page_count": int, "source": str}
+        self._shelves = {}
         # External MCP server connections
         self._mcp_client = None        # McpClient instance
         self._mcp_tool_map = {}        # namespaced_name → (server_name, original_name)
@@ -2352,11 +2379,9 @@ class ToolExecutor:
             # Notepad (persistent notes across turns)
             elif tool_name == "notepad":
                 return self._notepad_action(tool_input)
-            # Library visit (sentinel — handled by the agentic loop)
-            elif tool_name == "visit_library":
-                if not self._library_context:
-                    return "Library is empty — no sources were loaded in the browser."
-                return "__VISIT_LIBRARY__"
+            # Library shelves (context management)
+            elif tool_name == "library":
+                return self._library_action(tool_input)
             # Config tools
             elif tool_name == "list_source_types":
                 return await self._list_source_types()
@@ -5087,6 +5112,105 @@ class ToolExecutor:
         else:
             return f"Unknown notepad action: {action}"
 
+    # ── Library (shelved context management) ────────────────────────────
+
+    def _library_action(self, tool_input: Dict) -> str:
+        action = tool_input.get("action", "on")
+
+        if action == "on":
+            names = tool_input.get("shelves", [])
+            if not names:
+                return "Error: provide shelf names to turn on."
+            turned_on = []
+            for name in names:
+                if name in self._shelves:
+                    self._shelves[name]["on"] = True
+                    turned_on.append(name)
+            if turned_on:
+                return f"Shelves turned ON: {', '.join(turned_on)}. Their content is now in your context."
+            return f"No matching shelves found. Available: {', '.join(self._shelves.keys())}"
+
+        elif action == "off":
+            names = tool_input.get("shelves", [])
+            if not names:
+                return "Error: provide shelf names to turn off."
+            turned_off = []
+            for name in names:
+                if name in self._shelves:
+                    self._shelves[name]["on"] = False
+                    turned_off.append(name)
+            if turned_off:
+                return f"Shelves turned OFF: {', '.join(turned_off)}. Their content removed from context."
+            return f"No matching shelves found. Available: {', '.join(self._shelves.keys())}"
+
+        elif action == "all_on":
+            for shelf in self._shelves.values():
+                shelf["on"] = True
+            return f"All {len(self._shelves)} shelves turned ON."
+
+        elif action == "all_off":
+            for shelf in self._shelves.values():
+                shelf["on"] = False
+            return f"All {len(self._shelves)} shelves turned OFF."
+
+        elif action == "add":
+            name = tool_input.get("name", "").strip()
+            content = tool_input.get("content", "")
+            if not name:
+                return "Error: shelf name is required."
+            if not content:
+                return "Error: shelf content is required."
+            # Estimate page count from content
+            page_count = content.count("\n**") + 1  # rough heuristic
+            self._shelves[name] = {
+                "content": content,
+                "on": False,  # off by default — agent decides when to view
+                "page_count": page_count,
+                "source": "query",
+            }
+            return f"Shelf '{name}' added ({len(content)} chars). Turn it ON to include in context."
+
+        elif action == "remove":
+            names = tool_input.get("shelves", [])
+            name = tool_input.get("name", "").strip()
+            to_remove = names if names else ([name] if name else [])
+            if not to_remove:
+                return "Error: provide shelf name(s) to remove."
+            removed = []
+            for n in to_remove:
+                if n in self._shelves:
+                    del self._shelves[n]
+                    removed.append(n)
+            if removed:
+                return f"Shelves removed: {', '.join(removed)}"
+            return "No matching shelves found."
+
+        return f"Unknown library action: {action}"
+
+    def build_library_index(self) -> str:
+        """Build the library index string for the system prompt."""
+        if not self._shelves:
+            return ""
+        lines = [
+            "## Library\n",
+            "Your context library. Toggle shelves ON/OFF with the library tool.\n",
+        ]
+        for name, shelf in self._shelves.items():
+            state = "ON" if shelf["on"] else "OFF"
+            source = shelf.get("source", "unknown")
+            count = shelf.get("page_count", 0)
+            chars = len(shelf.get("content", ""))
+            lines.append(f"- [{state}] **{name}** ({count} entries, {chars // 1000}k chars, source: {source})")
+        return "\n".join(lines)
+
+    def build_active_shelf_content(self) -> str:
+        """Build the combined content of all ON shelves for the system prompt."""
+        parts = []
+        for name, shelf in self._shelves.items():
+            if shelf["on"] and shelf.get("content"):
+                parts.append(shelf["content"])
+        return "\n\n".join(parts)
+
     # ── Workspace file tools ────────────────────────────────────────────
 
     async def _list_workspace_files(self) -> str:
@@ -6379,8 +6503,6 @@ async def agentic_turn(
 
     # Context compact tracking — agent can compact with notes or restore
     context_notes: Optional[str] = None
-    # Library visit tracking — when True, next iteration includes full library context
-    visiting_library: bool = False
 
     # Copy messages — tool_use/tool_result blocks stay internal only
     # Format any messages with images into Anthropic multimodal content blocks
@@ -6415,15 +6537,18 @@ async def agentic_turn(
             f"iterations remaining]"
         )
 
-        # Build effective prompt based on context state
+        # Build effective prompt: base + library index + active shelf content
         effective_prompt = system_prompt
-        if visiting_library and context_data_block:
-            # Library visit: inject full context for this one iteration
-            effective_prompt = system_prompt + context_data_block
-            visiting_library = False  # One-shot: remove after this iteration
-        elif context_notes is not None:
+
+        # Inject active shelf content (only shelves that are ON)
+        if tool_executor and hasattr(tool_executor, '_shelves'):
+            active_content = tool_executor.build_active_shelf_content()
+            if active_content:
+                effective_prompt += "\n\n" + active_content
+
+        # Context notes override active shelves (compact mode)
+        if context_notes is not None:
             effective_prompt = system_prompt + "\n\n## Context (compacted)\n\n" + context_notes
-        # Note: if not visiting and no notes, context stays out of prompt (library model)
 
         # Proactive context trimming before API call
         from promaia.agents.context_trimmer import trim_context_to_fit
@@ -6596,11 +6721,6 @@ async def agentic_turn(
             elif result_text == "__CONTEXT_RESTORE__":
                 context_notes = None
                 result_text = "Context restored to full loaded data. Query tools still work normally."
-
-            # Library visit — inject full library for the NEXT iteration only
-            elif result_text == "__VISIT_LIBRARY__":
-                visiting_library = True
-                result_text = "Entering library — full context will be available on your next step. Read through it and take notes with the notepad tool."
 
             # Handle interview sentinels — break out of loop and return with signal
             elif result_text.startswith("__INTERVIEW_START__:"):
