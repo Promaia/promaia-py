@@ -723,13 +723,32 @@ class ConversationManager:
 
         # Add platform-specific context
         ctx = state.context or {}
+        platform = state.platform or "chat"
+
+        base_prompt += f"\n\n## Conversation Location\n"
         if ctx.get("is_dm"):
             user_name = ctx.get("user_name", "the user")
             base_prompt += (
-                f"\n\n## Conversation Location\n"
-                f"You are in a direct message with {user_name}. "
-                f"This is a private 1-on-1 conversation. "
-                f"Respond to every message — in DMs there is no need to decide whether to reply."
+                f"You are running in {platform}. "
+                f"This is a direct message with {user_name} — a private 1-on-1 conversation. "
+                f"Respond to every message."
+            )
+        elif ctx.get("channel_name"):
+            channel_name = ctx["channel_name"]
+            base_prompt += (
+                f"You are running in {platform}, in channel #{channel_name}. "
+                f"You were @mentioned — respond helpfully and concisely."
+            )
+        else:
+            base_prompt += f"You are running in {platform}."
+
+        # Inject recent channel history if provided
+        recent_messages = ctx.get("recent_messages")
+        if recent_messages:
+            base_prompt += (
+                f"\n\n## Recent Channel History\n\n"
+                f"Here's what was said recently in this channel. You are here 📍\n\n"
+                f"{recent_messages}"
             )
 
         return base_prompt

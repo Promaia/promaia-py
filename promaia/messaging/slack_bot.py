@@ -554,6 +554,31 @@ def create_slack_bot():
             now = datetime.now(timezone.utc).isoformat()
             conversation_id = f"slack_t2c_{channel_id}_{int(datetime.now(timezone.utc).timestamp())}"
 
+            # Fetch channel context: name + recent messages
+            mention_context = {}
+            try:
+                channel_info = await client.conversations_info(channel=channel_id)
+                channel_name = channel_info.get("channel", {}).get("name", "")
+                if channel_name:
+                    mention_context["channel_name"] = channel_name
+
+                # Fetch recent channel messages for context
+                history = await client.conversations_history(channel=channel_id, limit=50)
+                if history.get("messages"):
+                    lines = []
+                    for msg in reversed(history["messages"][:50]):
+                        msg_user = msg.get("user", "")
+                        msg_text = msg.get("text", "").strip()
+                        if msg_text:
+                            lines.append(f"<@{msg_user}>: {msg_text}")
+                    if lines:
+                        mention_context["recent_messages"] = "\n".join(lines)
+            except Exception as e:
+                logger.debug(f"Could not fetch channel context: {e}")
+
+            username = await _get_username(client, user_id)
+            mention_context["user_name"] = username
+
             conversation = ConversationState(
                 conversation_id=conversation_id,
                 agent_id=agent_to_use,
@@ -564,7 +589,7 @@ def create_slack_bot():
                 status='active',
                 last_message_at=now,
                 messages=[],
-                context={},
+                context=mention_context,
                 timeout_seconds=30 * 60,
                 max_turns=None,
                 created_at=now,

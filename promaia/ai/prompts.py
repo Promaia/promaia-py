@@ -242,25 +242,17 @@ def create_system_prompt(
     base_prompt = base_prompt.replace("{today_date}", today_str)
     base_prompt = base_prompt.replace("{current_time}", current_time_str)
 
-    # Load artifact guidelines
-    try:
-        with open(ARTIFACT_GUIDELINES_PATH, 'r', encoding='utf-8') as f:
-            artifact_guidelines = f.read()
-        base_prompt += "\n\n" + artifact_guidelines
-        logger.debug(f"Loaded artifact guidelines from {ARTIFACT_GUIDELINES_PATH}")
-    except FileNotFoundError:
-        logger.warning(f"Artifact guidelines file not found at {ARTIFACT_GUIDELINES_PATH}. Continuing without them.")
+    # Artifact guidelines removed — now inline in conversation_mode.md
 
-    # Add query tools if enabled
+    # Add query tools if enabled (non-agentic path only)
     if include_query_tools:
         base_prompt += "\n\n" + format_query_tools_for_prompt()
 
-        # Add database preview (the "map on the wall") showing what data sources exist
-        # Exclude databases already in loaded context to avoid duplication
-        loaded_databases = list(multi_source_data.keys())
-        db_preview = generate_database_preview(workspace=workspace, exclude_databases=loaded_databases)
-        if db_preview:
-            base_prompt += "\n\n" + db_preview
+    # Database preview — shows available data sources regardless of query tools
+    loaded_databases = list(multi_source_data.keys())
+    db_preview = generate_database_preview(workspace=workspace, exclude_databases=loaded_databases)
+    if db_preview:
+        base_prompt += "\n\n" + db_preview
 
     # Append context data
     base_prompt += format_context_data(multi_source_data, mcp_tools_info)
