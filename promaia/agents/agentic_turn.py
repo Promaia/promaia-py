@@ -1256,21 +1256,20 @@ COMPACT_CONTEXT_TOOL_DEFINITION = {
 NOTEPAD_TOOL_DEFINITION = {
     "name": "notepad",
     "description": (
-        "Your persistent working notes. Write key facts, plans, references, "
-        "and extracted context here. Notes survive across turns — use them "
-        "to avoid re-reading context. Read your notes before starting work "
-        "on a new turn to remember what you've already learned."
+        "Your persistent working notes — always visible in your prompt under "
+        "'Working Notes'. Write key facts, plans, references, and extracted "
+        "context here. Notes survive across turns. You never need to read "
+        "them — they're already in front of you."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["write", "append", "read", "clear"],
+                "enum": ["write", "append", "clear"],
                 "description": (
                     "write: replace all notes with new content. "
                     "append: add to existing notes. "
-                    "read: return current notes. "
                     "clear: erase all notes."
                 )
             },
@@ -5066,7 +5065,7 @@ class ToolExecutor:
     # ── Notepad (persistent working notes) ─────────────────────────────
 
     def _notepad_action(self, tool_input: Dict) -> str:
-        action = tool_input.get("action", "read")
+        action = tool_input.get("action", "write")
         content = tool_input.get("content", "")
 
         if action == "write":
@@ -5082,10 +5081,6 @@ class ToolExecutor:
             else:
                 self._notepad = content
             return f"Appended to notes ({len(self._notepad)} chars total)."
-        elif action == "read":
-            if not self._notepad:
-                return "Notepad is empty."
-            return f"Current notes:\n\n{self._notepad}"
         elif action == "clear":
             self._notepad = ""
             return "Notes cleared."
