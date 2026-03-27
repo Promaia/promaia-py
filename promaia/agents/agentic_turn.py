@@ -1218,43 +1218,6 @@ GOOGLE_SHEETS_FORMAT_TOOL_DEFINITIONS = [
     },
 ]
 
-COMPACT_CONTEXT_TOOL_DEFINITION = {
-    "name": "compact_context",
-    "description": (
-        "Replace the full loaded context with task-specific notes (contract phase), "
-        "or restore the original context block (expand phase). Use after reading "
-        "through loaded data — write down only what matters for the work you're "
-        "about to do. Query tools (query_sql, query_vector, query_source) still "
-        "work in compact mode — they hit the database directly. Restore when the "
-        "task shifts and your notes don't cover it. Context auto-resets each new "
-        "user message."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "notes": {
-                "type": "string",
-                "description": (
-                    "Task-relevant notes that replace the full context block. "
-                    "Write down what you need for the work you're about to do — "
-                    "names, dates, key facts, thread IDs, etc. Not a generic "
-                    "summary — mission-driven notes."
-                ),
-            },
-            "restore": {
-                "type": "boolean",
-                "description": (
-                    "Set to true to restore the original full context block "
-                    "(expand phase). Ignores notes when true."
-                ),
-                "default": False,
-            },
-        },
-        "required": []
-    }
-}
-
-
 NOTEPAD_TOOL_DEFINITION = {
     "name": "notepad",
     "description": (
@@ -2238,9 +2201,6 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     # Task queue is always available
     tools.extend(TASK_QUEUE_TOOL_DEFINITIONS)
 
-    # Context compact — always available
-    tools.append(COMPACT_CONTEXT_TOOL_DEFINITION)
-
     # Notepad — always available (persistent notes across turns)
     tools.append(NOTEPAD_TOOL_DEFINITION)
 
@@ -2368,14 +2328,6 @@ class ToolExecutor:
             # Task queue
             elif tool_name == "task_queue_add":
                 return await self._task_queue_add(tool_input)
-            # Context compact (sentinel — handled by the agentic loop)
-            elif tool_name == "compact_context":
-                if tool_input.get("restore", False):
-                    return "__CONTEXT_RESTORE__"
-                notes = tool_input.get("notes", "")
-                if not notes:
-                    return "Error: provide either 'notes' to compact or 'restore: true' to expand."
-                return f"__CONTEXT_COMPACT__:{notes}"
             # Notepad (persistent notes across turns)
             elif tool_name == "notepad":
                 return self._notepad_action(tool_input)
@@ -2495,11 +2447,19 @@ class ToolExecutor:
         total_pages = sum(len(pages) for pages in loaded_content.values() if pages)
         formatted = format_context_data(loaded_content)
 
-        parts = [f"Found {total_pages} results"]
+        # Store in library shelf so results persist across turns
+        shelf_name = f"sql_{query[:30].strip().replace(' ', '_').lower()}"
+        self._shelves[shelf_name] = {
+            "content": formatted,
+            "on": True,
+            "page_count": total_pages,
+            "source": "query_sql",
+            "titles": self._extract_titles(loaded_content),
+        }
+
+        parts = [f"Found {total_pages} results → shelf '{shelf_name}' [ON]"]
         if metadata and metadata.get('generated_query'):
             parts.append(f"SQL: {metadata['generated_query']}")
-        parts.append("")
-        parts.append(formatted)
         return "\n".join(parts)
 
     async def _query_vector(self, tool_input: Dict) -> str:
@@ -2528,7 +2488,17 @@ class ToolExecutor:
 
         total_pages = sum(len(pages) for pages in loaded_content.values() if pages)
         formatted = format_context_data(loaded_content)
-        return f"Found {total_pages} semantically similar results\n\n{formatted}"
+
+        # Store in library shelf so results persist across turns
+        shelf_name = f"search_{query[:30].strip().replace(' ', '_').lower()}"
+        self._shelves[shelf_name] = {
+            "content": formatted,
+            "on": True,
+            "page_count": total_pages,
+            "source": "query_vector",
+            "titles": self._extract_titles(loaded_content),
+        }
+        return f"Found {total_pages} semantically similar results → shelf '{shelf_name}' [ON]"
 
     async def _query_source(self, tool_input: Dict) -> str:
         from promaia.config.databases import get_database_config
@@ -2563,6 +2533,7 @@ class ToolExecutor:
             "on": True,  # ON immediately so agent can read it
             "page_count": len(pages),
             "source": "query_source",
+            "titles": self._extract_titles({database: pages}),
         }
         return f"Loaded {len(pages)} pages from '{database}' ({time_range}) → shelf '{shelf_name}' [ON]"
 
@@ -5196,13 +5167,26 @@ class ToolExecutor:
 
         return f"Unknown library action: {action}"
 
+    @staticmethod
+    def _extract_titles(pages_dict: dict) -> list:
+        """Extract page titles from a loaded_content dict ({db_name: [page, ...]})."""
+        titles = []
+        for pages in pages_dict.values():
+            for page in pages:
+                title = (page.get("title") or page.get("filename")
+                         or page.get("name") or "")
+                if title:
+                    titles.append(title)
+        return titles
+
     def build_library_index(self) -> str:
         """Build the library index string for the system prompt."""
         if not self._shelves:
             return ""
         lines = [
             "## Library\n",
-            "Your context library. Toggle shelves ON/OFF with the library tool.\n",
+            "Your context library. Toggle shelves ON/OFF with the library tool.",
+            "Check here BEFORE searching — the data you need may already be on a shelf.\n",
         ]
         for name, shelf in self._shelves.items():
             state = "ON" if shelf["on"] else "OFF"
@@ -5210,6 +5194,11 @@ class ToolExecutor:
             count = shelf.get("page_count", 0)
             chars = len(shelf.get("content", ""))
             lines.append(f"- [{state}] **{name}** ({count} entries, {chars // 1000}k chars, source: {source})")
+            # OFF shelves show title index so agent knows what's available without loading
+            if not shelf["on"]:
+                titles = shelf.get("titles", [])
+                for t in titles:
+                    lines.append(f"  - {t}")
         return "\n".join(lines)
 
     def build_active_shelf_content(self) -> str:
@@ -6493,7 +6482,7 @@ async def agentic_turn(
         max_iterations: Max loop iterations (from agent config)
         on_tool_activity: Optional callback for UX activity updates
         plan: Optional list of plan steps to inject into the system prompt
-        context_data_block: Loaded database pages block, mutable via compact_context tool
+        context_data_block: Loaded database pages block (used for browser-loaded shelf parsing)
 
     Returns:
         AgenticTurnResult with plain text response and metadata
@@ -6509,9 +6498,6 @@ async def agentic_turn(
     # Inject plan into system prompt if provided
     if plan:
         system_prompt += "\n\n" + _format_plan_for_prompt(plan)
-
-    # Context compact tracking — agent can compact with notes or restore
-    context_notes: Optional[str] = None
 
     # Copy messages — tool_use/tool_result blocks stay internal only
     # Format any messages with images into Anthropic multimodal content blocks
@@ -6546,24 +6532,57 @@ async def agentic_turn(
             f"iterations remaining]"
         )
 
-        # Build effective prompt: base + library index + active shelf content
+        # Build effective prompt: base + dynamic library index + active shelf content
         effective_prompt = system_prompt
 
+        # Rebuild library index each iteration (shelves change during the loop)
+        if tool_executor and hasattr(tool_executor, 'build_library_index'):
+            library_index = tool_executor.build_library_index()
+            if library_index:
+                effective_prompt += "\n\n" + library_index
+
         # Inject active shelf content (only shelves that are ON)
+        # Also build a context management nudge when large shelves are active
         if tool_executor and hasattr(tool_executor, '_shelves'):
             active_content = tool_executor.build_active_shelf_content()
             if active_content:
                 effective_prompt += "\n\n" + active_content
 
-        # Context notes override active shelves (compact mode)
-        if context_notes is not None:
-            effective_prompt = system_prompt + "\n\n## Context (compacted)\n\n" + context_notes
+            # Nudge: remind agent to manage context when large shelves are ON
+            large_on_shelves = [
+                (name, len(s.get("content", "")))
+                for name, s in tool_executor._shelves.items()
+                if s.get("on") and len(s.get("content", "")) > 10_000
+            ]
+            if large_on_shelves:
+                shelf_summary = ", ".join(
+                    f"'{name}' ({chars // 1000}k chars)" for name, chars in large_on_shelves
+                )
+                budget_note += (
+                    f"\n\n[CONTEXT MANAGEMENT: Large shelves are ON: {shelf_summary}. "
+                    f"If you only need a few entries, note what you need and turn the shelf OFF. "
+                    f"Do this NOW as a tool call alongside your response.]"
+                )
 
         # Proactive context trimming before API call
         from promaia.agents.context_trimmer import trim_context_to_fit
         trimmed_system, internal_messages = await trim_context_to_fit(
             effective_prompt + budget_note, internal_messages, tools=tools
         )
+
+        # Log the effective prompt on first iteration so we can debug what the agent sees
+        if iteration == 0:
+            try:
+                from promaia.utils.env_writer import get_data_dir
+                import datetime as _dt_log
+                log_dir = get_data_dir() / "context_logs" / "agentic_turn_logs"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                ts = _dt_log.datetime.now().strftime("%Y%m%d-%H%M%S")
+                log_path = log_dir / f"{ts}_agentic_prompt.md"
+                log_path.write_text(trimmed_system)
+                logger.info(f"Agentic prompt logged to {log_path}")
+            except Exception as log_err:
+                logger.debug(f"Failed to log agentic prompt: {log_err}")
 
         # Build API call kwargs
         api_kwargs = dict(
@@ -6723,16 +6742,8 @@ async def agentic_turn(
             # Execute tool
             result_text = await tool_executor.execute(tool_use.name, tool_use.input)
 
-            # Handle context compact/restore sentinels
-            if result_text.startswith("__CONTEXT_COMPACT__:"):
-                context_notes = result_text[len("__CONTEXT_COMPACT__:"):]
-                result_text = "Context compacted with your notes. Query tools still work normally."
-            elif result_text == "__CONTEXT_RESTORE__":
-                context_notes = None
-                result_text = "Context restored to full loaded data. Query tools still work normally."
-
             # Handle interview sentinels — break out of loop and return with signal
-            elif result_text.startswith("__INTERVIEW_START__:"):
+            if result_text.startswith("__INTERVIEW_START__:"):
                 workflow_name = result_text[len("__INTERVIEW_START__:"):]
                 return AgenticTurnResult(
                     response_text="\n".join(text_parts),

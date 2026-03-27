@@ -432,6 +432,8 @@ def build_agentic_system_prompt(
             "- **Use Notion tools** for transient, specific pages — especially ones "
             "you are actively creating or editing in this session, or anything that "
             "may have been updated very recently and not yet synced.\n"
+            "- For fetching a single specific page, prefer the Notion API "
+            "(notion_get_page) as synced data may be stale.\n"
             "- After creating a Notion page, use the URL from the create response "
             "to share links — do not construct Notion URLs manually."
         )
@@ -537,17 +539,6 @@ def make_terminal_activity_callback(
         # Context trim
         if tool_name == "__context_trim__":
             print_text_fn("  ✂️  Context too large, trimming and retrying", style="dim yellow")
-            return
-
-        # Context compact/restore
-        if tool_name == "compact_context":
-            if completed:
-                if (tool_input or {}).get("restore", False):
-                    print_text_fn("  🔊 Context restored", style="dim cyan")
-                else:
-                    notes = (tool_input or {}).get("notes", "")
-                    preview = notes[:80] + "..." if len(notes) > 80 else notes
-                    print_text_fn(f"  📝 Context compacted: {preview}", style="dim cyan")
             return
 
         # Library shelf toggle
@@ -706,6 +697,9 @@ async def run_agentic_turn(
             # Only restore query-created shelves (browser shelves get rebuilt from context)
             if shelf_data.get("source") != "browser":
                 executor._shelves[name] = dict(shelf_data)
+                logger.info(f"Restored shelf '{name}': on={shelf_data.get('on')}, {len(shelf_data.get('content', ''))} chars")
+    else:
+        logger.info("No shelf states to restore from previous turn")
 
     # Connect external MCP servers and discover their tools
     mcp_tool_defs = []
@@ -760,17 +754,20 @@ async def run_agentic_turn(
             # Restore shelf state from previous turn, default ON for browser-loaded
             prev_state = context_state_shelves.get(db_name, {}).get("on", True) if context_state_shelves else True
 
+            # Extract entry titles from formatted content
+            title_pattern = re.compile(r'File: `(.+?)`\)')
+            titles = [m.group(1) for m in title_pattern.finditer(shelf_content)]
+
             executor._shelves[db_name] = {
                 "content": shelf_content,
                 "on": prev_state,
                 "page_count": page_count,
                 "source": "browser",
+                "titles": titles,
             }
 
-    # Inject library index into prompt (always visible)
-    library_index = executor.build_library_index()
-    if library_index:
-        enhanced_prompt += "\n\n" + library_index
+    # Library index is built dynamically inside the agentic loop each iteration
+    # (shelves change during the loop as tools load/toggle context)
 
     # Build activity callback
     activity_cb = make_terminal_activity_callback(print_text_fn)
