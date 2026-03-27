@@ -2431,7 +2431,8 @@ def _build_suite_index(suite_registry: Dict, mcp_suites: Dict = None, workspace:
         if wf_summaries:
             lines.append("")
             lines.append("## Saved Workflows\n")
-            lines.append("Use `get_workflow_details` (admin suite) to load steps before running.\n")
+            lines.append("If the user's request matches a saved workflow, use it!")
+            lines.append("Load with `act(suites=[\"admin\"])` → `get_workflow_details(name=\"...\")` → follow the steps.\n")
             for wf in wf_summaries:
                 lines.append(f"- **{wf['name']}**: {wf['description']}")
     except Exception:
