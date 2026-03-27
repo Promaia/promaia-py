@@ -1,46 +1,124 @@
-# Messaging Feature — Brainstorm
+# DM Conversation Persistence — PRD
 
-## Current State
+## Problem
 
-Two platform tools, only available when agent runs in Slack/Discord:
-- `send_message` — fire-and-forget (DM or channel)
-- `start_conversation` — request-reply (sends + waits for response)
+When Promaia has a DM conversation with someone on Slack or Discord, that conversation disappears after the session ends. Promaia can't recall what was discussed, continue a prior thread of thought, or learn from past interactions. Terminal chat conversations already save to `koii.convos` — Slack/Discord DMs should too.
 
-## What Feels Off
+## Insight
 
-- Only 2 tools — feels incomplete as a "suite"
-- No read tools in the suite — reading Slack/Discord goes through `query_sql` on synced data, which is a separate flow
-- Naming is generic ("messaging") — could be confused with email
-- Conceptual ambiguity: is it a tool suite? A platform capability? A workflow?
+The messaging tools (`send_message`, `start_conversation`) already work. The missing piece isn't the tools — it's **persistence**. DM conversations need to save to a queryable database so Promaia can remember them.
+
+## What Exists Today
+
+| Feature | Terminal (`maia chat`) | Slack/Discord DMs |
+|---------|----------------------|-------------------|
+| Conversations save to history | Yes (`chat_history.json` → `koii.convos`) | No |
+| Queryable via `query_sql` | Yes | No |
+| Queryable via `query_vector` | Yes | No |
+| Queryable via `query_source` | Yes | No |
+| Conversation boundaries | Per session | 30-min timeout or `/new` |
+| Continues prior conversation | Via history file | Lost on timeout |
+
+### Existing infrastructure
+
+- `ChatHistoryManager._save_to_database()` — saves terminal conversations to unified storage (SQLite + markdown + vector embeddings)
+- `ConversationConnector` — indexes conversation content into the unified registry
+- `koii.convos` database config — already exists, points to conversation storage
+- `ConversationState` in `conversation_manager.py` — already tracks Slack/Discord DM state in SQLite
+- 30-minute DM timeout in `slack_bot.py` — creates natural conversation boundaries
+
+## Requirements
+
+### Must Have
+
+1. **Save DM conversations to unified storage** when they end (timeout, `/new`, or explicit close)
+   - Same format as terminal conversations in `koii.convos`
+   - Include: participants, platform, channel, timestamps, full message history
+   - Trigger: on conversation boundary (30-min gap or explicit reset)
+
+2. **Queryable via all search tools** — `query_sql`, `query_vector`, `query_source("convos")` should return Slack/Discord DM conversations alongside terminal ones
+
+3. **Continuable** — when a DM conversation resumes within the timeout window, Promaia has the full prior history. When it starts fresh (after timeout), Promaia can still recall past conversations via search.
+
+### Nice to Have
+
+4. **Cross-platform recall** — "What did Rose and I talk about last week?" works from terminal, Slack, or Discord
+
+5. **Conversation summaries** — auto-generate a one-line summary when a conversation ends (for the index)
+
+6. **Participant metadata** — store who the conversation was with (user name, platform user ID) so Promaia can search by person
+
+## Architecture
+
+### Save Path
+
+```
+DM conversation ends (timeout/reset)
+    ↓
+conversation_manager detects boundary
+    ↓
+Format messages as markdown (same as terminal chat)
+    ↓
+ChatHistoryManager._save_to_database() OR ConversationConnector
+    ↓
+Unified storage: SQLite (conversation_content table) + markdown file + vector embedding
+    ↓
+Available via query_sql, query_vector, query_source
+```
+
+### Key Decision: Where to trigger the save
+
+**Option A: In conversation_manager** — when `_handle_timeout()` or `/new` fires, save the conversation.
+- Pro: Clean, centralized
+- Con: conversation_manager doesn't currently know about ChatHistoryManager
+
+**Option B: In slack_bot.py / discord equivalent** — when the bot detects a conversation boundary, call save.
+- Pro: Platform-specific logic stays in platform layer
+- Con: Duplicated across Slack and Discord
+
+**Recommendation: Option A** — conversation_manager already manages state lifecycle. Add a `_save_conversation_to_history()` method that calls the existing save pipeline.
+
+### Storage Format
+
+Same as terminal conversations:
+```markdown
+# Conversation: Slack DM with Rose
+Date: 2026-03-27
+Platform: slack
+Participants: Rose, Maia
+
+## Messages
+
+**Rose**: hey can you check my calendar for tomorrow?
+**Maia**: Looking at your calendar... you have a standup at 3pm and a coffee with Amina at noon.
+**Rose**: thanks! can you move the standup to 4?
+**Maia**: Done — moved to 4pm.
+```
+
+### Database Entry
+
+Stored in `conversation_content` table (same as terminal):
+- `page_id`: conversation ID
+- `workspace`: agent's workspace
+- `database_name`: "convos" (same as terminal)
+- `title`: "DM with Rose — calendar check" (auto-generated summary)
+- `content`: full markdown
+- `created_time`: conversation start
+- `last_edited_time`: last message
 
 ## Open Questions
 
-1. **Should messaging be a suite at all?** It's platform-dependent — only exists when `has_platform=True`. Every other suite (notion, gmail, calendar) works everywhere. Maybe messaging tools should be auto-injected when platform is present, not user-selected.
+1. **Should channel conversations (not just DMs) also save?** When Promaia is @mentioned in #general and has a multi-turn thread, should that save too?
 
-2. **Should there be read tools?** e.g.:
-   - `search_channel` — search messages in a specific Slack channel
-   - `get_channel_history` — load recent messages from a channel
-   - `list_channels` — show available channels
-   - These would let agents proactively gather context from Slack without waiting for sync
+2. **Privacy**: Should there be a flag to disable conversation saving for specific users or channels?
 
-3. **How does this relate to the channel context we just added?** We now inject recent channel history for @mentions. But agents running on a schedule (not @mentioned) don't get channel context. Should they be able to request it?
+3. **Deduplication**: If Slack channels are already synced via the Slack connector daemon, DM saves could duplicate. Need to ensure the conversation save path and the sync daemon don't collide.
 
-4. **Cross-platform messaging:** Should `send_message` work from terminal too? e.g., "send Rose a Slack message" from `maia chat`. Currently it only works when the agent IS in Slack.
+4. **Summary generation**: Should we use Haiku to generate a one-liner summary when saving? Or just use the first message as the title?
 
-5. **start_conversation as a workflow primitive:** The request-reply pattern is powerful — agent sends a message, waits for human response, continues. This is basically an interview but over Slack instead of terminal. Should it be generalized?
+## Implementation Order
 
-## Possible Directions
-
-### A: Keep it minimal (current)
-Just 2 tools, platform-only. Good enough for now.
-
-### B: Messaging suite with read tools
-Add channel search/history tools. Make it a proper suite alongside gmail/notion/calendar.
-
-### C: Platform tools (not a suite)
-Auto-inject when platform is present. Not selectable via `act(suites=[...])`. Always available in Act mode when running in Slack/Discord.
-
-### D: Cross-platform messaging
-Make `send_message` available from terminal too (calls Slack API directly). Enables "send a Slack DM from maia chat" workflow.
-
-## Decision: TBD
+1. Add `_save_conversation_to_history()` to conversation_manager
+2. Trigger on DM timeout and `/new` command
+3. Verify conversations appear in `query_source("convos")`
+4. Test cross-platform recall
