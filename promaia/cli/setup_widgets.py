@@ -155,21 +155,21 @@ async def unified_source_selector(
 
         return "\n".join(lines)
 
-    def _get_paste_text():
-        lines = [
-            "  Paste a link (or press Tab to go back to browse):",
-            "",
-            f"  > {paste_input[0]}",
-        ]
+    def _get_paste_instructions():
+        lines = ["  Paste a link (or press Tab to go back to browse):", ""]
         if paste_status[0]:
             lines.append(f"  {paste_status[0]}")
+            lines.append("")
         return "\n".join(lines)
+
+    def _get_paste_input():
+        return f"  > {paste_input[0]}"
 
     def _get_viewport_text():
         if mode == "browse":
             return _get_browse_text()
         else:
-            return _get_paste_text()
+            return _get_paste_instructions()
 
     def _get_header():
         if paste_link_callback:
@@ -185,13 +185,19 @@ async def unified_source_selector(
         else:
             return f" Type/paste URL, ENTER to add  TAB back to browse  ESC cancel"
 
+    # Persistent input window for paste mode (needs to exist across layouts for focus)
+    paste_input_window = Window(FormattedTextControl(text=_get_paste_input), height=1)
+
     def _make_layout():
         visible = min(len(nav_items) + 2, max_visible) + 3
         header = Window(FormattedTextControl(text=_get_header), height=2, style="bold")
         viewport = Window(FormattedTextControl(text=_get_viewport_text), height=visible)
         status = Window(FormattedTextControl(text=_get_status), height=1, style="fg:gray")
-        # Focus the viewport so the cursor appears in the content area, not the header
-        return Layout(HSplit([header, viewport, status]), focused_element=viewport)
+        if mode == "paste":
+            # In paste mode, focus the input line
+            return Layout(HSplit([header, viewport, paste_input_window, status]), focused_element=paste_input_window)
+        else:
+            return Layout(HSplit([header, viewport, status]), focused_element=viewport)
 
     kb = KeyBindings()
 
