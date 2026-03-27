@@ -187,8 +187,6 @@ async def unified_source_selector(
             return f" Type/paste URL, ENTER to add  TAB back to browse  ESC cancel"
 
     # Persistent input window for paste mode (needs to exist across layouts for focus)
-    paste_input_window = Window(FormattedTextControl(text=_get_paste_input), height=1)
-
     def _make_layout():
         header = Window(FormattedTextControl(text=_get_header), height=2, style="bold")
         status = Window(FormattedTextControl(text=_get_status), height=1, style="fg:gray")
