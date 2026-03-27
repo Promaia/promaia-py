@@ -5593,12 +5593,12 @@ The user will type `/send` to trigger the actual sending process.
                             print_text_fn=print_text,
                             workflow_prompt=_auto_workflow_prompt,
                             notepad_content=context_state.get('notepad_content'),
-                            shelf_states=context_state.get('shelf_states'),
+                            source_states=context_state.get('source_states'),
                         ))
                         if result.notepad_content is not None:
                             context_state['notepad_content'] = result.notepad_content
-                        if result.shelf_states is not None:
-                            context_state['shelf_states'] = result.shelf_states
+                        if result.source_states is not None:
+                            context_state['source_states'] = result.source_states
 
                         response_text = result.response_text
                         total_tokens = result.input_tokens + result.output_tokens
@@ -7959,13 +7959,13 @@ The user will type `/send` when ready to send the email.
                             print_text_fn=print_text,
                             workflow_prompt=_workflow_prompt,
                             notepad_content=context_state.get('notepad_content'),
-                            shelf_states=context_state.get('shelf_states'),
+                            source_states=context_state.get('source_states'),
                         ))
-                        # Persist notepad and shelf states across turns
+                        # Persist notepad and source states across turns
                         if result.notepad_content is not None:
                             context_state['notepad_content'] = result.notepad_content
-                        if result.shelf_states is not None:
-                            context_state['shelf_states'] = result.shelf_states
+                        if result.source_states is not None:
+                            context_state['source_states'] = result.source_states
 
                         # Handle signals in a loop (signals can chain: interview_start → show_selection)
                         from promaia.chat.workflows import get_workflow as _get_wf
@@ -7990,12 +7990,12 @@ The user will type `/send` when ready to send the email.
                                     print_text_fn=print_text,
                                     workflow_prompt=_workflow_prompt,
                                     notepad_content=context_state.get('notepad_content'),
-                                    shelf_states=context_state.get('shelf_states'),
+                                    source_states=context_state.get('source_states'),
                                 ))
                                 if result.notepad_content is not None:
                                     context_state['notepad_content'] = result.notepad_content
-                                if result.shelf_states is not None:
-                                    context_state['shelf_states'] = result.shelf_states
+                                if result.source_states is not None:
+                                    context_state['source_states'] = result.source_states
                                 continue  # Check new result for signals
 
                             elif sig_type == "show_selection":

@@ -33,8 +33,8 @@ class AgenticTurnResult:
     history_messages: List[Dict[str, Any]] = field(default_factory=list)
     # Persistent notepad content (survives across turns)
     notepad_content: Optional[str] = None
-    # Library shelf states (on/off, survives across turns)
-    shelf_states: Optional[Dict[str, Dict]] = None
+    # Context source states (on/off, survives across turns)
+    source_states: Optional[Dict[str, Dict]] = None  # kept as source_states for interface.py compat
 
 
 # ── Tool definitions (Anthropic native format) ──────────────────────────
@@ -1247,14 +1247,55 @@ NOTEPAD_TOOL_DEFINITION = {
     }
 }
 
-LIBRARY_TOOL_DEFINITION = {
-    "name": "library",
+MEMORY_TOOL_DEFINITION = {
+    "name": "memory",
     "description": (
-        "Manage your context library. The library has shelves — each shelf holds "
-        "a named bucket of context (browser sources, query results, etc.). "
-        "Toggle shelves ON to include their content in your prompt, OFF to remove. "
-        "Your library index is always visible showing all shelves and their state. "
-        "Use this to control exactly what context you're working with."
+        "Persistent memory across conversations. Save what you learn about the user, "
+        "their preferences, corrections, and projects. Unlike notepad (this conversation "
+        "only), memories persist forever across all sessions."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["save", "recall", "list", "delete"],
+                "description": (
+                    "save: create or update a memory. "
+                    "recall: load full content of a memory by name. "
+                    "list: show all memory entries. "
+                    "delete: remove a memory."
+                ),
+            },
+            "name": {
+                "type": "string",
+                "description": "Memory name (for save/recall/delete). Use descriptive names like 'user_communication_style' or 'project_mitchell_equity'.",
+            },
+            "content": {
+                "type": "string",
+                "description": "Memory content (for save action).",
+            },
+            "type": {
+                "type": "string",
+                "enum": ["user", "feedback", "project", "reference"],
+                "description": (
+                    "user: who the user is, preferences, role. "
+                    "feedback: corrections and confirmed approaches. "
+                    "project: ongoing work, goals, decisions. "
+                    "reference: where to find things in external systems."
+                ),
+            },
+        },
+        "required": ["action"],
+    },
+}
+
+CONTEXT_TOOL_DEFINITION = {
+    "name": "context",
+    "description": (
+        "Manage your loaded context. Each context source (query results, browser data) "
+        "can be toggled ON (visible in your prompt) or OFF (hidden but stored). "
+        "Your context index is always visible showing all sources and their state."
     ),
     "input_schema": {
         "type": "object",
@@ -1263,30 +1304,55 @@ LIBRARY_TOOL_DEFINITION = {
                 "type": "string",
                 "enum": ["on", "off", "all_on", "all_off", "add", "remove"],
                 "description": (
-                    "on: turn specific shelves on (content visible in prompt). "
-                    "off: turn specific shelves off (content hidden). "
-                    "all_on: turn ALL shelves on. "
-                    "all_off: turn ALL shelves off. "
-                    "add: create a new shelf with content. "
-                    "remove: delete a shelf entirely."
+                    "on: turn specific sources on (content visible). "
+                    "off: turn specific sources off (content hidden). "
+                    "all_on: turn ALL sources on. "
+                    "all_off: turn ALL sources off. "
+                    "add: create a new context source with content. "
+                    "remove: delete a context source entirely."
                 )
             },
-            "shelves": {
+            "sources": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Shelf names to toggle (for on/off/remove actions)"
+                "description": "Source names to toggle (for on/off/remove actions)"
             },
             "name": {
                 "type": "string",
-                "description": "Name for a new shelf (for add action)"
+                "description": "Name for a new context source (for add action)"
             },
             "content": {
                 "type": "string",
-                "description": "Content for a new shelf (for add action)"
+                "description": "Content for a new context source (for add action)"
             },
         },
         "required": ["action"]
     }
+}
+
+ACT_TOOL_DEFINITION = {
+    "name": "act",
+    "description": (
+        "Enter Act mode to execute actions with tools. Loads the specified tool suites. "
+        "Your notes come with you but all context is hidden. Call done() when finished."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "suites": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Tool suites to load (e.g. ['notion', 'google']). Check suite index for available suites."
+            }
+        },
+        "required": ["suites"]
+    }
+}
+
+DONE_TOOL_DEFINITION = {
+    "name": "done",
+    "description": "Exit Act mode and return to Think mode. Context and search tools become available again.",
+    "input_schema": {"type": "object", "properties": {}, "required": []}
 }
 
 TASK_QUEUE_TOOL_DEFINITIONS = [
@@ -2204,8 +2270,8 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     # Notepad — always available (persistent notes across turns)
     tools.append(NOTEPAD_TOOL_DEFINITION)
 
-    # Library — always available (shelved context management)
-    tools.append(LIBRARY_TOOL_DEFINITION)
+    # Context — always available (context source management)
+    tools.append(CONTEXT_TOOL_DEFINITION)
 
     # Config tools — always available
     tools.extend(CONFIG_TOOL_DEFINITIONS)
@@ -2236,6 +2302,139 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     return tools
 
 
+# ── Tool suites (Think/Act mode) ─────────────────────────────────────────
+
+def _build_tool_suite_registry(agent, has_platform: bool = False) -> Dict[str, Dict]:
+    """Build the registry of available tool suites based on agent config.
+
+    Returns: {suite_name: {"tools": [...], "description": "...", "count": N}}
+    """
+    mcp_tools = getattr(agent, 'mcp_tools', []) or []
+    registry = {}
+
+    # Notion
+    if "notion" in mcp_tools:
+        tools = list(NOTION_TOOL_DEFINITIONS) + list(NOTION_BLOCK_TOOL_DEFINITIONS)
+        registry["notion"] = {
+            "tools": tools,
+            "description": "search, create/update pages, read/update blocks, comments",
+            "count": len(tools),
+        }
+
+    # Gmail
+    if "gmail" in mcp_tools:
+        tools = list(GMAIL_TOOL_DEFINITIONS) + list(GMAIL_READ_TOOL_DEFINITIONS)
+        registry["gmail"] = {
+            "tools": tools,
+            "description": "send, draft, reply, search, get threads",
+            "count": len(tools),
+        }
+
+    # Calendar
+    if "calendar" in mcp_tools:
+        tools = list(CALENDAR_TOOL_DEFINITIONS) + list(CALENDAR_READ_TOOL_DEFINITIONS)
+        tools.append(SCHEDULE_AGENT_EVENT_TOOL_DEFINITION)
+        if getattr(agent, 'calendar_id', None):
+            tools.append(SCHEDULE_SELF_TOOL_DEFINITION)
+        registry["calendar"] = {
+            "tools": tools,
+            "description": "create/update/delete events, list, schedule",
+            "count": len(tools),
+        }
+
+    # Google Sheets
+    if "google_sheets" in mcp_tools:
+        tools = list(GOOGLE_SHEETS_TOOL_DEFINITIONS) + list(GOOGLE_SHEETS_FORMAT_TOOL_DEFINITIONS)
+        registry["sheets"] = {
+            "tools": tools,
+            "description": "read, update, append, create, format, find, ingest",
+            "count": len(tools),
+        }
+
+    # Google Drive
+    if "google_drive" in mcp_tools or "google_sheets" in mcp_tools:
+        tools = list(GOOGLE_DRIVE_TOOL_DEFINITIONS)
+        registry["drive"] = {
+            "tools": tools,
+            "description": "search, download, list folders",
+            "count": len(tools),
+        }
+
+    # Google (combined)
+    google_tools = []
+    for suite_name in ("gmail", "calendar", "sheets", "drive"):
+        if suite_name in registry:
+            google_tools.extend(registry[suite_name]["tools"])
+    if google_tools:
+        registry["google"] = {
+            "tools": google_tools,
+            "description": "all gmail + calendar + sheets + drive",
+            "count": len(google_tools),
+        }
+
+    # Web
+    if "web_search" in mcp_tools:
+        tools = list(WEB_SEARCH_TOOL_DEFINITIONS) + list(WEB_FETCH_TOOL_DEFINITIONS)
+        registry["web"] = {
+            "tools": tools,
+            "description": "search and fetch web pages",
+            "count": len(tools),
+        }
+
+    # Messaging (platform-dependent)
+    if has_platform:
+        tools = list(MESSAGING_TOOL_DEFINITIONS)
+        registry["messaging"] = {
+            "tools": tools,
+            "description": "send messages, start conversations",
+            "count": len(tools),
+        }
+
+    # Admin (always available)
+    admin_tools = (
+        list(CONFIG_TOOL_DEFINITIONS)
+        + list(AGENT_TOOL_DEFINITIONS)
+        + list(CHANNEL_TOOL_DEFINITIONS)
+        + list(WORKFLOW_TOOL_DEFINITIONS)
+        + list(_build_interview_tool_definitions())
+        + [SHOW_SELECTION_TOOL_DEFINITION]
+        + [SYNC_DATABASE_TOOL_DEFINITION, LIST_DATABASES_TOOL_DEFINITION, RENAME_DATABASE_TOOL_DEFINITION]
+        + [WORKSPACE_FILES_TOOL_DEFINITION]
+        + list(TASK_QUEUE_TOOL_DEFINITIONS)
+    )
+    registry["admin"] = {
+        "tools": admin_tools,
+        "description": "config, agents, channels, workflows, interviews, sync",
+        "count": len(admin_tools),
+    }
+
+    return registry
+
+
+def _build_suite_index(suite_registry: Dict, mcp_suites: Dict = None) -> str:
+    """Build the suite index text for Think mode system prompt."""
+    lines = [
+        "## Tool Suites\n",
+        "Use `act(suites=[...])` to load tools and enter Act mode.",
+        "Take notes first — context is hidden while acting.\n",
+    ]
+    for name, info in suite_registry.items():
+        lines.append(f"- **{name}** ({info['count']} tools) — {info['description']}")
+    if mcp_suites:
+        for name, info in mcp_suites.items():
+            lines.append(f"- **{name}** ({info['count']} tools) — {info['description']}")
+    return "\n".join(lines)
+
+
+def _get_suite_tools(suite_name: str, suite_registry: Dict, mcp_suites: Dict = None) -> List[Dict]:
+    """Get tool definitions for a suite by name."""
+    if suite_name in suite_registry:
+        return list(suite_registry[suite_name]["tools"])
+    if mcp_suites and suite_name in mcp_suites:
+        return list(mcp_suites[suite_name]["tools"])
+    return []
+
+
 # ── Tool executor ────────────────────────────────────────────────────────
 
 class ToolExecutor:
@@ -2260,8 +2459,8 @@ class ToolExecutor:
         self._sandbox = Sandbox()
         # Persistent notepad (survives across turns within a conversation)
         self._notepad = ""
-        # Library shelves: name → {"content": str, "on": bool, "page_count": int, "source": str}
-        self._shelves = {}
+        # Context sources: name → {"content": str, "on": bool, "page_count": int, "source": str}
+        self._sources = {}
         # External MCP server connections
         self._mcp_client = None        # McpClient instance
         self._mcp_tool_map = {}        # namespaced_name → (server_name, original_name)
@@ -2331,9 +2530,20 @@ class ToolExecutor:
             # Notepad (persistent notes across turns)
             elif tool_name == "notepad":
                 return self._notepad_action(tool_input)
-            # Library shelves (context management)
-            elif tool_name == "library":
-                return self._library_action(tool_input)
+            # Memory (persistent across conversations)
+            elif tool_name == "memory":
+                return self._memory_action(tool_input)
+            # Context management
+            elif tool_name == "context":
+                return self._context_action(tool_input)
+            # Think/Act mode switching (sentinels — handled by the agentic loop)
+            elif tool_name == "act":
+                suites = tool_input.get("suites", [])
+                if not suites:
+                    return "Error: provide at least one suite name."
+                return f"__ACT__:{','.join(suites)}"
+            elif tool_name == "done":
+                return "__DONE__"
             # Config tools
             elif tool_name == "list_source_types":
                 return await self._list_source_types()
@@ -2447,9 +2657,9 @@ class ToolExecutor:
         total_pages = sum(len(pages) for pages in loaded_content.values() if pages)
         formatted = format_context_data(loaded_content)
 
-        # Store in library shelf so results persist across turns
-        shelf_name = f"sql_{query[:30].strip().replace(' ', '_').lower()}"
-        self._shelves[shelf_name] = {
+        # Store as context source so results persist across turns
+        source_name = f"sql_{query[:30].strip().replace(' ', '_').lower()}"
+        self._sources[source_name] = {
             "content": formatted,
             "on": True,
             "page_count": total_pages,
@@ -2457,7 +2667,7 @@ class ToolExecutor:
             "titles": self._extract_titles(loaded_content),
         }
 
-        parts = [f"Found {total_pages} results → shelf '{shelf_name}' [ON]"]
+        parts = [f"Found {total_pages} results → source '{source_name}' [ON]"]
         if metadata and metadata.get('generated_query'):
             parts.append(f"SQL: {metadata['generated_query']}")
         return "\n".join(parts)
@@ -2489,16 +2699,16 @@ class ToolExecutor:
         total_pages = sum(len(pages) for pages in loaded_content.values() if pages)
         formatted = format_context_data(loaded_content)
 
-        # Store in library shelf so results persist across turns
-        shelf_name = f"search_{query[:30].strip().replace(' ', '_').lower()}"
-        self._shelves[shelf_name] = {
+        # Store as context source so results persist across turns
+        source_name = f"search_{query[:30].strip().replace(' ', '_').lower()}"
+        self._sources[source_name] = {
             "content": formatted,
             "on": True,
             "page_count": total_pages,
             "source": "query_vector",
             "titles": self._extract_titles(loaded_content),
         }
-        return f"Found {total_pages} semantically similar results → shelf '{shelf_name}' [ON]"
+        return f"Found {total_pages} semantically similar results → source '{source_name}' [ON]"
 
     async def _query_source(self, tool_input: Dict) -> str:
         from promaia.config.databases import get_database_config
@@ -2526,16 +2736,16 @@ class ToolExecutor:
         time_range = f"last {days} days" if days else "all time"
         formatted = format_context_data({database: pages})
 
-        # Store in library shelf instead of returning full content
-        shelf_name = database.split(".")[-1] if "." in database else database
-        self._shelves[shelf_name] = {
+        # Store as context source instead of returning full content
+        source_name = database.split(".")[-1] if "." in database else database
+        self._sources[source_name] = {
             "content": formatted,
             "on": True,  # ON immediately so agent can read it
             "page_count": len(pages),
             "source": "query_source",
             "titles": self._extract_titles({database: pages}),
         }
-        return f"Loaded {len(pages)} pages from '{database}' ({time_range}) → shelf '{shelf_name}' [ON]"
+        return f"Loaded {len(pages)} pages from '{database}' ({time_range}) → source '{source_name}' [ON]"
 
     async def _write_journal(self, tool_input: Dict) -> str:
         from promaia.agents.notion_journal import write_journal_entry
@@ -5092,80 +5302,104 @@ class ToolExecutor:
         else:
             return f"Unknown notepad action: {action}"
 
-    # ── Library (shelved context management) ────────────────────────────
+    def _memory_action(self, tool_input: Dict) -> str:
+        from promaia.agents.memory_store import (
+            load_memory_index, load_memory_file, save_memory, delete_memory,
+        )
+        action = tool_input.get("action", "list")
+        name = tool_input.get("name", "").strip()
 
-    def _library_action(self, tool_input: Dict) -> str:
+        if action == "save":
+            content = tool_input.get("content", "")
+            mem_type = tool_input.get("type", "project")
+            return save_memory(self.workspace, name, content, mem_type)
+        elif action == "recall":
+            if not name:
+                return "Error: provide a memory name to recall."
+            return load_memory_file(self.workspace, name)
+        elif action == "list":
+            index = load_memory_index(self.workspace)
+            return index if index else "No memories saved yet."
+        elif action == "delete":
+            if not name:
+                return "Error: provide a memory name to delete."
+            return delete_memory(self.workspace, name)
+        else:
+            return f"Unknown memory action: {action}"
+
+    # ── Context source management ────────────────────────────────────────
+
+    def _context_action(self, tool_input: Dict) -> str:
         action = tool_input.get("action", "on")
 
         if action == "on":
-            names = tool_input.get("shelves", [])
+            names = tool_input.get("sources", []) or tool_input.get("shelves", [])
             if not names:
-                return "Error: provide shelf names to turn on."
+                return "Error: provide source names to turn on."
             turned_on = []
             for name in names:
-                if name in self._shelves:
-                    self._shelves[name]["on"] = True
+                if name in self._sources:
+                    self._sources[name]["on"] = True
                     turned_on.append(name)
             if turned_on:
-                return f"Shelves turned ON: {', '.join(turned_on)}. Their content is now in your context."
-            return f"No matching shelves found. Available: {', '.join(self._shelves.keys())}"
+                return f"Context ON: {', '.join(turned_on)}. Content now visible."
+            return f"No matching sources. Available: {', '.join(self._sources.keys())}"
 
         elif action == "off":
-            names = tool_input.get("shelves", [])
+            names = tool_input.get("sources", []) or tool_input.get("shelves", [])
             if not names:
-                return "Error: provide shelf names to turn off."
+                return "Error: provide source names to turn off."
             turned_off = []
             for name in names:
-                if name in self._shelves:
-                    self._shelves[name]["on"] = False
+                if name in self._sources:
+                    self._sources[name]["on"] = False
                     turned_off.append(name)
             if turned_off:
-                return f"Shelves turned OFF: {', '.join(turned_off)}. Their content removed from context."
-            return f"No matching shelves found. Available: {', '.join(self._shelves.keys())}"
+                return f"Context OFF: {', '.join(turned_off)}. Content hidden."
+            return f"No matching sources. Available: {', '.join(self._sources.keys())}"
 
         elif action == "all_on":
-            for shelf in self._shelves.values():
-                shelf["on"] = True
-            return f"All {len(self._shelves)} shelves turned ON."
+            for src in self._sources.values():
+                src["on"] = True
+            return f"All {len(self._sources)} sources turned ON."
 
         elif action == "all_off":
-            for shelf in self._shelves.values():
-                shelf["on"] = False
-            return f"All {len(self._shelves)} shelves turned OFF."
+            for src in self._sources.values():
+                src["on"] = False
+            return f"All {len(self._sources)} sources turned OFF."
 
         elif action == "add":
             name = tool_input.get("name", "").strip()
             content = tool_input.get("content", "")
             if not name:
-                return "Error: shelf name is required."
+                return "Error: source name is required."
             if not content:
-                return "Error: shelf content is required."
-            # Estimate page count from content
-            page_count = content.count("\n**") + 1  # rough heuristic
-            self._shelves[name] = {
+                return "Error: source content is required."
+            page_count = content.count("\n**") + 1
+            self._sources[name] = {
                 "content": content,
-                "on": False,  # off by default — agent decides when to view
+                "on": False,
                 "page_count": page_count,
-                "source": "query",
+                "source": "manual",
             }
-            return f"Shelf '{name}' added ({len(content)} chars). Turn it ON to include in context."
+            return f"Context source '{name}' added ({len(content)} chars). Turn it ON to include in context."
 
         elif action == "remove":
-            names = tool_input.get("shelves", [])
+            names = tool_input.get("sources", []) or tool_input.get("shelves", [])
             name = tool_input.get("name", "").strip()
             to_remove = names if names else ([name] if name else [])
             if not to_remove:
-                return "Error: provide shelf name(s) to remove."
+                return "Error: provide source name(s) to remove."
             removed = []
             for n in to_remove:
-                if n in self._shelves:
-                    del self._shelves[n]
+                if n in self._sources:
+                    del self._sources[n]
                     removed.append(n)
             if removed:
-                return f"Shelves removed: {', '.join(removed)}"
-            return "No matching shelves found."
+                return f"Sources removed: {', '.join(removed)}"
+            return "No matching sources found."
 
-        return f"Unknown library action: {action}"
+        return f"Unknown context action: {action}"
 
     @staticmethod
     def _extract_titles(pages_dict: dict) -> list:
@@ -5179,34 +5413,34 @@ class ToolExecutor:
                     titles.append(title)
         return titles
 
-    def build_library_index(self) -> str:
-        """Build the library index string for the system prompt."""
-        if not self._shelves:
+    def build_context_index(self) -> str:
+        """Build the context index string for the system prompt."""
+        if not self._sources:
             return ""
         lines = [
-            "## Library\n",
-            "Your context library. Toggle shelves ON/OFF with the library tool.",
-            "Check here BEFORE searching — the data you need may already be on a shelf.\n",
+            "## Your Context\n",
+            "Toggle sources ON/OFF with the `context` tool.",
+            "Check here BEFORE searching — the data you need may already be loaded.\n",
         ]
-        for name, shelf in self._shelves.items():
-            state = "ON" if shelf["on"] else "OFF"
-            source = shelf.get("source", "unknown")
-            count = shelf.get("page_count", 0)
-            chars = len(shelf.get("content", ""))
-            lines.append(f"- [{state}] **{name}** ({count} entries, {chars // 1000}k chars, source: {source})")
-            # OFF shelves show title index so agent knows what's available without loading
-            if not shelf["on"]:
-                titles = shelf.get("titles", [])
+        for name, src in self._sources.items():
+            state = "ON" if src["on"] else "OFF"
+            origin = src.get("source", "unknown")
+            count = src.get("page_count", 0)
+            chars = len(src.get("content", ""))
+            lines.append(f"- [{state}] **{name}** ({count} entries, {chars // 1000}k chars, source: {origin})")
+            # OFF sources show titles so agent knows what's available without loading
+            if not src["on"]:
+                titles = src.get("titles", [])
                 for t in titles:
                     lines.append(f"  - {t}")
         return "\n".join(lines)
 
-    def build_active_shelf_content(self) -> str:
-        """Build the combined content of all ON shelves for the system prompt."""
+    def build_active_source_content(self) -> str:
+        """Build the combined content of all ON sources for the system prompt."""
         parts = []
-        for name, shelf in self._shelves.items():
-            if shelf["on"] and shelf.get("content"):
-                parts.append(shelf["content"])
+        for name, src in self._sources.items():
+            if src["on"] and src.get("content"):
+                parts.append(src["content"])
         return "\n\n".join(parts)
 
     # ── Workspace file tools ────────────────────────────────────────────
@@ -6467,22 +6701,27 @@ async def agentic_turn(
     on_tool_activity: Optional[ToolActivityCallback] = None,
     plan: Optional[List[str]] = None,
     context_data_block: str = "",
+    suite_registry: Optional[Dict] = None,
+    mcp_suites: Optional[Dict] = None,
 ) -> AgenticTurnResult:
     """
     Run a self-contained agentic turn with tool use.
 
-    Manages its own internal message history (with tool_use/tool_result blocks)
-    but returns only plain text. The conversation manager never sees tool blocks.
+    Operates in Think/Act modes:
+    - Think mode: query tools + notepad + context + suite index (no action tool schemas)
+    - Act mode: loaded suite tools + notepad only (no context, no queries)
 
     Args:
         system_prompt: Base system prompt (without context data)
         messages: Conversation history (plain text messages only)
-        tools: Anthropic tool definitions
+        tools: Anthropic tool definitions (used as fallback if no suite_registry)
         tool_executor: Executes tool calls
         max_iterations: Max loop iterations (from agent config)
         on_tool_activity: Optional callback for UX activity updates
         plan: Optional list of plan steps to inject into the system prompt
-        context_data_block: Loaded database pages block (used for browser-loaded shelf parsing)
+        context_data_block: Loaded database pages block (used for browser-loaded source parsing)
+        suite_registry: Tool suite registry for Think/Act mode switching
+        mcp_suites: External MCP tool suites (dynamically discovered)
 
     Returns:
         AgenticTurnResult with plain text response and metadata
@@ -6526,51 +6765,72 @@ async def agentic_turn(
     _step_marker_seen = False
     _current_step = 0  # 0 = not started yet
 
+    # Think/Act mode state
+    act_mode = False
+    act_suites: List[str] = []
+    use_think_act = suite_registry is not None  # Feature flag: only use Think/Act if registry provided
+
     for iteration in range(max_iterations):
         budget_note = (
             f"\n\n[Tool budget: {max_iterations - iteration}/{max_iterations} "
             f"iterations remaining]"
         )
 
-        # Build effective prompt: base + dynamic library index + active shelf content
+        # ── Build effective prompt and tool list per mode ──────────────
         effective_prompt = system_prompt
 
-        # Rebuild library index each iteration (shelves change during the loop)
-        if tool_executor and hasattr(tool_executor, 'build_library_index'):
-            library_index = tool_executor.build_library_index()
-            if library_index:
-                effective_prompt += "\n\n" + library_index
+        if use_think_act and not act_mode:
+            # THINK MODE: context index + active content + suite index
+            if tool_executor and hasattr(tool_executor, 'build_context_index'):
+                ctx_index = tool_executor.build_context_index()
+                if ctx_index:
+                    effective_prompt += "\n\n" + ctx_index
 
-        # Inject active shelf content (only shelves that are ON)
-        # Also build a context management nudge when large shelves are active
-        if tool_executor and hasattr(tool_executor, '_shelves'):
-            active_content = tool_executor.build_active_shelf_content()
-            if active_content:
-                effective_prompt += "\n\n" + active_content
+            if tool_executor and hasattr(tool_executor, '_sources'):
+                active_content = tool_executor.build_active_source_content()
+                if active_content:
+                    effective_prompt += "\n\n" + active_content
 
-            # Nudge: remind agent to manage context when large shelves are ON
-            large_on_shelves = [
-                (name, len(s.get("content", "")))
-                for name, s in tool_executor._shelves.items()
-                if s.get("on") and len(s.get("content", "")) > 10_000
-            ]
-            if large_on_shelves:
-                shelf_summary = ", ".join(
-                    f"'{name}' ({chars // 1000}k chars)" for name, chars in large_on_shelves
-                )
-                budget_note += (
-                    f"\n\n[CONTEXT MANAGEMENT: Large shelves are ON: {shelf_summary}. "
-                    f"If you only need a few entries, note what you need and turn the shelf OFF. "
-                    f"Do this NOW as a tool call alongside your response.]"
-                )
+            effective_prompt += "\n\n" + _build_suite_index(suite_registry, mcp_suites)
+
+            # Think mode tools: query + notepad + memory + context + act
+            iteration_tools = list(QUERY_TOOL_DEFINITIONS)
+            iteration_tools.append(NOTEPAD_TOOL_DEFINITION)
+            iteration_tools.append(MEMORY_TOOL_DEFINITION)
+            iteration_tools.append(CONTEXT_TOOL_DEFINITION)
+            iteration_tools.append(ACT_TOOL_DEFINITION)
+
+        elif use_think_act and act_mode:
+            # ACT MODE: no context, no suite index — just notes + memory + loaded suites
+            budget_note += f"\n\n[ACT MODE: {', '.join(act_suites)}. Call done() when finished.]"
+
+            # Act mode tools: loaded suites + notepad + memory + done
+            iteration_tools = []
+            for suite_name in act_suites:
+                iteration_tools.extend(_get_suite_tools(suite_name, suite_registry, mcp_suites))
+            iteration_tools.append(NOTEPAD_TOOL_DEFINITION)
+            iteration_tools.append(MEMORY_TOOL_DEFINITION)
+            iteration_tools.append(DONE_TOOL_DEFINITION)
+
+        else:
+            # Legacy mode (no suite registry): all tools, all context
+            iteration_tools = tools
+            if tool_executor and hasattr(tool_executor, 'build_context_index'):
+                ctx_index = tool_executor.build_context_index()
+                if ctx_index:
+                    effective_prompt += "\n\n" + ctx_index
+            if tool_executor and hasattr(tool_executor, '_sources'):
+                active_content = tool_executor.build_active_source_content()
+                if active_content:
+                    effective_prompt += "\n\n" + active_content
 
         # Proactive context trimming before API call
         from promaia.agents.context_trimmer import trim_context_to_fit
         trimmed_system, internal_messages = await trim_context_to_fit(
-            effective_prompt + budget_note, internal_messages, tools=tools
+            effective_prompt + budget_note, internal_messages, tools=iteration_tools
         )
 
-        # Log the effective prompt on first iteration so we can debug what the agent sees
+        # Log the effective prompt (first iteration and on mode switches)
         if iteration == 0:
             try:
                 from promaia.utils.env_writer import get_data_dir
@@ -6591,8 +6851,8 @@ async def agentic_turn(
             messages=internal_messages,
             max_tokens=4096,
         )
-        if tools:
-            api_kwargs["tools"] = tools
+        if iteration_tools:
+            api_kwargs["tools"] = iteration_tools
 
         try:
             response = await asyncio.to_thread(
@@ -6742,8 +7002,25 @@ async def agentic_turn(
             # Execute tool
             result_text = await tool_executor.execute(tool_use.name, tool_use.input)
 
+            # Handle Think/Act mode switching sentinels (stay in loop)
+            if result_text.startswith("__ACT__:"):
+                suite_names = [s.strip() for s in result_text.split(":", 1)[1].split(",")]
+                act_mode = True
+                act_suites = suite_names
+                # Force all context OFF
+                if tool_executor and hasattr(tool_executor, '_sources'):
+                    for src in tool_executor._sources.values():
+                        src["on"] = False
+                result_text = f"Act mode. Suites loaded: {', '.join(suite_names)}. All context hidden. Work from your notes."
+                logger.info(f"[think/act] Entered Act mode with suites: {suite_names}")
+            elif result_text == "__DONE__":
+                act_mode = False
+                act_suites = []
+                result_text = "Back to Think mode. Context and search tools available."
+                logger.info("[think/act] Returned to Think mode")
+
             # Handle interview sentinels — break out of loop and return with signal
-            if result_text.startswith("__INTERVIEW_START__:"):
+            elif result_text.startswith("__INTERVIEW_START__:"):
                 workflow_name = result_text[len("__INTERVIEW_START__:"):]
                 return AgenticTurnResult(
                     response_text="\n".join(text_parts),

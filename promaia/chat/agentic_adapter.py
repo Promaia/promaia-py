@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from promaia.agents.agentic_turn import (
     AgenticTurnResult,
     ToolExecutor,
+    _build_tool_suite_registry,
     _generate_plan,
     agentic_turn,
     build_tool_definitions,
@@ -462,40 +463,14 @@ def build_agentic_system_prompt(
     filled = template.replace("{agent_name}", "Maia")
     filled = filled.replace("{platform}", "terminal")
     filled = filled.replace("{sources}", sources_list)
-    filled = filled.replace("{tool_sections}", tool_sections)
-    filled = filled.replace("{notion_guidance}", notion_guidance)
+    # Tool sections are no longer embedded in the prompt — Think/Act mode handles this.
+    # Think mode shows a compact suite index, Act mode loads full tool schemas via API.
+    filled = filled.replace("{tool_sections}", "")
+    filled = filled.replace("{notion_guidance}", "")
 
-    if workflow_section:
-        filled += "\n\n" + workflow_section
-
-    # Add external MCP tool descriptions if any are connected
-    if mcp_tool_descriptions:
-        mcp_lines = [
-            "## External MCP Tools\n",
-            "The following tools are available from external MCP servers. "
-            "Call them by their full name (including the mcp__ prefix).\n",
-        ]
-        for tool_def in mcp_tool_descriptions:
-            mcp_lines.append(f"- **{tool_def['name']}**: {tool_def['description']}")
-        filled += "\n\n" + "\n".join(mcp_lines)
-
-    # Load saved workflows for prompt
-    try:
-        from promaia.tools.workflow_store import list_workflows_for_prompt
-        wf_summaries = list_workflows_for_prompt(workspace)
-        if wf_summaries:
-            wf_lines = [
-                "## Saved Workflows\n",
-                "You have saved workflows available. When you recognize a user's request "
-                "matches a saved workflow, mention it and ask if they'd like you to follow it. "
-                "Use `get_workflow_details` to load the full steps and example runs before executing. "
-                "After completing a workflow, offer to save the run as an example.\n",
-            ]
-            for wf in wf_summaries:
-                wf_lines.append(f"- **{wf['name']}**: {wf['description']}")
-            filled += "\n\n" + "\n".join(wf_lines)
-    except Exception as e:
-        logger.debug(f"Could not load saved workflows: {e}")
+    # Workflow/interview descriptions, MCP tool descriptions, and saved workflows
+    # are NOT injected into the prompt. They appear in the suite index (Think mode)
+    # and as loaded tool schemas (Act mode).
 
     return base_prompt + "\n\n" + filled
 
@@ -541,29 +516,51 @@ def make_terminal_activity_callback(
             print_text_fn("  ✂️  Context too large, trimming and retrying", style="dim yellow")
             return
 
-        # Library shelf toggle
-        if tool_name == "library" and completed:
+        # Context toggle
+        if tool_name == "context" and completed:
             action = (tool_input or {}).get("action", "")
-            shelves = (tool_input or {}).get("shelves", [])
+            sources = (tool_input or {}).get("sources", []) or (tool_input or {}).get("shelves", [])
             name = (tool_input or {}).get("name", "")
-            target = ", ".join(shelves) if shelves else name
+            target = ", ".join(sources) if sources else name
             if action in ("on", "all_on"):
-                print_text_fn(f"  📖 Shelf ON: {target or 'all'}", style="dim cyan")
+                print_text_fn(f"  📖 Context ON: {target or 'all'}", style="dim cyan")
             elif action in ("off", "all_off"):
-                print_text_fn(f"  📕 Shelf OFF: {target or 'all'}", style="dim cyan")
+                print_text_fn(f"  📕 Context OFF: {target or 'all'}", style="dim cyan")
             elif action == "add":
-                print_text_fn(f"  📚 Shelf added: {name}", style="dim cyan")
+                print_text_fn(f"  📚 Context added: {name}", style="dim cyan")
             elif action == "remove":
-                print_text_fn(f"  🗑️  Shelf removed: {target}", style="dim cyan")
+                print_text_fn(f"  🗑️  Context removed: {target}", style="dim cyan")
+            return
+
+        # Think/Act mode switching
+        if tool_name == "act" and completed:
+            suites = (tool_input or {}).get("suites", [])
+            print_text_fn(f"  🔧 Act mode ({', '.join(suites)})", style="dim yellow")
+            return
+        if tool_name == "done" and completed:
+            print_text_fn("  📚 Think mode", style="dim cyan")
             return
 
         # Notepad update
         if tool_name == "notepad" and completed:
             action = (tool_input or {}).get("action", "")
-            if action == "clear":
-                print_text_fn("  📝 Notes cleared", style="dim cyan")
-            else:
-                print_text_fn(f"  📝 Notes {action}d", style="dim cyan")
+            labels = {"write": "updated", "append": "appended", "clear": "cleared", "read": "read"}
+            label = labels.get(action, action)
+            print_text_fn(f"  📝 Notes {label}", style="dim cyan")
+            return
+
+        # Memory
+        if tool_name == "memory" and completed:
+            action = (tool_input or {}).get("action", "")
+            name = (tool_input or {}).get("name", "")
+            if action == "save":
+                print_text_fn(f"  💾 Memory saved: {name}", style="dim cyan")
+            elif action == "recall":
+                print_text_fn(f"  🧠 Memory recalled: {name}", style="dim cyan")
+            elif action == "delete":
+                print_text_fn(f"  🗑️  Memory deleted: {name}", style="dim cyan")
+            elif action == "list":
+                print_text_fn("  🧠 Memory listed", style="dim cyan")
             return
 
         # Regular tool activity
@@ -629,12 +626,17 @@ def _summarize_tool_input(tool_name: str, tool_input: Dict) -> str:
         if rng:
             parts.append(rng)
         return f": {' '.join(parts)}" if parts else ""
-    elif tool_name == "library":
+    elif tool_name == "context":
         action = tool_input.get("action", "")
-        shelves = tool_input.get("shelves", [])
+        sources = tool_input.get("sources", []) or tool_input.get("shelves", [])
         name = tool_input.get("name", "")
-        target = ", ".join(shelves) if shelves else name
+        target = ", ".join(sources) if sources else name
         return f": {action} {target}" if target else f": {action}"
+    elif tool_name == "act":
+        suites = tool_input.get("suites", [])
+        return f": {', '.join(suites)}" if suites else ""
+    elif tool_name == "done":
+        return ""
     elif tool_name == "notepad":
         action = tool_input.get("action", "")
         return f": {action}"
@@ -656,7 +658,7 @@ async def run_agentic_turn(
     print_text_fn: Callable[..., None],
     workflow_prompt: Optional[str] = None,
     notepad_content: Optional[str] = None,
-    shelf_states: Optional[Dict[str, Dict]] = None,
+    source_states: Optional[Dict[str, Dict]] = None,
 ) -> AgenticTurnResult:
     """Run an agentic turn using the full autonomous tool loop.
 
@@ -680,8 +682,11 @@ async def run_agentic_turn(
         agent_calendars=agent_calendars,
     )
 
-    # Build tool definitions
+    # Build tool definitions (legacy, used as fallback)
     tools = build_tool_definitions(shim, has_platform=False)
+
+    # Build suite registry for Think/Act mode
+    suite_registry = _build_tool_suite_registry(shim, has_platform=False)
 
     # Create tool executor
     executor = ToolExecutor(agent=shim, workspace=workspace)
@@ -690,25 +695,40 @@ async def run_agentic_turn(
     if notepad_content:
         executor._notepad = notepad_content
 
-    # Restore full shelves from previous turn (content + on/off state)
-    context_state_shelves = shelf_states or {}
-    if context_state_shelves:
-        for name, shelf_data in context_state_shelves.items():
-            # Only restore query-created shelves (browser shelves get rebuilt from context)
-            if shelf_data.get("source") != "browser":
-                executor._shelves[name] = dict(shelf_data)
-                logger.info(f"Restored shelf '{name}': on={shelf_data.get('on')}, {len(shelf_data.get('content', ''))} chars")
+    # Restore context sources from previous turn (content + on/off state)
+    prev_sources = source_states or {}
+    if prev_sources:
+        for name, source_data in prev_sources.items():
+            # Only restore query-created sources (browser sources get rebuilt from context)
+            if source_data.get("source") != "browser":
+                executor._sources[name] = dict(source_data)
+                logger.info(f"Restored source '{name}': on={source_data.get('on')}, {len(source_data.get('content', ''))} chars")
     else:
-        logger.info("No shelf states to restore from previous turn")
+        logger.info("No context source states to restore from previous turn")
 
     # Connect external MCP servers and discover their tools
     mcp_tool_defs = []
+    mcp_suites = {}
     try:
         await executor.connect_mcp_servers()
         mcp_tool_defs = await executor.get_mcp_tool_definitions()
         if mcp_tool_defs:
             tools.extend(mcp_tool_defs)
             logger.info(f"Added {len(mcp_tool_defs)} MCP tools from external servers")
+            # Group MCP tools into suites by server name (mcp__{server}__{tool})
+            from collections import defaultdict
+            mcp_groups = defaultdict(list)
+            for td in mcp_tool_defs:
+                parts = td["name"].split("__")
+                if len(parts) >= 3:
+                    server_name = parts[1]
+                    mcp_groups[server_name].append(td)
+            for server_name, server_tools in mcp_groups.items():
+                mcp_suites[server_name] = {
+                    "tools": server_tools,
+                    "description": f"{server_name} MCP tools",
+                    "count": len(server_tools),
+                }
     except Exception as e:
         logger.warning(f"MCP server connection failed (continuing without): {e}")
 
@@ -723,12 +743,18 @@ async def run_agentic_turn(
     if executor._notepad:
         enhanced_prompt += f"\n\n## Working Notes\n\n{executor._notepad}"
 
+    # Inject persistent memory index (always visible, like notepad)
+    from promaia.agents.memory_store import load_memory_index
+    memory_index = load_memory_index(workspace)
+    if memory_index:
+        enhanced_prompt += f"\n\n## Memory\n\n{memory_index}"
+
     # Inject active workflow prompt if in an interview
     if workflow_prompt:
         enhanced_prompt = workflow_prompt + "\n\n" + enhanced_prompt
 
-    # Split prompt into base + context block → create library shelves
-    # Each database source becomes its own shelf, OFF by default
+    # Split prompt into base + context block → create context sources
+    # Each database becomes its own context source, OFF by default
     context_marker = "\n\n## Context ("
     context_data_block = ""
     if context_marker in enhanced_prompt:
@@ -737,7 +763,7 @@ async def run_agentic_turn(
         context_data_block = enhanced_prompt[split_idx:]
         enhanced_prompt = base_prompt_part
 
-        # Parse individual database sections into shelves
+        # Parse individual database sections into context sources
         import re
         db_pattern = re.compile(
             r'### === (.+?) DATABASE \((\d+) entries\) ===\n',
@@ -749,17 +775,17 @@ async def run_agentic_turn(
             # Extract content from this match to the next (or end)
             start = match.start()
             end = matches[i + 1].start() if i + 1 < len(matches) else len(context_data_block)
-            shelf_content = context_data_block[start:end]
+            source_content = context_data_block[start:end]
 
-            # Restore shelf state from previous turn, default ON for browser-loaded
-            prev_state = context_state_shelves.get(db_name, {}).get("on", True) if context_state_shelves else True
+            # Restore source state from previous turn, default ON for browser-loaded
+            prev_state = prev_sources.get(db_name, {}).get("on", True) if prev_sources else True
 
             # Extract entry titles from formatted content
             title_pattern = re.compile(r'File: `(.+?)`\)')
-            titles = [m.group(1) for m in title_pattern.finditer(shelf_content)]
+            titles = [m.group(1) for m in title_pattern.finditer(source_content)]
 
-            executor._shelves[db_name] = {
-                "content": shelf_content,
+            executor._sources[db_name] = {
+                "content": source_content,
                 "on": prev_state,
                 "page_count": page_count,
                 "source": "browser",
@@ -767,7 +793,7 @@ async def run_agentic_turn(
             }
 
     # Library index is built dynamically inside the agentic loop each iteration
-    # (shelves change during the loop as tools load/toggle context)
+    # (sources change during the loop as tools load/toggle context)
 
     # Build activity callback
     activity_cb = make_terminal_activity_callback(print_text_fn)
@@ -805,12 +831,14 @@ async def run_agentic_turn(
             on_tool_activity=activity_cb,
             plan=plan,
             context_data_block=context_data_block,
+            suite_registry=suite_registry,
+            mcp_suites=mcp_suites if mcp_suites else None,
         )
     finally:
         await executor.disconnect_mcp_servers()
 
-    # Persist notepad and full shelf data for next turn
+    # Persist notepad and context source data for next turn
     result.notepad_content = executor._notepad or None
-    result.shelf_states = dict(executor._shelves) if executor._shelves else None
+    result.source_states = dict(executor._sources) if executor._sources else None
 
     return result
