@@ -275,7 +275,7 @@ class DatabaseManager:
                 db_section = databases[db_key]
 
         if db_section is None:
-            logger.warning(f"save_database_field: database '{db_config.name}' not found on disk, falling back to full save")
+            logger.debug(f"save_database_field: database '{db_config.name}' not found on disk, falling back to full save")
             self.save_config()
             return
 

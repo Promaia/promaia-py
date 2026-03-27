@@ -1849,7 +1849,7 @@ class HybridContentRegistry:
 
             else:
                 # Unknown type, try to serialize as JSON
-                logger.warning(f"Unknown property type: {prop_type}")
+                logger.debug(f"Unknown property type: {prop_type}")
                 return json.dumps(property_data)
 
         except Exception as e:
@@ -2595,7 +2595,7 @@ class HybridContentRegistry:
                     columns = {row[1] for row in cursor.fetchall()}
 
                     if column_name in columns:
-                        logger.warning(f"Column '{column_name}' already exists in {table_name}, skipping")
+                        logger.debug(f"Column '{column_name}' already exists in {table_name}, skipping")
                         continue
 
                     # Add the column
