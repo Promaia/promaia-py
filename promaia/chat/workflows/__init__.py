@@ -54,3 +54,4 @@ from promaia.chat.workflows import create_agent as _ca  # noqa: F401
 from promaia.chat.workflows import agent_edit as _ae  # noqa: F401
 from promaia.chat.workflows import database_edit as _de  # noqa: F401
 from promaia.chat.workflows import onboarding_agent as _oa  # noqa: F401
+from promaia.chat.workflows import onboard_tutorial as _ot  # noqa: F401
