@@ -1550,6 +1550,8 @@ Subject: {subject}
         subject: str,
         body_text: str,
         body_html: Optional[str] = None,
+        cc: Optional[str] = None,
+        bcc: Optional[str] = None,
         thread_id: Optional[str] = None,
         in_reply_to: Optional[str] = None,
         references: Optional[str] = None,
@@ -1593,6 +1595,10 @@ Subject: {subject}
 
             message['to'] = to
             message['subject'] = subject
+            if cc:
+                message['cc'] = cc
+            if bcc:
+                message['bcc'] = bcc
 
             # Add threading headers for replies
             if in_reply_to:

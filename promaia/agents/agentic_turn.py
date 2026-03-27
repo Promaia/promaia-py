@@ -167,7 +167,11 @@ GMAIL_TOOL_DEFINITIONS = [
                 },
                 "cc": {
                     "type": "string",
-                    "description": "CC recipients (optional)"
+                    "description": "CC recipients (comma-separated, optional)"
+                },
+                "bcc": {
+                    "type": "string",
+                    "description": "BCC recipients (comma-separated, optional)"
                 },
                 "attachment_paths": {
                     "type": "array",
@@ -2470,9 +2474,18 @@ class ToolExecutor:
             return "Error: missing 'content' parameter"
 
         note_type = tool_input.get("note_type", "Note")
+        agent_id = self.agent.agent_id
+
+        # For terminal chat (no real agent), find the workspace journal database
+        # and write directly instead of looking up a non-existent agent config
+        if agent_id == "terminal-user":
+            try:
+                return await self._write_journal_to_workspace(content, note_type)
+            except Exception as e:
+                return f"Error writing to workspace journal: {e}"
 
         await write_journal_entry(
-            agent_id=self.agent.agent_id,
+            agent_id=agent_id,
             workspace=self.workspace,
             entry_type=note_type,
             content=content,
@@ -2480,6 +2493,56 @@ class ToolExecutor:
         )
 
         return f"Wrote {note_type} to journal successfully."
+
+    async def _write_journal_to_workspace(self, content: str, note_type: str) -> str:
+        """Write a journal entry to the workspace's journal database directly."""
+        from promaia.config.databases import get_database_manager
+        from promaia.connectors.notion_connector import get_client
+        from promaia.agents.notion_journal import _derive_title
+
+        # Find the workspace journal database
+        db_manager = get_database_manager()
+        journal_db = None
+        for db in db_manager.get_workspace_databases(self.workspace):
+            if db.nickname == "journal" and db.source_type == "notion":
+                journal_db = db
+                break
+
+        if not journal_db:
+            return "Error: no journal database found for this workspace."
+
+        client = get_client(self.workspace)
+        title = _derive_title(content)
+
+        from datetime import datetime
+        now = datetime.now()
+
+        properties = {
+            "Name": {"title": [{"text": {"content": title}}]},
+            "Date": {"date": {"start": now.strftime("%Y-%m-%d")}},
+        }
+
+        # Build content blocks (Notion limit: ~2000 chars per block)
+        children = []
+        chunk_size = 1900
+        for i in range(0, len(content), chunk_size):
+            chunk = content[i:i + chunk_size]
+            children.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"text": {"content": chunk}}]
+                }
+            })
+
+        response = await client.pages.create(
+            parent={"database_id": journal_db.database_id},
+            properties=properties,
+            children=children
+        )
+
+        page_id = response.get("id") if isinstance(response, dict) else getattr(response, "id", None)
+        return f"Wrote {note_type} to journal: {title} (page: {page_id})"
 
     # ── Messaging tools ───────────────────────────────────────────────────
 
@@ -2734,6 +2797,7 @@ class ToolExecutor:
             subject=tool_input["subject"],
             body_text=tool_input["body"],
             cc=tool_input.get("cc"),
+            bcc=tool_input.get("bcc"),
             attachments=attachments,
         )
         attach_note = f" with {len(attachments)} attachment(s)" if attachments else ""
