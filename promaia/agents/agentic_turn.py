@@ -2431,10 +2431,15 @@ def _build_suite_index(suite_registry: Dict, mcp_suites: Dict = None, workspace:
         if wf_summaries:
             lines.append("")
             lines.append("## Saved Workflows\n")
-            lines.append("If the user's request matches a saved workflow, use it!")
-            lines.append("Load with `act(suites=[\"admin\"])` → `get_workflow_details(name=\"...\")` → follow the steps.\n")
+            lines.append("If the user's request matches a saved workflow, **always load and follow it**.")
+            lines.append("Do NOT improvise from the description — the workflow has specific steps you must follow.")
+            lines.append("`act(suites=[\"admin\"])` → `get_workflow_details(name=\"...\")` → follow the steps exactly.\n")
             for wf in wf_summaries:
-                lines.append(f"- **{wf['name']}**: {wf['description']}")
+                # Truncate description to avoid giving enough info to improvise
+                desc = wf['description']
+                if len(desc) > 60:
+                    desc = desc[:57] + "..."
+                lines.append(f"- **{wf['name']}**: {desc} *(load for details)*")
     except Exception:
         pass
 
