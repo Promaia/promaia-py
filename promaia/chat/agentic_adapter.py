@@ -744,10 +744,13 @@ async def run_agentic_turn(
         enhanced_prompt += f"\n\n## Working Notes\n\n{executor._notepad}"
 
     # Inject persistent memory index (always visible, like notepad)
-    from promaia.agents.memory_store import load_memory_index
-    memory_index = load_memory_index(workspace)
-    if memory_index:
-        enhanced_prompt += f"\n\n## Memory\n\n{memory_index}"
+    try:
+        from promaia.agents.memory_store import load_memory_index
+        memory_index = load_memory_index(workspace)
+        if memory_index:
+            enhanced_prompt += f"\n\n## Memory\n\n{memory_index}"
+    except ImportError:
+        pass  # memory_store not yet available on this branch
 
     # Inject active workflow prompt if in an interview
     if workflow_prompt:

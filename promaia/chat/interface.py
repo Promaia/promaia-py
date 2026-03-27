@@ -5629,7 +5629,8 @@ The user will type `/send` to trigger the actual sending process.
                     except Exception as e:
                         logger.error(f"Agentic turn failed: {e}", exc_info=True)
                         print_text(f"\n⚠️  Agentic mode error ({type(e).__name__}): {e}", style="bold red")
-                        print_text("   Falling back to standard call\n", style="dim yellow")
+                        print_text("   Please try again.\n", style="dim yellow")
+                        continue
 
                 # Standard Anthropic call (or fallback from agentic failure)
                 if response_content is None:
@@ -8094,7 +8095,8 @@ The user will type `/send` when ready to send the email.
                     except Exception as e:
                         logger.error(f"Agentic turn failed: {e}", exc_info=True)
                         print_text(f"\n⚠️  Agentic mode error ({type(e).__name__}): {e}", style="bold red")
-                        print_text("   Falling back to standard call\n", style="dim yellow")
+                        print_text("   Please try again.\n", style="dim yellow")
+                        continue
 
                 # Direct API calls (streaming removed for reliability)
                 if current_api == "anthropic" and anthropic_client and response_content is None:
