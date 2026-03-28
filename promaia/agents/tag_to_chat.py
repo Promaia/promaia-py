@@ -397,7 +397,7 @@ class TagToChatLoop:
 
         # Post thinking message immediately
         thinking_msg = await self._post_temp_message(
-            f"promaia is thinking {random.choice(THINKING_EMOJIS)}"
+            random.choice(THINKING_EMOJIS)
         )
         if thinking_msg:
             self.state.temp_message_id = thinking_msg
@@ -513,10 +513,7 @@ class TagToChatLoop:
                         )
                 elif not rendered_plan:
                     # No tools yet, no plan — standard thinking animation
-                    lines.append(
-                        f"promaia is thinking "
-                        f"{random.choice(THINKING_EMOJIS)}"
-                    )
+                    lines.append(random.choice(THINKING_EMOJIS))
                 else:
                     # Plan shown but no tools yet
                     lines.append(
@@ -758,8 +755,8 @@ class TagToChatLoop:
                 text = m.get('text', '').strip()
                 if not text:
                     continue
-                # Skip promaia's temporary messages
-                if text.startswith('promaia will reply') or text.startswith('promaia is thinking'):
+                # Skip temporary status messages (thinking emojis, countdown)
+                if m.get('ts') == self.state.temp_message_id:
                     continue
                 user_id = m.get('user_id', 'unknown')
                 lines.append(f"[{user_id}]: {text}")
@@ -779,7 +776,7 @@ class TagToChatLoop:
                     await self.platform.edit_message(
                         channel_id=self.state.channel_id,
                         message_id=self.state.temp_message_id,
-                        content=f"promaia is thinking {random.choice(THINKING_EMOJIS)}",
+                        content=random.choice(THINKING_EMOJIS),
                         thread_id=self.state.thread_id,
                     )
                 except Exception:

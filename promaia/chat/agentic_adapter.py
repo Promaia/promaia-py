@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TerminalAgentShim:
     """Minimal agent object satisfying the interface that ToolExecutor,
-    build_tool_definitions, and _generate_plan read via getattr."""
+    build_tool_definitions read via getattr."""
 
     agent_id: str = "terminal-user"
     name: str = "Maia"
@@ -811,7 +811,6 @@ async def run_agentic_turn(
             tool_executor=executor,
             max_iterations=40,
             on_tool_activity=activity_cb,
-            plan=plan,
             context_data_block=context_data_block,
             suite_registry=suite_registry,
             mcp_suites=mcp_suites if mcp_suites else None,
