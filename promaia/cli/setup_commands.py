@@ -256,6 +256,12 @@ async def _run_setup(args):
         console.print()
         console.print(f"[bold]{CONNECTOR_DESCRIPTIONS['google']}[/bold]\n")
         await _safe_step(_browse_google_drive(workspace_slug, console), "Drive browser")
+
+        # Gmail setup — add email as sync source
+        await _safe_step(
+            _setup_gmail_sync(workspace_slug, console),
+            "Gmail sync"
+        )
         progress.advance()
     else:
         progress.skip()
@@ -404,6 +410,12 @@ async def _run_single_service_setup(service):
         console.print()
         console.print(f"[bold]{CONNECTOR_DESCRIPTIONS['google']}[/bold]\n")
         await _browse_google_drive(workspace, console)
+        await _setup_gmail_sync(workspace, console)
+    elif service == "gmail":
+        if not _confirm_skip_auth("google"):
+            google = get_integration("google")
+            await configure_credential(google, console)
+        await _setup_gmail_sync(workspace, console)
     elif service in ("llm", "ai", "openrouter", "anthropic"):
         from promaia.auth.registry import get_ai_integrations
         integrations = get_ai_integrations()
@@ -463,7 +475,7 @@ async def _run_single_service_setup(service):
         }
     else:
         console.print(f"[yellow]Unknown service: {service}[/yellow]")
-        console.print("[dim]Available: slack, notion, google, llm, agent[/dim]")
+        console.print("[dim]Available: slack, notion, google, gmail, llm, agent[/dim]")
 
 
 async def _safe_step(coro, name="step"):
@@ -520,6 +532,49 @@ def _copy_notion_creds_to_workspace(notion_integration, workspace):
     if global_token.exists() and not ws_token.exists():
         ws_token.parent.mkdir(parents=True, exist_ok=True)
         _shutil.copy2(global_token, ws_token)
+
+
+async def _setup_gmail_sync(workspace, c=None):
+    """Offer to add Gmail as a sync source after Google OAuth."""
+    from promaia.auth.registry import get_integration
+    from promaia.config.databases import get_database_manager
+
+    c = c or console
+
+    google = get_integration("google")
+    accounts = google.list_authenticated_accounts()
+    if not accounts:
+        return
+
+    # Check if Gmail is already configured
+    db_manager = get_database_manager()
+    existing_gmail = any(
+        db.source_type == "gmail"
+        for db in db_manager.get_workspace_databases(workspace)
+    )
+    if existing_gmail:
+        c.print("  [green]OK[/green] Gmail sync already configured")
+        return
+
+    email = accounts[0]
+    try:
+        answer = input(f"\n  Enable Gmail sync for {email}? [Y/n]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        answer = "n"
+    if answer in ("n", "no"):
+        return
+
+    config = {
+        "source_type": "gmail",
+        "database_id": email,
+        "description": f"Gmail for {email}",
+        "workspace": workspace,
+        "sync_enabled": True,
+        "default_days": 7,
+        "save_markdown": True,
+    }
+    db_manager.add_database("gmail", config, workspace)
+    c.print(f"  [green]OK[/green] Added Gmail sync for {email}")
 
 
 async def _setup_slack(workspace, c=None):
