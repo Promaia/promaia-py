@@ -825,9 +825,24 @@ def create_slack_bot():
                 await respond("🕶️ Incognito only works in DMs — channel messages are synced separately.")
                 return
 
+            # Look for active or dormant conversations (dormant = idle but alive)
             conv = await conv_manager.get_active_conversation(
                 platform="slack", channel_id=channel_id, user_id=user_id
             )
+            if not conv:
+                # Check dormant conversations too
+                import sqlite3
+                try:
+                    with sqlite3.connect(conv_manager.db_path) as conn:
+                        conn.row_factory = sqlite3.Row
+                        row = conn.execute(
+                            "SELECT * FROM conversations WHERE platform='slack' AND channel_id=? AND user_id=? AND status IN ('active','dormant') ORDER BY created_at DESC LIMIT 1",
+                            (channel_id, user_id)
+                        ).fetchone()
+                        if row:
+                            conv = conv_manager._row_to_state(dict(row))
+                except Exception:
+                    pass
             if conv:
                 is_incognito = (conv.context or {}).get("incognito", False)
                 if is_incognito:
