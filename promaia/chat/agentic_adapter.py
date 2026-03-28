@@ -15,7 +15,6 @@ from promaia.agents.agentic_turn import (
     AgenticTurnResult,
     ToolExecutor,
     _build_tool_suite_registry,
-    _generate_plan,
     agentic_turn,
     build_tool_definitions,
 )
@@ -802,29 +801,6 @@ async def run_agentic_turn(
     # Build activity callback
     # Use external callback if provided (Slack/Discord), otherwise build terminal callback
     activity_cb = on_tool_activity or make_terminal_activity_callback(print_text_fn)
-
-    # Check if planning is needed (extract latest user message)
-    user_message = ""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            user_message = msg.get("content", "")
-            break
-
-    plan = None
-    if user_message:
-        plan = await _generate_plan(
-            user_message=user_message,
-            agent=shim,
-            available_tools=[t["name"] for t in tools],
-        )
-
-    # Emit plan via callback if generated
-    if plan and activity_cb:
-        await activity_cb(
-            tool_name="__plan__",
-            tool_input={"steps": plan},
-            completed=True,
-        )
 
     # Run the agentic loop
     try:

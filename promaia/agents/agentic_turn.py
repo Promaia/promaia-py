@@ -6974,122 +6974,10 @@ def _trim_tool_results(messages: List[Dict], max_result_chars: int = 50_000) -> 
                     block["content"] = _smart_trim_text(result_text, max_result_chars)
 
 
-# ── Planning layer ─────────────────────────────────────────────────────
 
-# Action verbs that signal a distinct task in a user request
-_ACTION_VERBS = re.compile(
-    r'\b(draft|reply|respond|write|send|create|make|schedule|'
-    r'find|search|look up|figure out|check|review|summarize|'
-    r'update|delete|post|notify|remind|book|set up|add|cancel|'
-    r'move|reschedule|forward|compose|prepare|compile|gather)\b',
-    re.IGNORECASE,
-)
-
-
-def _is_complex_request(message: str) -> bool:
-    """Check if a message likely contains multiple distinct tasks.
-
-    Uses a fast heuristic to avoid calling the Planner AI for simple queries.
-    Only multi-action requests trigger planning.
-    """
-    # Find distinct action verbs
-    matches = _ACTION_VERBS.findall(message.lower())
-    unique_actions = set(matches)
-    if len(unique_actions) >= 2:
-        return True
-    return False
-
-
-async def _generate_plan(
-    user_message: str,
-    agent,
-    available_tools: List[str],
-) -> Optional[List[str]]:
-    """Use the Planner AI to decompose a complex request into steps.
-
-    Returns a list of plan step strings, or None if the request is simple.
-    """
-    if not _is_complex_request(user_message):
-        return None
-
-    logger.info("[planning] Complex request detected, generating plan...")
-
-    try:
-        from promaia.utils.ai import get_anthropic_client
-
-        client, prefix = get_anthropic_client()
-        if not client:
-            return None
-
-        # Build a lightweight decomposition prompt (reuses Planner's style)
-        agent_info = ""
-        if agent:
-            name = getattr(agent, 'name', 'Agent')
-            workspace = getattr(agent, 'workspace', '')
-            databases = getattr(agent, 'databases', [])
-            mcp_tools = getattr(agent, 'mcp_tools', []) or []
-            agent_info = (
-                f"\nAgent: {name} (workspace: {workspace})\n"
-                f"Databases: {', '.join(databases)}\n"
-                f"Tools: {', '.join(available_tools)}\n"
-            )
-
-        prompt = f"""You are a task planner. Decompose this user request into distinct executable steps.
-
-User request: {user_message}
-{agent_info}
-Rules:
-- Each step should be a single, focused action
-- Steps should be in logical execution order
-- Only create steps for actions the user actually requested
-- Keep step descriptions concise (one line each)
-- Typical requests have 2-5 steps
-
-Return a JSON array of step descriptions (strings only).
-
-Example:
-["Search emails for Marina/Open Editions thread", "Draft a contextual reply to Marina", "Create calendar event for tomorrow 12-4pm", "Search for dreamshare Quarterly info and compile findings"]
-
-Return ONLY the JSON array, no other text."""
-
-        response = await asyncio.to_thread(
-            client.messages.create,
-            model=f"{prefix}claude-haiku-4-5-20251001",
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        if not response.content:
-            return None
-
-        response_text = response.content[0].text.strip()
-
-        # Parse JSON array from response
-        json_match = re.search(r'\[[\s\S]*\]', response_text)
-        if json_match:
-            steps = json.loads(json_match.group())
-            if isinstance(steps, list) and len(steps) >= 2:
-                logger.info(f"[planning] Generated {len(steps)} plan steps")
-                return [str(s) for s in steps]
-
-        return None
-
-    except Exception as e:
-        logger.warning(f"[planning] Plan generation failed: {e}")
-        return None
-
-
-def _format_plan_for_prompt(steps: List[str]) -> str:
-    """Format plan steps for injection into the system prompt."""
-    numbered = "\n".join(f"{i+1}. {step}" for i, step in enumerate(steps))
-    return (
-        f"# Execution Plan\n\n"
-        f"You identified the following tasks in the user's request:\n\n"
-        f"{numbered}\n\n"
-        f"Execute each step in order. Use your tools for each step. "
-        f"Before starting each step, output [STEP:N] where N is the step number. "
-        f"After completing all steps, summarize what you did."
-    )
+# Planning layer removed — the agent uses Think/Act mode and notepad
+# to plan its own actions. External regex-based planning was too eager
+# and fired on casual conversation.
 
 
 def _serialize_content_blocks(content):
@@ -7164,10 +7052,6 @@ async def agentic_turn(
         return AgenticTurnResult(
             response_text="I'm sorry, I couldn't generate a response (missing API key).",
         )
-
-    # Inject plan into system prompt if provided
-    if plan:
-        system_prompt += "\n\n" + _format_plan_for_prompt(plan)
 
     # Copy messages — tool_use/tool_result blocks stay internal only
     # Format any messages with images into Anthropic multimodal content blocks
