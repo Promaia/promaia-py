@@ -5,8 +5,7 @@
 
 services:
   maia:
-    build: .
-    image: promaia:dev
+    image: ghcr.io/promaia/promaia-py:latest
     entrypoint: ["sh", "-c", "if [ $# -eq 0 ]; then exec sleep infinity; else exec maia \"$@\"; fi", "--"]
     command: []
     volumes:
@@ -22,7 +21,7 @@ services:
     restart: unless-stopped
 
   maia-web:
-    image: promaia:dev
+    image: ghcr.io/promaia/promaia-py:latest
     entrypoint: ["python", "-m", "promaia.services.supervisor", "web", "--"]
     command: ["uvicorn", "promaia.web.main:app", "--host", "0.0.0.0", "--port", "8000"]
     volumes:
@@ -36,7 +35,7 @@ services:
     restart: unless-stopped
 
   maia-scheduler:
-    image: promaia:dev
+    image: ghcr.io/promaia/promaia-py:latest
     entrypoint: ["python", "-m", "promaia.services.supervisor", "scheduler", "--"]
     command: ["maia", "agent", "scheduler-start"]
     volumes:
@@ -48,7 +47,7 @@ services:
     restart: unless-stopped
 
   maia-calendar:
-    image: promaia:dev
+    image: ghcr.io/promaia/promaia-py:latest
     entrypoint: ["python", "-m", "promaia.services.supervisor", "calendar", "--"]
     command: ["maia", "daemon", "start", "--foreground"]
     volumes:
@@ -60,7 +59,7 @@ services:
     restart: unless-stopped
 
   maia-mail:
-    image: promaia:dev
+    image: ghcr.io/promaia/promaia-py:latest
     entrypoint: ["python", "-m", "promaia.services.supervisor", "mail", "--"]
     command: ["maia", "mail", "-p", "--loop", "--interval", "1800"]
     volumes:
@@ -72,7 +71,7 @@ services:
     restart: unless-stopped
 
   maia-discord:
-    image: promaia:dev
+    image: ghcr.io/promaia/promaia-py:latest
     entrypoint: ["python", "-m", "promaia.services.supervisor", "discord", "--"]
     command: ["python", "-m", "promaia.discord_bot.bot"]
     volumes:

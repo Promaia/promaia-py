@@ -6,9 +6,8 @@ set -e
 OUTPUT="${1:?Usage: scaffold.sh /output}"
 
 # ── Always overwrite (should match image version) ─────────────────────
-cp /app/docker-compose.yml "$OUTPUT/docker-compose.yml"
-cp /app/maia.sh            "$OUTPUT/maia.sh"
-cp /app/maia.bat           "$OUTPUT/maia.bat"
+cp /app/docker-compose.prod.yml "$OUTPUT/docker-compose.yml"
+cp /app/maia.sh                 "$OUTPUT/maia.sh"
 
 # ── Only seed if not already present ──────────────────────────────────
 mkdir -p "$OUTPUT/maia-data/data"

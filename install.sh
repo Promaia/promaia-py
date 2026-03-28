@@ -170,7 +170,7 @@ SERVICES
     if [ "$USE_LOCAL" = "y" ] || [ "$USE_LOCAL" = "Y" ]; then
         ENV_FILE="$INSTALL_DIR/.env"
         if [ -f "$ENV_FILE" ] && grep -q '^COMPOSE_FILE=' "$ENV_FILE"; then
-            sed -i 's|^COMPOSE_FILE=.*|COMPOSE_FILE=docker-compose.pilots.yaml|' "$ENV_FILE"
+            sed 's|^COMPOSE_FILE=.*|COMPOSE_FILE=docker-compose.pilots.yaml|' "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
         else
             echo 'COMPOSE_FILE=docker-compose.pilots.yaml' >> "$ENV_FILE"
         fi
