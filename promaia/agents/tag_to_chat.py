@@ -110,10 +110,7 @@ TYPING_RECENCY = 8
 ULTIMATE_TIMEOUT = 600  # 10 minutes
 
 # Decision prompt for Haiku
-DECISION_PROMPT = """You are deciding whether an AI assistant named Promaia should respond in a thread.
-
-Thread context:
-{thread_context}
+DECISION_PROMPT = """You are deciding whether an AI assistant should respond in a thread.
 
 New messages since last response:
 {pending_messages}
@@ -122,19 +119,14 @@ Someone is currently typing: {typing_status}
 Seconds since last message: {seconds_since_last}
 
 Rules:
-- If someone asked a question, made a request, or said something to the assistant: answer_now
+- If someone asked a question, made a request, or said something: answer_now
 - If someone just sent a single word like "wait" or "hold on" and it's been less than 5 seconds: wait
 - If it's been more than 5 seconds since the last message: answer_now
-- If the user seems to be wrapping up ("thanks", "that's helpful", "cool"): answer_now (so the assistant can check if they need anything else)
-- If the message is not directed at the assistant (e.g. two humans talking, "don't reply to this"): end_conversation [emoji]
-- If the user explicitly asks the assistant to leave or says goodbye ("please leave", "goodbye", "bye", "go away"): leave
 - When in doubt: answer_now
 
 Reply with ONLY one of:
 - answer_now
-- wait
-- end_conversation [emoji_shortcode] (e.g. end_conversation thumbsup, end_conversation wave)
-- leave"""
+- wait"""
 
 
 @dataclass
@@ -318,22 +310,12 @@ class TagToChatLoop:
         # @mentioned us, they obviously want a response. Only use the decision
         # call for follow-up messages after the first response.
         if self.state.status == "dormant":
-            decision, emoji = await self._make_decision()
-            logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Decision: {decision} emoji={emoji}")
+            decision, _ = await self._make_decision()
+            thread_key = self.state.thread_id or self.state.channel_id or "dm"
+            logger.info(f"[tag2chat:{thread_key[:12]}] Decision: {decision}")
 
             if decision == "wait":
                 self.state.next_check_in = now + 5
-                return
-
-            if decision == "end_conversation":
-                # React with Haiku's chosen emoji so the user knows we saw it
-                await self._react_to_last_message(emoji)
-                await self._go_dormant()
-                return
-
-            if decision == "leave":
-                # User explicitly asked us to leave — post goodbye and go dormant
-                await self._go_dormant(announce=True)
                 return
 
         # answer_now (or first response)
@@ -342,15 +324,13 @@ class TagToChatLoop:
     # ── Decision call (Haiku) ───────────────────────────────────────────
 
     async def _make_decision(self) -> tuple:
-        """Ask a lightweight LLM whether to respond now, wait, or end.
+        """Ask Haiku whether to respond now or wait for more messages.
 
-        Returns (decision, emoji) where emoji is only set for end_conversation.
+        Returns (decision, None) where decision is "answer_now" or "wait".
         """
         try:
             from anthropic import Anthropic
 
-            # Build context
-            thread_context = await self._get_thread_context()
             pending_text = "\n".join(
                 f"[{m['username']}] {m['text']}"
                 for m in self.state.pending_messages
@@ -359,7 +339,6 @@ class TagToChatLoop:
             seconds_since_last = int(time.time() - self.state.last_message_at)
 
             prompt = DECISION_PROMPT.format(
-                thread_context=thread_context,
                 pending_messages=pending_text,
                 typing_status="yes" if typing_active else "no",
                 seconds_since_last=seconds_since_last,
@@ -368,42 +347,18 @@ class TagToChatLoop:
             from promaia.utils.ai import get_anthropic_client
             client, prefix = get_anthropic_client()
             if not client:
-                logger.warning("No API key configured, defaulting to answer_now")
                 return ("answer_now", None)
 
             response = await asyncio.to_thread(
                 client.messages.create,
                 model=f"{prefix}claude-haiku-4-5-20251001",
-                max_tokens=30,
+                max_tokens=10,
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            # Preserve original casing for emoji extraction
-            raw_text = response.content[0].text.strip() if response.content else ""
-            text = raw_text.lower()
-
-            # Check for end_conversation with emoji
-            if text.startswith("end_conversation"):
-                # Extract emoji from the rest of the string
-                remainder = raw_text[len("end_conversation"):].strip()
-                emoji = remainder if remainder else None
-                return ("end_conversation", emoji)
-
-            if text in ("answer_now", "wait", "leave"):
-                return (text, None)
-
-            # Fuzzy match
-            if "answer" in text:
-                return ("answer_now", None)
+            text = (response.content[0].text.strip().lower() if response.content else "")
             if "wait" in text:
                 return ("wait", None)
-            if text.startswith("leave") or "leave" in text:
-                return ("leave", None)
-            if "end" in text:
-                remainder = raw_text.split(None, 1)[1] if " " in raw_text else None
-                return ("end_conversation", remainder)
-
-            logger.warning(f"Unexpected decision response: {raw_text!r}, defaulting to answer_now")
             return ("answer_now", None)
 
         except Exception as e:

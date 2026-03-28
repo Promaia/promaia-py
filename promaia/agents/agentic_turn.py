@@ -464,6 +464,42 @@ MESSAGING_TOOL_DEFINITIONS = [
             "required": ["user", "message"]
         }
     },
+    {
+        "name": "end_conversation",
+        "description": (
+            "End the current conversation gracefully. Use when the user says goodbye, "
+            "thanks you, or the conversation has naturally concluded. "
+            "The conversation will be saved to history (unless incognito)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "emoji": {
+                    "type": "string",
+                    "description": "Optional emoji shortcode to react with (e.g. 'wave', 'thumbsup')"
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "leave_conversation",
+        "description": (
+            "Leave a conversation you're no longer needed in. Use when the user "
+            "explicitly asks you to leave, or when humans are talking to each other "
+            "and don't need your input."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "Optional farewell message (e.g. 'See you later!')"
+                }
+            },
+            "required": []
+        }
+    },
 ]
 
 NOTION_TOOL_DEFINITIONS = [
@@ -2665,6 +2701,12 @@ class ToolExecutor:
                 return await self._send_message(tool_input)
             elif tool_name == "start_conversation":
                 return await self._start_conversation(tool_input)
+            elif tool_name == "end_conversation":
+                emoji = tool_input.get("emoji", "")
+                return f"__END_CONVERSATION__:{emoji}"
+            elif tool_name == "leave_conversation":
+                message = tool_input.get("message", "")
+                return f"__LEAVE_CONVERSATION__:{message}"
             # Gmail tools
             elif tool_name == "send_email":
                 return await self._send_email(tool_input)
@@ -7383,6 +7425,30 @@ async def agentic_turn(
                     output_tokens=total_output_tokens,
                     plan=plan,
                     signal={"type": "show_selection", "payload": payload},
+                )
+            elif result_text.startswith("__END_CONVERSATION__:"):
+                emoji = result_text[len("__END_CONVERSATION__:"):].strip()
+                result_text = "Conversation ended."
+                return AgenticTurnResult(
+                    response_text="\n".join(text_parts),
+                    tool_calls_made=all_tool_calls,
+                    iterations_used=iteration + 1,
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    plan=plan,
+                    signal={"type": "end_conversation", "emoji": emoji or None},
+                )
+            elif result_text.startswith("__LEAVE_CONVERSATION__:"):
+                message = result_text[len("__LEAVE_CONVERSATION__:"):].strip()
+                result_text = message or "Goodbye!"
+                return AgenticTurnResult(
+                    response_text="\n".join(text_parts) + ("\n" + message if message else ""),
+                    tool_calls_made=all_tool_calls,
+                    iterations_used=iteration + 1,
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    plan=plan,
+                    signal={"type": "leave_conversation"},
                 )
 
             # Build summary for logging and UX
