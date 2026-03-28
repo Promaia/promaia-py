@@ -823,6 +823,7 @@ async def run_agentic_turn(
         await activity_cb(
             tool_name="__plan__",
             tool_input={"steps": plan},
+            completed=True,
         )
 
     # Run the agentic loop
