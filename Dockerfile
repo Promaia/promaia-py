@@ -2,12 +2,10 @@ FROM python:3.13-slim AS base
 
 WORKDIR /app
 
-# System deps for opencv, chromadb native extensions, build tools,
+# System deps for chromadb native extensions, build tools,
 # and Node.js for MCP servers (Notion, etc.) that run via npx
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    libgl1 \
-    libglib2.0-0 \
     nodejs \
     npm \
     && rm -rf /var/lib/apt/lists/*
@@ -16,11 +14,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npm install -g \
     @notionhq/notion-mcp-server \
     && npm cache clean --force
-
-# Install CPU-only PyTorch first (sentence-transformers pulls torch;
-# the CPU wheel is ~200MB vs ~2GB for the CUDA version)
-RUN pip install --no-cache-dir \
-    torch --extra-index-url https://download.pytorch.org/whl/cpu
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

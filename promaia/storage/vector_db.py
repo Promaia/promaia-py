@@ -76,29 +76,17 @@ class VectorDBManager:
         self._init_embedding_function()
     
     def _init_embedding_function(self):
-        """Initialize embedding model (OpenAI with fallback to sentence-transformers)."""
-        # Try OpenAI first
-        if os.getenv("OPENAI_API_KEY"):
-            try:
-                from openai import OpenAI
-                self.openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                self.embedding_provider = "openai"
-                self.embedding_model = "text-embedding-3-small"
-                logger.info(f"✅ Using OpenAI embeddings: {self.embedding_model}")
-                return
-            except Exception as e:
-                logger.warning(f"⚠️  OpenAI embeddings unavailable: {e}")
-        
-        # Fallback to sentence-transformers
-        try:
-            from sentence_transformers import SentenceTransformer
-            self.sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
-            self.embedding_provider = "sentence-transformers"
-            self.embedding_model = "all-MiniLM-L6-v2"
-            logger.info(f"✅ Using sentence-transformers: {self.embedding_model}")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize any embedding provider: {e}")
-            raise RuntimeError("No embedding provider available")
+        """Initialize OpenAI embedding model."""
+        if not os.getenv("OPENAI_API_KEY"):
+            raise RuntimeError(
+                "OPENAI_API_KEY is required for embeddings. "
+                "Set it in your .env file or run 'maia setup'."
+            )
+        from openai import OpenAI
+        self.openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.embedding_provider = "openai"
+        self.embedding_model = "text-embedding-3-small"
+        logger.info(f"Using OpenAI embeddings: {self.embedding_model}")
     
     def generate_embedding(self, text: str) -> List[float]:
         """
@@ -120,10 +108,6 @@ class VectorDBManager:
                     model=self.embedding_model
                 )
                 return response.data[0].embedding
-            
-            elif self.embedding_provider == "sentence-transformers":
-                embedding = self.sentence_model.encode(text, convert_to_tensor=False)
-                return embedding.tolist()
             
             else:
                 raise RuntimeError(f"Unknown embedding provider: {self.embedding_provider}")
