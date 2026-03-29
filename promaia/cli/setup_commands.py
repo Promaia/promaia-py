@@ -89,7 +89,7 @@ def _confirm_skip_auth(name: str) -> bool:
     if _has_valid_credentials(name):
         console.print(f"  [green]✓[/green] {name.title()} already connected")
         try:
-            answer = input("  Reconfigure? [y/N]: ").strip().lower()
+            answer = input("  Re-authenticate? [y/N]: ").strip().lower()
             return answer not in ("y", "yes")
         except (KeyboardInterrupt, EOFError):
             return True
@@ -542,9 +542,34 @@ async def _setup_gmail_sync(workspace, c=None):
     c = c or console
 
     google = get_integration("google")
+
+    # Try per-account credentials first, then fall back to fetching
+    # email from the token via Google's API (refreshes if expired)
     accounts = google.list_authenticated_accounts()
-    if not accounts:
-        return
+    if accounts:
+        email = accounts[0]
+    else:
+        creds = google.get_google_credentials()
+        if not creds or not creds.token:
+            return
+        # Use Gmail API to get the authenticated email address
+        # (tokeninfo doesn't include email without openid scope)
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+                    headers={"Authorization": f"Bearer {creds.token}"},
+                )
+                if resp.status_code == 200:
+                    email = resp.json().get("emailAddress")
+                else:
+                    email = None
+        except Exception:
+            email = None
+        if not email:
+            c.print("  [dim]Could not determine Gmail address — skipping[/dim]")
+            return
 
     # Check if Gmail is already configured
     db_manager = get_database_manager()
@@ -555,8 +580,6 @@ async def _setup_gmail_sync(workspace, c=None):
     if existing_gmail:
         c.print("  [green]OK[/green] Gmail sync already configured")
         return
-
-    email = accounts[0]
     try:
         answer = input(f"\n  Enable Gmail sync for {email}? [Y/n]: ").strip().lower()
     except (KeyboardInterrupt, EOFError):

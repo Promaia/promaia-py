@@ -51,14 +51,14 @@ async def configure_credential(
         if valid:
             c.print(f"  [green]OK[/green] {msg}")
             reconfigure = Prompt.ask(
-                "  Reconfigure?", choices=["y", "n"], default="n"
+                "  Re-authenticate?", choices=["y", "n"], default="n"
             ).strip().lower()
             if reconfigure not in ("y", "yes"):
                 return True
             c.print()
         else:
             c.print(f"  [yellow]Warning:[/yellow] {msg}")
-            c.print("  [dim]Existing credential invalid — reconfiguring...[/dim]\n")
+            c.print("  [dim]Existing credential invalid — re-authenticating...[/dim]\n")
 
     # Determine auth mode
     modes = integration.auth_modes
