@@ -2684,6 +2684,7 @@ class ToolExecutor:
         self._notepad = ""
         # Context sources: name → {"content": str, "on": bool, "page_count": int, "source": str}
         self._sources = {}
+        self._sources_muted = False
         # External MCP server connections
         self._mcp_client = None        # McpClient instance
         self._mcp_tool_map = {}        # namespaced_name → (server_name, original_name)
@@ -5891,7 +5892,7 @@ class ToolExecutor:
 
     def build_context_index(self) -> str:
         """Build the context index string for the system prompt."""
-        if not self._sources:
+        if self._sources_muted or not self._sources:
             return ""
         lines = [
             "## Your Context\n",
@@ -5913,6 +5914,8 @@ class ToolExecutor:
 
     def build_active_source_content(self) -> str:
         """Build the combined content of all ON sources for the system prompt."""
+        if self._sources_muted:
+            return ""
         parts = []
         for name, src in self._sources.items():
             if src["on"] and src.get("content"):
@@ -7385,16 +7388,17 @@ async def agentic_turn(
                 suite_names = [s.strip() for s in result_text.split(":", 1)[1].split(",")]
                 act_mode = True
                 act_suites = suite_names
-                # Force all context OFF
-                if tool_executor and hasattr(tool_executor, '_sources'):
-                    for src in tool_executor._sources.values():
-                        src["on"] = False
-                result_text = f"Act mode. Suites loaded: {', '.join(suite_names)}. All context hidden. Work from your notes."
+                # Mute context (preserves individual on/off states for restore)
+                if tool_executor:
+                    tool_executor._sources_muted = True
+                result_text = f"Act mode. Suites loaded: {', '.join(suite_names)}. Context muted. Work from your notes."
                 logger.info(f"[think/act] Entered Act mode with suites: {suite_names}")
             elif result_text == "__DONE__":
                 act_mode = False
                 act_suites = []
-                result_text = "Back to Think mode. Context and search tools available."
+                if tool_executor:
+                    tool_executor._sources_muted = False
+                result_text = "Back to Think mode. Context restored."
                 logger.info("[think/act] Returned to Think mode")
 
             # Handle interview sentinels — break out of loop and return with signal
