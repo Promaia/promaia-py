@@ -56,6 +56,6 @@ jobs:
           script: |
             cd /root/promaia
             docker pull ghcr.io/promaia/promaia-py:latest
-            docker compose down
+            docker compose down --remove-orphans --timeout 30
             docker compose up -d
             echo "Deployed $(docker inspect --format='{{.Id}}' ghcr.io/promaia/promaia-py:latest | head -c 12)"
