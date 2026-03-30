@@ -25,13 +25,16 @@ class VectorDBManager:
     One-to-one mapping: 1 page_id = 1 markdown file = 1 vector embedding
     """
     
-    def __init__(self, chroma_path: str = "chroma_db"):
+    def __init__(self, chroma_path: str = None):
         """
         Initialize ChromaDB client and embedding function.
         
         Args:
             chroma_path: Path to ChromaDB directory (not a file)
         """
+        if chroma_path is None:
+            from promaia.utils.env_writer import get_data_dir
+            chroma_path = os.path.join(get_data_dir(), "chroma_db")
         self.chroma_path = chroma_path
         self.collection_name = "promaia_content"
         
@@ -613,7 +616,7 @@ class VectorDBManager:
 
 
 # Convenience function for easy import
-def get_vector_db_manager(chroma_path: str = "chroma_db") -> VectorDBManager:
+def get_vector_db_manager(chroma_path: str = None) -> VectorDBManager:
     """Get or create a VectorDBManager instance."""
     return VectorDBManager(chroma_path=chroma_path)
 

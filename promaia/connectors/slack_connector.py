@@ -294,8 +294,57 @@ class SlackConnector(BaseConnector):
             if not cursor:
                 break
         
+        # Fetch thread replies for messages with replies
+        thread_parents = [m for m in messages if m.get('reply_count', 0) > 0 and m.get('reply_count', 0) <= 50]
+        if thread_parents:
+            self.logger.info(f"Fetching replies for {len(thread_parents)} threaded messages")
+            for parent in thread_parents:
+                try:
+                    replies = await self._fetch_thread_replies(channel_id, parent['ts'])
+                    messages.extend(replies)
+                except Exception as e:
+                    self.logger.debug(f"Failed to fetch replies for thread {parent['ts']}: {e}")
+
         return messages
-    
+
+    async def _fetch_thread_replies(
+        self,
+        channel_id: str,
+        thread_ts: str,
+    ) -> List[Dict[str, Any]]:
+        """Fetch all replies in a Slack thread (excludes the parent message)."""
+        replies = []
+        cursor = None
+
+        while True:
+            await self._rate_limit_efficient()
+
+            kwargs = {
+                "channel": channel_id,
+                "ts": thread_ts,
+                "limit": 100,
+            }
+            if cursor:
+                kwargs["cursor"] = cursor
+
+            response = self.client.conversations_replies(**kwargs)
+            if not response.get('ok'):
+                break
+
+            for msg in response.get('messages', []):
+                # Skip the parent message (first message has ts == thread_ts)
+                if msg.get('ts') == thread_ts:
+                    continue
+                reply_data = await self._convert_message_to_data(msg, channel_id)
+                reply_data['parent_thread_ts'] = thread_ts
+                replies.append(reply_data)
+
+            cursor = response.get('response_metadata', {}).get('next_cursor')
+            if not cursor:
+                break
+
+        return replies
+
     async def _convert_message_to_data(
         self,
         message: Dict[str, Any],

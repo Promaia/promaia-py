@@ -1237,7 +1237,7 @@ class HybridContentRegistry:
 
             # Initialize vector DB
             from promaia.storage.vector_db import VectorDBManager
-            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path', 'chroma_db'))
+            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path'))
 
             # Get property schema
             property_schema = self.get_property_schema(database_id)
@@ -1402,7 +1402,7 @@ class HybridContentRegistry:
             
             # Initialize vector DB
             from promaia.storage.vector_db import VectorDBManager
-            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path', 'chroma_db'))
+            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path'))
             
             # Prepare metadata
             metadata = {
@@ -2485,7 +2485,7 @@ class HybridContentRegistry:
 
                         if vector_config.get('enabled') and vector_config.get('property_embeddings', {}).get('enabled'):
                             from promaia.storage.vector_db import VectorDBManager
-                            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path', 'chroma_db'))
+                            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path'))
 
                             EMBEDDABLE_TYPES = {'title', 'text', 'rich_text', 'relation'}
 
@@ -2512,7 +2512,7 @@ class HybridContentRegistry:
 
                         if vector_config.get('enabled') and vector_config.get('property_embeddings', {}).get('enabled'):
                             from promaia.storage.vector_db import VectorDBManager
-                            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path', 'chroma_db'))
+                            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path'))
 
                             EMBEDDABLE_TYPES = {'title', 'text', 'rich_text', 'relation'}
 

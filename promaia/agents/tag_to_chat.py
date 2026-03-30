@@ -259,8 +259,11 @@ class TagToChatLoop:
                     break
 
                 if time.time() > self.state.ultimate_timeout:
-                    logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Ultimate timeout reached")
-                    await self._go_dormant(announce=True)
+                    is_dm = not self.state.thread_id
+                    logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or 'dm')[:12]}] Ultimate timeout reached (dm={is_dm})")
+                    # DMs: go dormant silently, stay is_active for resume on next message
+                    # Channels: announce leave so users know to re-tag
+                    await self._go_dormant(announce=not is_dm)
                     break
 
                 # If paused, wait for wake-up signal
@@ -887,7 +890,12 @@ class TagToChatLoop:
                 logger.debug(f"Failed to add reaction: {e}")
 
     async def _announce_leave(self):
-        """Post a 'left the chat' message so users know how to re-engage."""
+        """Post a 'left the chat' message so users know how to re-engage.
+        Skipped for DMs — it's a 1-on-1 conversation, no need to announce.
+        """
+        # DMs have thread_id=None — don't post leave messages in DMs
+        if not self.state.thread_id:
+            return
         try:
             await self.platform.send_message(
                 channel_id=self.state.channel_id,

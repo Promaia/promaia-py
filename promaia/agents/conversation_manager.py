@@ -85,6 +85,9 @@ class ConversationState:
     orchestrator_task_id: Optional[str] = None  # Link to orchestrator task
     cached_context: Optional[str] = None  # Cached preloaded context (markdown format)
     conversation_type: str = "direct"  # "direct" (1:1) or "tag_to_chat" (thread-based, multi-user)
+    is_active: bool = True  # True = ongoing conversation, False = done
+    summary: Optional[str] = None  # Agent-provided summary when conversation ends
+    conversation_partner: Optional[str] = None  # Who this DM conversation is with
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -286,6 +289,21 @@ class ConversationManager:
                 logger.info("Added conversation_type column to conversations table")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+            # Migration: Add is_active, summary, conversation_partner columns
+            try:
+                cursor.execute("ALTER TABLE conversations ADD COLUMN is_active BOOLEAN DEFAULT 1")
+                logger.info("Added is_active column to conversations table")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+            try:
+                cursor.execute("ALTER TABLE conversations ADD COLUMN summary TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE conversations ADD COLUMN conversation_partner TEXT")
+            except sqlite3.OperationalError:
+                pass
 
             # Index for thread-based lookups (tag-to-chat uses thread_id matching)
             cursor.execute("""
@@ -675,6 +693,22 @@ class ConversationManager:
                 logger.warning(f"Agent {state.agent_id} returned empty response")
                 return "I'm sorry, I couldn't generate a response."
 
+            # Handle end_conversation signal — mark DM conversations done with summary
+            if result.signal and result.signal.get("type") == "end_conversation":
+                summary = result.signal.get("summary")
+                is_dm = state.context.get("is_dm", False)
+                if is_dm and summary:
+                    await self.mark_conversation_done(
+                        state.conversation_id,
+                        summary=summary,
+                        reason=result.signal.get("reason", "agent_ended"),
+                    )
+                else:
+                    await self.end_conversation(
+                        state.conversation_id,
+                        reason="agent_ended",
+                    )
+
             logger.info(f"Agent {state.agent_id} generated response ({len(output)} chars)")
             return output
 
@@ -734,6 +768,22 @@ class ConversationManager:
                 f"This is a direct message with {user_name} — a private 1-on-1 conversation. "
                 f"Respond to every message."
             )
+
+            # Inject recent completed conversation summaries for DM context
+            try:
+                past_summaries = self._load_recent_dm_summaries(
+                    conversation_partner=user_name,
+                    platform=platform,
+                    days=7,
+                )
+                if past_summaries:
+                    base_prompt += f"\n\n## Recent Conversations with {user_name}\n"
+                    for s in past_summaries:
+                        date_str = (s.get('completed_at') or s.get('created_at') or '')[:10]
+                        summary = s.get('summary', 'No summary')
+                        base_prompt += f"- {date_str}: {summary}\n"
+            except Exception as e:
+                logger.debug(f"Could not load DM summaries: {e}")
         elif ctx.get("channel_name"):
             channel_name = ctx["channel_name"]
             base_prompt += (
@@ -753,6 +803,35 @@ class ConversationManager:
             )
 
         return base_prompt
+
+    def _load_recent_dm_summaries(
+        self,
+        conversation_partner: str,
+        platform: str = "slack",
+        days: int = 7,
+    ) -> List[Dict[str, Any]]:
+        """Load recent completed DM conversation summaries with a specific user.
+
+        Returns list of dicts with 'summary', 'completed_at', 'created_at' keys.
+        """
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT summary, completed_at, created_at
+                FROM conversations
+                WHERE conversation_partner = ?
+                AND platform = ?
+                AND is_active = 0
+                AND summary IS NOT NULL
+                AND created_at > ?
+                ORDER BY created_at DESC
+                LIMIT 10
+            """, (conversation_partner, platform, cutoff))
+            return [dict(row) for row in cursor.fetchall()]
 
     async def _load_conversation_context(self, agent) -> str:
         """Load preloaded context for conversation (lighter than full executor)."""
@@ -943,6 +1022,50 @@ class ConversationManager:
                 reason=reason
             )
     
+    async def mark_conversation_done(
+        self,
+        conversation_id: str,
+        summary: str,
+        reason: str = "agent_ended"
+    ) -> None:
+        """
+        Mark a conversation as done (is_active=False) with a summary.
+
+        Used for DM conversations where the agent signals completion.
+        Saves the conversation to KB for future recall via query_source.
+
+        Args:
+            conversation_id: Conversation identifier
+            summary: Agent-provided summary of the conversation
+            reason: Reason for ending
+        """
+        state = await self._load_state(conversation_id)
+        if not state:
+            return
+
+        state.is_active = False
+        state.status = 'completed'
+        state.completed_at = datetime.now(timezone.utc).isoformat()
+        state.completion_reason = reason
+        state.summary = summary
+        await self._save_state(state)
+
+        logger.info(
+            f"Conversation done: {conversation_id[:30]}... | "
+            f"summary={summary[:60]} | turns={state.turn_count}"
+        )
+
+        # Save to KB for future recall
+        from promaia.messaging.slack_bot import _save_dm_to_history
+        await _save_dm_to_history(self, state, summary=summary)
+
+        # Fire completion callbacks
+        await self._fire_end_callbacks(
+            conversation_id=conversation_id,
+            transcript=state.get_transcript(),
+            reason=reason
+        )
+
     async def handle_batched_messages(
         self,
         conversation_id: str,
@@ -1119,10 +1242,11 @@ class ConversationManager:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
-            # First, try exact user match
+            # First, try exact user match (is_active=1 means conversation is ongoing)
             cursor.execute("""
                 SELECT * FROM conversations
                 WHERE platform = ? AND channel_id = ? AND user_id = ? AND status = 'active'
+                AND is_active = 1
                 ORDER BY created_at DESC
                 LIMIT 1
             """, (platform, channel_id, user_id))
@@ -1179,8 +1303,9 @@ class ConversationManager:
                 (id, agent_id, platform, channel_id, user_id, thread_id, status,
                  last_message_at, turn_count, max_turns, messages, context,
                  timeout_seconds, malicious_attempt_count, created_at, completed_at,
-                 completion_reason, orchestrator_task_id, cached_context, conversation_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 completion_reason, orchestrator_task_id, cached_context, conversation_type,
+                 is_active, summary, conversation_partner)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 state.conversation_id,
                 state.agent_id,
@@ -1202,6 +1327,9 @@ class ConversationManager:
                 state.orchestrator_task_id,
                 state.cached_context,
                 state.conversation_type,
+                1 if state.is_active else 0,
+                state.summary,
+                state.conversation_partner,
             ))
 
             conn.commit()
@@ -1246,4 +1374,7 @@ class ConversationManager:
             orchestrator_task_id=row.get('orchestrator_task_id'),
             cached_context=row.get('cached_context'),
             conversation_type=row.get('conversation_type', 'direct'),
+            is_active=bool(row.get('is_active', 1)),
+            summary=row.get('summary'),
+            conversation_partner=row.get('conversation_partner'),
         )

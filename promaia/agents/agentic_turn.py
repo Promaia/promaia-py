@@ -469,7 +469,7 @@ MESSAGING_TOOL_DEFINITIONS = [
         "description": (
             "End the current conversation gracefully. Use when the user says goodbye, "
             "thanks you, or the conversation has naturally concluded. "
-            "The conversation will be saved to history (unless incognito)."
+            "You MUST provide a summary of what was discussed — this is saved for future reference."
         ),
         "input_schema": {
             "type": "object",
@@ -477,9 +477,13 @@ MESSAGING_TOOL_DEFINITIONS = [
                 "emoji": {
                     "type": "string",
                     "description": "Optional emoji shortcode to react with (e.g. 'wave', 'thumbsup')"
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "1-2 sentence summary of what was discussed in this conversation"
                 }
             },
-            "required": []
+            "required": ["summary"]
         }
     },
     {
@@ -2703,7 +2707,8 @@ class ToolExecutor:
                 return await self._start_conversation(tool_input)
             elif tool_name == "end_conversation":
                 emoji = tool_input.get("emoji", "")
-                return f"__END_CONVERSATION__:{emoji}"
+                summary = tool_input.get("summary", "")
+                return f"__END_CONVERSATION__:{emoji}:{summary}"
             elif tool_name == "leave_conversation":
                 message = tool_input.get("message", "")
                 return f"__LEAVE_CONVERSATION__:{message}"
@@ -7427,7 +7432,10 @@ async def agentic_turn(
                     signal={"type": "show_selection", "payload": payload},
                 )
             elif result_text.startswith("__END_CONVERSATION__:"):
-                emoji = result_text[len("__END_CONVERSATION__:"):].strip()
+                # Format: __END_CONVERSATION__:emoji:summary
+                parts = result_text[len("__END_CONVERSATION__:"):].split(":", 1)
+                emoji = parts[0].strip() if parts else ""
+                summary = parts[1].strip() if len(parts) > 1 else ""
                 result_text = "Conversation ended."
                 return AgenticTurnResult(
                     response_text="\n".join(text_parts),
@@ -7436,7 +7444,7 @@ async def agentic_turn(
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
                     plan=plan,
-                    signal={"type": "end_conversation", "emoji": emoji or None},
+                    signal={"type": "end_conversation", "emoji": emoji or None, "summary": summary or None},
                 )
             elif result_text.startswith("__LEAVE_CONVERSATION__:"):
                 message = result_text[len("__LEAVE_CONVERSATION__:"):].strip()

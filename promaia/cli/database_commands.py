@@ -3580,7 +3580,7 @@ async def handle_register_md(args):
         if not skip_embeddings:
             try:
                 from promaia.storage.vector_db import VectorDBManager
-                vector_db = VectorDBManager(chroma_path="chroma_db")
+                vector_db = VectorDBManager()
                 print("Vector embeddings: enabled")
             except Exception as e:
                 print(f"Warning: Could not initialize vector DB ({e}), skipping embeddings")

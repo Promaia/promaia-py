@@ -127,12 +127,17 @@ def select_agent(requested_agent: str | None, available_agents: list, default_ag
     return default_agent
 
 
-async def _save_dm_to_history(conv_manager, state):
+async def _save_dm_to_history(conv_manager, state, summary: str = None):
     """Save a DM conversation to the unified content database for recall.
 
     Converts the ConversationState messages into markdown and stores
     in conversation_content table (same as terminal chat history).
     Skips if incognito or empty.
+
+    Args:
+        conv_manager: ConversationManager instance
+        state: ConversationState to save
+        summary: Optional agent-provided summary (used as title if given)
     """
     if not state or not state.messages:
         return
@@ -149,8 +154,11 @@ async def _save_dm_to_history(conv_manager, state):
             f"# DM: {state.platform} with {user_name}",
             f"Date: {(state.created_at or '')[:10]}",
             f"Platform: {state.platform}",
-            "",
         ]
+        if summary:
+            lines.append(f"Summary: {summary}")
+        lines.append("")
+
         for msg in state.messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
@@ -164,13 +172,16 @@ async def _save_dm_to_history(conv_manager, state):
 
         markdown = "\n\n".join(lines)
 
-        # Generate title from first user message
-        first_user_msg = next(
-            (m["content"] for m in state.messages
-             if m.get("role") == "user" and isinstance(m.get("content"), str) and m["content"].strip()),
-            "DM conversation",
-        )
-        title = f"DM with {user_name}: {first_user_msg[:60]}"
+        # Use summary as title if provided, otherwise fall back to first message
+        if summary:
+            title = f"DM with {user_name}: {summary[:80]}"
+        else:
+            first_user_msg = next(
+                (m["content"] for m in state.messages
+                 if m.get("role") == "user" and isinstance(m.get("content"), str) and m["content"].strip()),
+                "DM conversation",
+            )
+            title = f"DM with {user_name}: {first_user_msg[:60]}"
 
         # Get workspace from agent config
         agent = conv_manager._get_cached_agent(state.agent_id)
@@ -205,6 +216,9 @@ async def _save_dm_to_history(conv_manager, state):
             "context_type": "dm",
             "data_source": "conversation",
             "content_type": "conversation",
+            "conversation_partner": user_name,
+            "platform": state.platform,
+            "summary": summary or "",
         }
 
         registry.add_conversation_content(content_data, metadata)
@@ -451,31 +465,16 @@ def create_slack_bot():
                     logger.info(f"Woke dormant thread {thread_ts[:12]} with new message")
                     return
 
-            # 3. DMs: tag-to-chat with conversation persistence
+            # 3. DMs: tag-to-chat with conversation persistence (no timeout)
             if is_1on1_dm and default_agent:
                 username = await _get_username(client, user_id)
 
-                # Check for existing DM conversation to resume
+                # Check for existing active DM conversation (is_active=1)
                 conversation = await conv_manager.get_active_conversation(
                     platform='slack',
                     channel_id=channel_id,
                     user_id=user_id
                 )
-
-                # 30-minute timeout: if last message was >30min ago, start fresh
-                DM_TIMEOUT_SECONDS = 1800
-                if conversation and conversation.last_message_at:
-                    try:
-                        from datetime import datetime as _dt
-                        last = _dt.fromisoformat(conversation.last_message_at.replace('Z', '+00:00'))
-                        gap = (datetime.now(timezone.utc) - last).total_seconds()
-                        if gap > DM_TIMEOUT_SECONDS:
-                            logger.info(f"DM conversation timed out ({int(gap)}s), starting fresh")
-                            # Save the timed-out conversation before dropping it
-                            await _save_dm_to_history(conv_manager, conversation)
-                            conversation = None  # will create new below
-                    except Exception:
-                        pass
 
                 conv_id = conversation.conversation_id if conversation else f"slack_dm_{channel_id}_{int(datetime.now(timezone.utc).timestamp())}"
                 agent_id = conversation.agent_id if conversation else default_agent
@@ -495,10 +494,11 @@ def create_slack_bot():
                         last_message_at=now,
                         messages=[],
                         context={"is_dm": True, "user_name": username},
-                        timeout_seconds=DM_TIMEOUT_SECONDS,
                         max_turns=None,
                         created_at=now,
                         conversation_type='tag_to_chat',
+                        is_active=True,
+                        conversation_partner=username,
                     )
                     await conv_manager._save_state(dm_conversation)
 
@@ -656,7 +656,7 @@ def create_slack_bot():
             now = datetime.now(timezone.utc).isoformat()
             conversation_id = f"slack_t2c_{channel_id}_{int(datetime.now(timezone.utc).timestamp())}"
 
-            # Fetch channel context: name + recent messages
+            # Fetch channel context: name + recent messages from synced KB (7 days)
             mention_context = {}
             try:
                 channel_info = await client.conversations_info(channel=channel_id)
@@ -664,17 +664,35 @@ def create_slack_bot():
                 if channel_name:
                     mention_context["channel_name"] = channel_name
 
-                # Fetch recent channel messages for context
-                history = await client.conversations_history(channel=channel_id, limit=50)
-                if history.get("messages"):
-                    lines = []
-                    for msg in reversed(history["messages"][:50]):
-                        msg_user = msg.get("user", "")
-                        msg_text = msg.get("text", "").strip()
-                        if msg_text:
-                            lines.append(f"<@{msg_user}>: {msg_text}")
-                    if lines:
-                        mention_context["recent_messages"] = "\n".join(lines)
+                # Load channel messages from KB instead of live API
+                agent = conv_manager._get_cached_agent(agent_to_use)
+                agent_workspace = agent.workspace if agent else "default"
+
+                from promaia.config.databases import get_database_config
+                from promaia.storage.files import load_database_pages_with_filters
+
+                slack_db_config = get_database_config("slack", workspace=agent_workspace)
+                if slack_db_config and channel_name:
+                    import asyncio as _asyncio
+                    pages = await _asyncio.to_thread(
+                        load_database_pages_with_filters,
+                        database_config=slack_db_config,
+                        days=7,
+                    )
+                    # Filter to this channel and format
+                    channel_lines = []
+                    for page_id, content in sorted(pages.items(), key=lambda x: x[1].get('created_time', '')):
+                        page_content = content.get('content', '')
+                        page_meta = content.get('metadata', {})
+                        props = page_meta.get('properties', {}) if isinstance(page_meta, dict) else {}
+                        page_channel = props.get('channel_name', '') if isinstance(props, dict) else ''
+                        if page_channel == channel_name and page_content.strip():
+                            username = props.get('username', 'unknown') if isinstance(props, dict) else 'unknown'
+                            channel_lines.append(f"{username}: {page_content.strip()[:500]}")
+                    if channel_lines:
+                        # Take last 100 messages worth of context
+                        mention_context["recent_messages"] = "\n".join(channel_lines[-100:])
+                        logger.info(f"Loaded {len(channel_lines)} messages from KB for #{channel_name}")
             except Exception as e:
                 logger.debug(f"Could not fetch channel context: {e}")
 
