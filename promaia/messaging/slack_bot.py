@@ -666,7 +666,10 @@ def create_slack_bot():
 
                 # Load channel messages from KB instead of live API
                 agent = conv_manager._get_cached_agent(agent_to_use)
-                agent_workspace = agent.workspace if agent else "default"
+                agent_workspace = agent.workspace if agent else None
+                # Normalize empty string to None for database lookup
+                if not agent_workspace:
+                    agent_workspace = None
 
                 from promaia.config.databases import get_database_config
                 from promaia.storage.files import load_database_pages_with_filters
@@ -674,23 +677,29 @@ def create_slack_bot():
                 slack_db_config = get_database_config("slack", workspace=agent_workspace)
                 if slack_db_config and channel_name:
                     import asyncio as _asyncio
+                    import json as _json
                     pages = await _asyncio.to_thread(
                         load_database_pages_with_filters,
                         database_config=slack_db_config,
                         days=7,
                     )
                     # Filter to this channel and format
+                    # pages is a list of dicts with 'content', 'metadata', etc.
                     channel_lines = []
-                    for page_id, content in sorted(pages.items(), key=lambda x: x[1].get('created_time', '')):
-                        page_content = content.get('content', '')
-                        page_meta = content.get('metadata', {})
+                    for page in sorted(pages, key=lambda x: x.get('created_time', '')):
+                        page_content = page.get('content', '')
+                        page_meta = page.get('metadata', {})
+                        if isinstance(page_meta, str):
+                            try:
+                                page_meta = _json.loads(page_meta)
+                            except Exception:
+                                page_meta = {}
                         props = page_meta.get('properties', {}) if isinstance(page_meta, dict) else {}
                         page_channel = props.get('channel_name', '') if isinstance(props, dict) else ''
                         if page_channel == channel_name and page_content.strip():
-                            username = props.get('username', 'unknown') if isinstance(props, dict) else 'unknown'
-                            channel_lines.append(f"{username}: {page_content.strip()[:500]}")
+                            uname = props.get('username', 'unknown') if isinstance(props, dict) else 'unknown'
+                            channel_lines.append(f"{uname}: {page_content.strip()[:500]}")
                     if channel_lines:
-                        # Take last 100 messages worth of context
                         mention_context["recent_messages"] = "\n".join(channel_lines[-100:])
                         logger.info(f"Loaded {len(channel_lines)} messages from KB for #{channel_name}")
             except Exception as e:
