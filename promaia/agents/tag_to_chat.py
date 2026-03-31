@@ -755,6 +755,22 @@ class TagToChatLoop:
             # Load context from KB
             thread_context = await self._build_thread_context()
 
+            # Inject channel/DM history as a named source so the agent sees it
+            if thread_context:
+                state = await self.conv_manager._load_state(self.state.conversation_id)
+                if state:
+                    source_name = f"slack_{'thread' if self.state.thread_id else 'dm'}"
+                    existing_sources = state.context.get('source_states', {})
+                    if source_name not in existing_sources:
+                        existing_sources[source_name] = {
+                            "content": thread_context,
+                            "on": True,
+                            "page_count": thread_context.count('\n') + 1,
+                            "source": "channel_context",
+                        }
+                        state.context['source_states'] = existing_sources
+                        await self.conv_manager._save_state(state)
+
             response = await self.conv_manager.handle_batched_messages(
                 conversation_id=self.state.conversation_id,
                 messages=self.state.pending_messages,

@@ -700,7 +700,17 @@ def create_slack_bot():
                             uname = props.get('username', 'unknown') if isinstance(props, dict) else 'unknown'
                             channel_lines.append(f"{uname}: {page_content.strip()[:500]}")
                     if channel_lines:
-                        mention_context["recent_messages"] = "\n".join(channel_lines[-100:])
+                        channel_history_text = "\n".join(channel_lines[-100:])
+                        mention_context["recent_messages"] = channel_history_text
+                        # Pre-load as a named source so it shows up in the agent's source shelf
+                        mention_context["source_states"] = {
+                            f"slack_#{channel_name}": {
+                                "content": channel_history_text,
+                                "on": True,
+                                "page_count": len(channel_lines),
+                                "source": "channel_context",
+                            }
+                        }
                         logger.info(f"Loaded {len(channel_lines)} messages from KB for #{channel_name}")
             except Exception as e:
                 logger.debug(f"Could not fetch channel context: {e}")
