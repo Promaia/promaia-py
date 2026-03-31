@@ -1406,10 +1406,9 @@ GOOGLE_SHEETS_FORMAT_TOOL_DEFINITIONS = [
 NOTEPAD_TOOL_DEFINITION = {
     "name": "notepad",
     "description": (
-        "Your persistent working notes — always visible in your prompt under "
-        "'Working Notes'. Write key facts, plans, references, and extracted "
-        "context here. Notes survive across turns. You never need to read "
-        "them — they're already in front of you."
+        "Your persistent reference notes — facts, context, preferences, and extracted data. "
+        "Always visible in your prompt under 'Working Notes'. Notes survive across turns. "
+        "NOT for task plans — use act(instructions=[...]) to pass step-by-step instructions to Act mode."
     ),
     "input_schema": {
         "type": "object",
@@ -1518,8 +1517,9 @@ CONTEXT_TOOL_DEFINITION = {
 ACT_TOOL_DEFINITION = {
     "name": "act",
     "description": (
-        "Enter Act mode to execute actions with tools. Loads the specified tool suites. "
-        "Your notes come with you but all context is hidden. Call done() when finished."
+        "Enter Act mode to execute actions. You MUST provide step-by-step instructions "
+        "for what to do. Instructions stay visible and you mark each step done as you go. "
+        "Your notes come with you but context sources are hidden. Call done() when finished."
     ),
     "input_schema": {
         "type": "object",
@@ -1528,9 +1528,32 @@ ACT_TOOL_DEFINITION = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Tool suites to load (e.g. ['notion', 'google']). Check suite index for available suites."
+            },
+            "instructions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Step-by-step instructions for what to do in Act mode. Each string is one step."
             }
         },
-        "required": ["suites"]
+        "required": ["suites", "instructions"]
+    }
+}
+
+MARK_STEP_DONE_TOOL_DEFINITION = {
+    "name": "mark_step_done",
+    "description": (
+        "Mark an instruction step as completed. Call this after finishing each step. "
+        "Steps are 1-indexed."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "step": {
+                "type": "integer",
+                "description": "Step number to mark as done (1-indexed)"
+            }
+        },
+        "required": ["step"]
     }
 }
 
@@ -2605,8 +2628,8 @@ def _build_suite_index(suite_registry: Dict, mcp_suites: Dict = None, workspace:
     """Build the suite index text for Think mode system prompt."""
     lines = [
         "## Tool Suites\n",
-        "Use `act(suites=[...])` to load tools and enter Act mode.",
-        "Take notes first — context is hidden while acting.\n",
+        "Use `act(suites=[...], instructions=[...])` to enter Act mode with step-by-step instructions.",
+        "Take notes first — context is hidden while acting. Instructions stay visible.\n",
     ]
     for name, info in suite_registry.items():
         lines.append(f"- **{name}** ({info['count']} tools) — {info['description']}")
@@ -2795,7 +2818,12 @@ class ToolExecutor:
                 suites = tool_input.get("suites", [])
                 if not suites:
                     return "Error: provide at least one suite name."
-                return f"__ACT__:{','.join(suites)}"
+                instructions = tool_input.get("instructions", [])
+                import json as _json_act
+                return f"__ACT__:{','.join(suites)}|{_json_act.dumps(instructions)}"
+            elif tool_name == "mark_step_done":
+                step = tool_input.get("step", 0)
+                return f"__MARK_STEP__:{step}"
             elif tool_name == "done":
                 return "__DONE__"
             # Config tools
@@ -7133,6 +7161,8 @@ async def agentic_turn(
     # Think/Act mode state
     act_mode = False
     act_suites: List[str] = []
+    act_instructions: List[str] = []
+    act_step_status: List[str] = []  # "pending" | "done"
     use_think_act = suite_registry is not None  # Feature flag: only use Think/Act if registry provided
 
     for iteration in range(max_iterations):
@@ -7173,15 +7203,26 @@ async def agentic_turn(
             iteration_tools.append(ACT_TOOL_DEFINITION)
 
         elif use_think_act and act_mode:
-            # ACT MODE: no context, no suite index — just notes + memory + loaded suites
+            # ACT MODE: no context, no suite index — just notes + memory + loaded suites + instructions
             budget_note += f"\n\n[ACT MODE: {', '.join(act_suites)}. Call done() when finished.]"
 
-            # Act mode tools: loaded suites + notepad + memory + done
+            # Inject instructions checklist into the prompt
+            if act_instructions:
+                instr_lines = ["\n\n## Instructions\n"]
+                for i, step in enumerate(act_instructions):
+                    status = act_step_status[i] if i < len(act_step_status) else "pending"
+                    checkbox = "[x]" if status == "done" else "[ ]"
+                    instr_lines.append(f"{i+1}. {checkbox} {step}")
+                budget_note += "\n".join(instr_lines)
+
+            # Act mode tools: loaded suites + notepad + memory + mark_step_done + done
             iteration_tools = []
             for suite_name in act_suites:
                 iteration_tools.extend(_get_suite_tools(suite_name, suite_registry, mcp_suites))
             iteration_tools.append(NOTEPAD_TOOL_DEFINITION)
             iteration_tools.append(MEMORY_TOOL_DEFINITION)
+            if act_instructions:
+                iteration_tools.append(MARK_STEP_DONE_TOOL_DEFINITION)
             iteration_tools.append(DONE_TOOL_DEFINITION)
 
         else:
@@ -7385,21 +7426,79 @@ async def agentic_turn(
 
             # Handle Think/Act mode switching sentinels (stay in loop)
             if result_text.startswith("__ACT__:"):
-                suite_names = [s.strip() for s in result_text.split(":", 1)[1].split(",")]
+                # Parse: __ACT__:suite1,suite2|["step1","step2"]
+                payload = result_text.split(":", 1)[1]
+                if "|" in payload:
+                    suites_part, instructions_json = payload.split("|", 1)
+                    suite_names = [s.strip() for s in suites_part.split(",")]
+                    try:
+                        import json as _json_parse
+                        act_instructions = _json_parse.loads(instructions_json)
+                        act_step_status = ["pending"] * len(act_instructions)
+                    except Exception:
+                        act_instructions = []
+                        act_step_status = []
+                else:
+                    suite_names = [s.strip() for s in payload.split(",")]
+                    act_instructions = []
+                    act_step_status = []
                 act_mode = True
                 act_suites = suite_names
                 # Mute context (preserves individual on/off states for restore)
                 if tool_executor:
                     tool_executor._sources_muted = True
-                result_text = f"Act mode. Suites loaded: {', '.join(suite_names)}. Context muted. Work from your notes."
-                logger.info(f"[think/act] Entered Act mode with suites: {suite_names}")
+                instr_count = f" {len(act_instructions)} steps." if act_instructions else ""
+                result_text = f"Act mode. Suites loaded: {', '.join(suite_names)}.{instr_count} Context muted. Follow your instructions."
+                logger.info(f"[think/act] Entered Act mode with suites: {suite_names}, instructions: {len(act_instructions)} steps")
+                # Fire plan step callback for UX
+                if act_instructions and on_tool_activity:
+                    try:
+                        await on_tool_activity(
+                            tool_name="__plan_step__",
+                            tool_input={"step": 1, "total": len(act_instructions), "steps": act_instructions},
+                            completed=False,
+                        )
+                    except Exception:
+                        pass
+            elif result_text.startswith("__MARK_STEP__:"):
+                step_num = int(result_text.split(":")[1])
+                if 0 < step_num <= len(act_step_status):
+                    act_step_status[step_num - 1] = "done"
+                    result_text = f"Step {step_num} marked done."
+                    logger.info(f"[think/act] Marked step {step_num}/{len(act_instructions)} done")
+                    # Fire UX callback
+                    if on_tool_activity:
+                        try:
+                            # Advance to next pending step for display
+                            next_step = step_num + 1 if step_num < len(act_instructions) else step_num
+                            await on_tool_activity(
+                                tool_name="__plan_step__",
+                                tool_input={"step": next_step, "total": len(act_instructions)},
+                                completed=True,
+                            )
+                        except Exception:
+                            pass
+                else:
+                    result_text = f"Invalid step number: {step_num}"
             elif result_text == "__DONE__":
                 act_mode = False
                 act_suites = []
+                act_instructions = []
+                act_step_status = []
                 if tool_executor:
                     tool_executor._sources_muted = False
                 result_text = "Back to Think mode. Context restored."
                 logger.info("[think/act] Returned to Think mode")
+                # Fire plan done callback
+                if on_tool_activity:
+                    try:
+                        await on_tool_activity(
+                            tool_name="__plan_done__",
+                            tool_input={},
+                            completed=True,
+                        )
+                    except Exception:
+                        pass
 
             # Handle interview sentinels — break out of loop and return with signal
             elif result_text.startswith("__INTERVIEW_START__:"):
