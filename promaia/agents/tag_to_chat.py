@@ -808,7 +808,7 @@ class TagToChatLoop:
             pages = await _asyncio.to_thread(
                 load_database_pages_with_filters,
                 database_config=slack_db_config,
-                days=7,
+                days=2,
             )
 
             lines = []

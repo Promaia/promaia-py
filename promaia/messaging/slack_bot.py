@@ -681,7 +681,7 @@ def create_slack_bot():
                     pages = await _asyncio.to_thread(
                         load_database_pages_with_filters,
                         database_config=slack_db_config,
-                        days=7,
+                        days=2,
                     )
                     # Filter to this channel and format
                     # pages is a list of dicts with 'content', 'metadata', etc.

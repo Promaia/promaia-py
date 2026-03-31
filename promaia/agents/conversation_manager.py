@@ -774,7 +774,7 @@ class ConversationManager:
                 past_summaries = self._load_recent_dm_summaries(
                     conversation_partner=user_name,
                     platform=platform,
-                    days=7,
+                    days=2,
                 )
                 if past_summaries:
                     base_prompt += f"\n\n## Recent Conversations with {user_name}\n"
