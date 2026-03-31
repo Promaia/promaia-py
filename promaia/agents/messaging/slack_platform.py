@@ -285,6 +285,30 @@ class SlackPlatform(BaseMessagingPlatform):
             self.logger.error(f"Slack API error getting thread: {e.response['error']}")
             raise
 
+    async def get_channel_history(
+        self,
+        channel_id: str,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Get recent messages from a channel or DM."""
+        try:
+            response = self.client.conversations_history(
+                channel=channel_id,
+                limit=limit
+            )
+            messages = []
+            for msg in response.get('messages', []):
+                messages.append({
+                    'user_id': msg.get('user', 'unknown'),
+                    'text': msg.get('text', ''),
+                    'timestamp': msg.get('ts', ''),
+                })
+            # API returns newest first, reverse for chronological
+            return list(reversed(messages))
+        except SlackApiError as e:
+            self.logger.error(f"Slack API error getting channel history: {e.response['error']}")
+            return []
+
     async def add_reaction(
         self,
         channel_id: str,

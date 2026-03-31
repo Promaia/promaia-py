@@ -747,8 +747,14 @@ class TagToChatLoop:
                     thread_id=self.state.thread_id,
                 )
             else:
-                # DM — no thread to fetch, context comes from conversation state
-                return None
+                # DM — fetch recent channel history for context
+                if hasattr(self.platform, 'get_channel_history'):
+                    messages = await self.platform.get_channel_history(
+                        channel_id=self.state.channel_id,
+                        limit=50,
+                    )
+                else:
+                    return None
             if not messages:
                 return None
 
