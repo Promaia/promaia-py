@@ -1008,6 +1008,9 @@ class ConversationManager:
             state.status = 'completed'
             state.completed_at = datetime.now(timezone.utc).isoformat()
             state.completion_reason = reason
+            # Clear notepad and source states so they don't leak into future conversations
+            state.context.pop('notepad_content', None)
+            state.context.pop('source_states', None)
             await self._save_state(state)
 
             logger.info(
@@ -1048,6 +1051,9 @@ class ConversationManager:
         state.completed_at = datetime.now(timezone.utc).isoformat()
         state.completion_reason = reason
         state.summary = summary
+        # Clear notepad and source states — fresh start for next conversation
+        state.context.pop('notepad_content', None)
+        state.context.pop('source_states', None)
         await self._save_state(state)
 
         logger.info(
