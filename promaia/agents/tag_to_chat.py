@@ -742,19 +742,49 @@ class TagToChatLoop:
         """Fetch all thread/DM messages and format as context for the AI."""
         try:
             if self.state.thread_id:
+                # Channel thread — fetch replies from API (threads may not be in KB yet)
                 messages = await self.platform.get_thread_messages(
                     channel_id=self.state.channel_id,
                     thread_id=self.state.thread_id,
                 )
             else:
-                # DM — fetch recent channel history for context
-                if hasattr(self.platform, 'get_channel_history'):
-                    messages = await self.platform.get_channel_history(
-                        channel_id=self.state.channel_id,
-                        limit=50,
-                    )
-                else:
-                    return None
+                # DM — load history from synced KB, not API
+                # The KB has all messages up to last sync; messages since then
+                # are already in state.messages (current session)
+                try:
+                    from promaia.config.databases import get_database_config
+                    from promaia.storage.files import load_database_pages_with_filters
+                    import asyncio as _asyncio, json as _json
+
+                    slack_db_config = get_database_config("slack", workspace=None)
+                    if slack_db_config:
+                        dm_channel_name = await self.platform.get_channel_name(self.state.channel_id)
+
+                        pages = await _asyncio.to_thread(
+                            load_database_pages_with_filters,
+                            database_config=slack_db_config,
+                            days=7,
+                        )
+                        dm_lines = []
+                        for page in sorted(pages, key=lambda x: x.get('created_time', '')):
+                            page_meta = page.get('metadata', {})
+                            if isinstance(page_meta, str):
+                                try:
+                                    page_meta = _json.loads(page_meta)
+                                except Exception:
+                                    page_meta = {}
+                            props = page_meta.get('properties', {}) if isinstance(page_meta, dict) else {}
+                            page_channel = props.get('channel_name', '')
+                            if page_channel == dm_channel_name:
+                                uname = props.get('username', 'unknown')
+                                text = page.get('content', '').strip()
+                                if text:
+                                    dm_lines.append(f"[{uname}]: {text[:500]}")
+                        if dm_lines:
+                            return "\n".join(dm_lines[-100:])
+                except Exception as e:
+                    logger.debug(f"Could not load DM history from KB: {e}")
+                return None
             if not messages:
                 return None
 

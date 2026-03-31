@@ -309,6 +309,23 @@ class SlackPlatform(BaseMessagingPlatform):
             self.logger.error(f"Slack API error getting channel history: {e.response['error']}")
             return []
 
+    async def get_channel_name(self, channel_id: str) -> str:
+        """Get channel name from ID. For DMs, returns 'dm-{username}'."""
+        try:
+            response = self.client.conversations_info(channel=channel_id)
+            if response['ok']:
+                channel = response['channel']
+                if channel.get('is_im'):
+                    user_id = channel.get('user', '')
+                    user_response = self.client.users_info(user=user_id)
+                    if user_response['ok']:
+                        return f"dm-{user_response['user'].get('name', user_id)}"
+                    return f"dm-{user_id}"
+                return channel.get('name', channel_id)
+        except SlackApiError as e:
+            self.logger.error(f"Slack API error getting channel name: {e.response['error']}")
+        return channel_id
+
     async def add_reaction(
         self,
         channel_id: str,
