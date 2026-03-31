@@ -6239,9 +6239,18 @@ class ToolExecutor:
                 f"  Workspace: {agent.workspace}",
                 f"  Status: {'enabled' if agent.enabled else 'disabled'}",
                 f"  Databases: {', '.join(agent.databases) if agent.databases else 'none'}",
-                f"  MCP tools: {', '.join(agent.mcp_tools) if agent.mcp_tools else 'none'}",
+                f"  Tools: {', '.join(agent.mcp_tools) if agent.mcp_tools else 'none'}",
                 f"  Max iterations: {agent.max_iterations}",
             ]
+            # Append connected external MCP servers
+            try:
+                from promaia.config.mcp_servers import McpServerManager
+                mgr = McpServerManager()
+                ext_names = [name for name, srv in mgr.servers.items() if srv.enabled]
+                if ext_names:
+                    lines.append(f"  External MCP servers: {', '.join(ext_names)}")
+            except Exception:
+                pass
             if agent.interval_minutes:
                 lines.append(f"  Interval: every {agent.interval_minutes} minutes")
             if agent.schedule:
