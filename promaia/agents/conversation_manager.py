@@ -1097,10 +1097,15 @@ class ConversationManager:
             logger.warning(f"Conversation {conversation_id} not found for batched messages")
             return "Sorry, I couldn't find that conversation."
 
-        # If thread context provided, sync it into conversation state so
-        # the AI sees the full thread history (not just what's in the DB).
-        if thread_context:
-            state.messages = self._sync_thread_context(state.messages, thread_context)
+        # Seed thread context on first turn only — preserve existing messages
+        # (which include tool calls, results, and structured content).
+        # Previous approach (_sync_thread_context) replaced all messages with
+        # flat text from the API, wiping tool call history.
+        if thread_context and not state.messages:
+            state.messages = [
+                {'role': 'user', 'content': f"[Thread history]\n{thread_context}"},
+                {'role': 'assistant', 'content': "Got it, I have the thread context."},
+            ]
 
         # Update state
         now = datetime.now(timezone.utc).isoformat()

@@ -726,6 +726,37 @@ class SlackConnector(BaseConnector):
         
         return text + reactions_section + files_section
     
+    async def sync_channel(self, channel_id: str, storage, db_config, since_minutes: int = 10):
+        """Sync a single channel/DM incrementally (messages since last sync).
+
+        Lightweight wrapper around sync_to_local_unified scoped to one channel
+        and recent messages only. Thread replies are included automatically.
+
+        Args:
+            channel_id: Slack channel or DM channel ID
+            storage: UnifiedStorage instance
+            db_config: DatabaseConfig for the slack source
+            since_minutes: How far back to sync (default 10 minutes)
+        """
+        from .base import QueryFilter, DateRangeFilter
+
+        channel_filter = QueryFilter(
+            property_name='channel_id',
+            operator='eq',
+            value=channel_id
+        )
+        date_filter = DateRangeFilter(
+            start_date=datetime.now(timezone.utc) - timedelta(minutes=since_minutes),
+            end_date=datetime.now(timezone.utc)
+        )
+
+        return await self.sync_to_local_unified(
+            storage=storage,
+            db_config=db_config,
+            filters=[channel_filter],
+            date_filter=date_filter,
+        )
+
     async def cleanup(self):
         """Clean up Slack connector."""
         # No persistent connections to clean up

@@ -716,10 +716,43 @@ class TagToChatLoop:
 
     # ── Response generation ─────────────────────────────────────────────
 
+    async def _sync_channel_to_kb(self):
+        """Sync the active channel/DM to KB before generating a response.
+
+        Incremental — only fetches messages from the last 10 minutes.
+        If sync fails, logs and continues (don't block response generation).
+        """
+        if not hasattr(self.platform, 'bot_token'):
+            return
+        try:
+            from promaia.connectors.slack_connector import SlackConnector
+            from promaia.storage.unified_storage import get_unified_storage
+            from promaia.config.databases import get_database_config
+
+            db_config = get_database_config("slack", workspace=None)
+            if not db_config:
+                return
+
+            connector = SlackConnector({"database_id": db_config.database_id, "bot_token": self.platform.bot_token})
+            storage = get_unified_storage()
+
+            result = await connector.sync_channel(
+                channel_id=self.state.channel_id,
+                storage=storage,
+                db_config=db_config,
+            )
+            if result and result.pages_saved:
+                logger.info(f"[tag2chat] Pre-response sync: {result.pages_saved} new messages in {self.state.channel_id[:12]}")
+        except Exception as e:
+            logger.debug(f"[tag2chat] Pre-response sync failed (non-fatal): {e}")
+
     async def _generate_response(self, on_tool_activity=None) -> str:
         """Generate the actual AI response using the conversation manager."""
         try:
-            # Fetch full thread history so the AI has complete context
+            # Sync this channel/DM to KB before generating response
+            await self._sync_channel_to_kb()
+
+            # Load context from KB
             thread_context = await self._build_thread_context()
 
             response = await self.conv_manager.handle_batched_messages(
@@ -739,68 +772,56 @@ class TagToChatLoop:
             return "Sorry, I encountered an error generating a response."
 
     async def _build_thread_context(self) -> Optional[str]:
-        """Fetch all thread/DM messages and format as context for the AI."""
+        """Load conversation context from synced KB (not Slack API).
+
+        For both channels and DMs, loads recent messages from the KB.
+        The pre-response sync (_sync_channel_to_kb) ensures data is fresh.
+        Messages since the last sync are already in state.messages.
+        """
         try:
-            if self.state.thread_id:
-                # Channel thread — fetch replies from API (threads may not be in KB yet)
-                messages = await self.platform.get_thread_messages(
-                    channel_id=self.state.channel_id,
-                    thread_id=self.state.thread_id,
-                )
-            else:
-                # DM — load history from synced KB, not API
-                # The KB has all messages up to last sync; messages since then
-                # are already in state.messages (current session)
-                try:
-                    from promaia.config.databases import get_database_config
-                    from promaia.storage.files import load_database_pages_with_filters
-                    import asyncio as _asyncio, json as _json
+            from promaia.config.databases import get_database_config
+            from promaia.storage.files import load_database_pages_with_filters
+            import asyncio as _asyncio, json as _json
 
-                    slack_db_config = get_database_config("slack", workspace=None)
-                    if slack_db_config:
-                        dm_channel_name = await self.platform.get_channel_name(self.state.channel_id)
-
-                        pages = await _asyncio.to_thread(
-                            load_database_pages_with_filters,
-                            database_config=slack_db_config,
-                            days=7,
-                        )
-                        dm_lines = []
-                        for page in sorted(pages, key=lambda x: x.get('created_time', '')):
-                            page_meta = page.get('metadata', {})
-                            if isinstance(page_meta, str):
-                                try:
-                                    page_meta = _json.loads(page_meta)
-                                except Exception:
-                                    page_meta = {}
-                            props = page_meta.get('properties', {}) if isinstance(page_meta, dict) else {}
-                            page_channel = props.get('channel_name', '')
-                            if page_channel == dm_channel_name:
-                                uname = props.get('username', 'unknown')
-                                text = page.get('content', '').strip()
-                                if text:
-                                    dm_lines.append(f"[{uname}]: {text[:500]}")
-                        if dm_lines:
-                            return "\n".join(dm_lines[-100:])
-                except Exception as e:
-                    logger.debug(f"Could not load DM history from KB: {e}")
-                return None
-            if not messages:
+            slack_db_config = get_database_config("slack", workspace=None)
+            if not slack_db_config:
                 return None
 
-            # Filter out bot temp messages (countdown, thinking)
+            channel_name = await self.platform.get_channel_name(self.state.channel_id)
+
+            pages = await _asyncio.to_thread(
+                load_database_pages_with_filters,
+                database_config=slack_db_config,
+                days=7,
+            )
+
             lines = []
-            for m in messages:
-                text = m.get('text', '').strip()
-                if not text:
+            for page in sorted(pages, key=lambda x: x.get('created_time', '')):
+                page_meta = page.get('metadata', {})
+                if isinstance(page_meta, str):
+                    try:
+                        page_meta = _json.loads(page_meta)
+                    except Exception:
+                        page_meta = {}
+                props = page_meta.get('properties', {}) if isinstance(page_meta, dict) else {}
+                page_channel = props.get('channel_name', '')
+                if page_channel != channel_name:
                     continue
-                # Skip temporary status messages (thinking emojis, countdown)
-                if m.get('ts') == self.state.temp_message_id:
-                    continue
-                user_id = m.get('user_id', 'unknown')
-                lines.append(f"[{user_id}]: {text}")
 
-            return "\n".join(lines) if lines else None
+                # For channel threads: also filter by thread_ts if we're in a thread
+                if self.state.thread_id:
+                    page_thread = props.get('thread_ts', '')
+                    page_ts = props.get('ts', '') or page.get('page_id', '').replace('msg_', '')
+                    # Include messages that are the thread parent or replies in this thread
+                    if page_ts != self.state.thread_id and page_thread != self.state.thread_id:
+                        continue
+
+                uname = props.get('username', 'unknown')
+                text = page.get('content', '').strip()
+                if text:
+                    lines.append(f"[{uname}]: {text[:500]}")
+
+            return "\n".join(lines[-100:]) if lines else None
         except Exception as e:
             logger.warning(f"Failed to build thread context: {e}")
             return None
