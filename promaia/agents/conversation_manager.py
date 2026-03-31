@@ -173,7 +173,12 @@ class ConversationManager:
         if self._agent_cache_mtime is None or current_mtime > self._agent_cache_mtime:
             logger.info("🔄 Reloading agent cache (config changed)")
             agents = load_agents()
-            self._agent_cache = {(a.agent_id or a.name): a for a in agents}
+            new_cache = {(a.agent_id or a.name): a for a in agents}
+            # Don't replace a working cache with an empty one (config file race condition)
+            if new_cache or not self._agent_cache:
+                self._agent_cache = new_cache
+            else:
+                logger.warning("⚠️ Config reload returned 0 agents, keeping previous cache")
             self._agent_cache_mtime = current_mtime
             logger.info(f"✅ Cached {len(self._agent_cache)} agents")
 
