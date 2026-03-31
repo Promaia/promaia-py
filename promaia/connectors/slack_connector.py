@@ -375,11 +375,17 @@ class SlackConnector(BaseConnector):
         }
     
     async def _get_channel_name(self, channel_id: str) -> str:
-        """Get channel name from ID."""
+        """Get channel name from ID. For DMs, returns 'dm-{username}'."""
         try:
             response = self.client.conversations_info(channel=channel_id)
             if response['ok']:
-                return response['channel']['name']
+                channel = response['channel']
+                if channel.get('is_im'):
+                    # DM channel — resolve the other user's name
+                    dm_user_id = channel.get('user', '')
+                    username = await self._get_username(dm_user_id)
+                    return f"dm-{username}"
+                return channel.get('name', channel_id)
         except:
             pass
         return channel_id
@@ -432,10 +438,10 @@ class SlackConnector(BaseConnector):
         """Query messages from all accessible channels."""
         try:
             # Get all channels
-            response = self.client.conversations_list(types="public_channel,private_channel")
+            response = self.client.conversations_list(types="public_channel,private_channel,im")
             channels = response['channels']
-            
-            self.logger.info(f"Found {len(channels)} channels to sync")
+
+            self.logger.info(f"Found {len(channels)} channels to sync (including DMs)")
             
             oldest = None
             latest = None
@@ -449,30 +455,37 @@ class SlackConnector(BaseConnector):
             
             for channel in channels:
                 channel_id = channel['id']
-                
+                # DM channels (type 'im') use user ID instead of name
+                is_dm = channel.get('is_im', False)
+                if is_dm:
+                    dm_user_id = channel.get('user', '')
+                    channel_display = f"dm-{await self._get_username(dm_user_id)}"
+                else:
+                    channel_display = channel.get('name', channel_id)
+
                 try:
                     await self._rate_limit()
-                    
+
                     channel_limit = limit // len(channels) if limit else 100
                     if channel_limit < 10:
                         channel_limit = 10
-                    
+
                     messages = await self._fetch_channel_messages(
                         channel_id=channel_id,
                         oldest=oldest,
                         latest=latest,
                         limit=channel_limit
                     )
-                    
+
                     if messages:
-                        self.logger.info(f"Found {len(messages)} messages in #{channel['name']}")
+                        self.logger.info(f"Found {len(messages)} messages in {'DM:' if is_dm else '#'}{channel_display}")
                         all_messages.extend(messages)
-                
+
                 except SlackApiError as e:
                     if e.response['error'] == 'not_in_channel':
-                        self.logger.debug(f"Bot not in channel #{channel['name']}")
+                        self.logger.debug(f"Bot not in channel {channel_display}")
                     else:
-                        self.logger.warning(f"Error fetching from #{channel['name']}: {e}")
+                        self.logger.warning(f"Error fetching from {channel_display}: {e}")
                     continue
             
             # Sort
@@ -500,7 +513,7 @@ class SlackConnector(BaseConnector):
             self.logger.info("Discovering accessible Slack channels...")
             
             response = self.client.conversations_list(
-                types="public_channel,private_channel",
+                types="public_channel,private_channel,im",
                 exclude_archived=True
             )
             
