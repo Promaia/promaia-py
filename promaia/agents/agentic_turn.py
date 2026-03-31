@@ -7175,7 +7175,10 @@ async def agentic_turn(
         effective_prompt = system_prompt
 
         if use_think_act and not act_mode:
-            # THINK MODE: context index + active content + suite index
+            # THINK MODE: suite index first, then context index + active content
+            _ws = tool_executor.workspace if tool_executor else ""
+            effective_prompt += "\n\n" + _build_suite_index(suite_registry, mcp_suites, workspace=_ws)
+
             if tool_executor and hasattr(tool_executor, 'build_context_index'):
                 ctx_index = tool_executor.build_context_index()
                 if ctx_index:
@@ -7185,9 +7188,6 @@ async def agentic_turn(
                 active_content = tool_executor.build_active_source_content()
                 if active_content:
                     effective_prompt += "\n\n" + active_content
-
-            _ws = tool_executor.workspace if tool_executor else ""
-            effective_prompt += "\n\n" + _build_suite_index(suite_registry, mcp_suites, workspace=_ws)
 
             # Think mode tools: query + notepad + memory + context + workflows (read) + act
             iteration_tools = list(QUERY_TOOL_DEFINITIONS)

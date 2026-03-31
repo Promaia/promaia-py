@@ -462,10 +462,10 @@ def build_agentic_system_prompt(
     filled = template.replace("{agent_name}", "Maia")
     filled = filled.replace("{platform}", "terminal")
     filled = filled.replace("{sources}", sources_list)
-    # Tool sections are no longer embedded in the prompt — Think/Act mode handles this.
-    # Think mode shows a compact suite index, Act mode loads full tool schemas via API.
-    filled = filled.replace("{tool_sections}", "")
-    filled = filled.replace("{notion_guidance}", "")
+    # Tool sections embedded in conversation_mode.md template — positioned before
+    # context sources so the agent sees available tools early in the prompt.
+    filled = filled.replace("{tool_sections}", tool_sections)
+    filled = filled.replace("{notion_guidance}", notion_guidance)
 
     # Workflow/interview descriptions, MCP tool descriptions, and saved workflows
     # are NOT injected into the prompt. They appear in the suite index (Think mode)
