@@ -36,11 +36,20 @@ def truncate_sheet_content(
 
     total_tokens = estimate_token_count(content)
     if total_tokens <= token_limit:
+        logger.info(
+            "Sheet '%s' fits in budget (%d tokens <= %d limit)",
+            title, total_tokens, token_limit,
+        )
         return content
 
     row_counts = properties.get("row_counts", {})
     sheet_names = properties.get("sheet_names", [])
     total_rows = sum(row_counts.values()) if row_counts else content.count("\n") + 1
+
+    logger.info(
+        "Sheet '%s' exceeds budget (%d tokens > %d limit, %d rows) — truncating",
+        title, total_tokens, token_limit, total_rows,
+    )
 
     # Truncate line-by-line, reserving room for the footer
     footer_budget = 200  # tokens reserved for the footer text
@@ -61,11 +70,18 @@ def truncate_sheet_content(
         f"{name} ({row_counts.get(name, '?')} rows)" for name in sheet_names
     ) if sheet_names else "1 tab"
 
+    logger.info(
+        "Sheet '%s' truncated: %d rows kept (~%d tokens), %d rows total",
+        title, shown_rows, running_tokens, total_rows,
+    )
+
     footer = (
-        f"\n\n[Truncated — showing ~{shown_rows} of {total_rows} rows "
-        f"(~{running_tokens} of ~{total_tokens} tokens)\n"
-        f" Tabs: {tabs_detail}\n"
-        f" Use sheets_read_range to load specific ranges beyond this preview.]"
+        f"\n\n⚠️ SHEET PREVIEW ONLY — This is NOT the full sheet.\n"
+        f"Showing ~{shown_rows} of {total_rows} rows "
+        f"(~{running_tokens} of ~{total_tokens} tokens).\n"
+        f"Tabs: {tabs_detail}\n"
+        f"To see more data, use sheets_read_range with a specific A1 range "
+        f"(e.g. 'Sheet1!A50:Z100'). You can load ranges larger than this preview."
     )
 
     return "\n".join(kept) + footer
