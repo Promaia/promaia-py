@@ -288,8 +288,8 @@ def build_agentic_system_prompt(
         tool_sections_parts.append(
             "## Google Sheets Tools (Read & Write)\n\n"
             "- **sheets_find**: Search Google Drive for spreadsheets by name\n"
-            "- **sheets_ingest**: One-time ingest of a sheet into context (CSV with inline formulas)\n"
-            "- **sheets_read_range**: Read a specific A1 range from a sheet\n"
+            "- **sheets_ingest**: Ingest a sheet into context (previews first ~10k tokens; use sheets_read_range for more)\n"
+            "- **sheets_read_range**: Read a specific A1 range — results auto-save as toggleable context sources\n"
             "- **sheets_update_cells**: Write values to one or more ranges\n"
             "- **sheets_append_rows**: Append rows after the last row of data\n"
             "- **sheets_insert_rows**: Insert rows at a specific position (shifts existing rows down)\n"

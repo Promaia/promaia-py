@@ -1091,8 +1091,9 @@ GOOGLE_SHEETS_TOOL_DEFINITIONS = [
         "description": (
             "Read a specific cell range from a Google Sheet. Returns both "
             "formulas and display values in inline format: {=FORMULA} value. "
-            "Use for on-demand reads, verifying edits, or checking formula correctness. "
-            "For bulk reads of entire synced sheets, prefer query_sql instead."
+            "Results are auto-saved as a toggleable context source — use the "
+            "context tool to turn them on/off. You can load ranges larger than "
+            "the default sheet preview if needed."
         ),
         "input_schema": {
             "type": "object",
@@ -1280,7 +1281,9 @@ GOOGLE_SHEETS_TOOL_DEFINITIONS = [
         "description": (
             "One-time ingest of a Google Sheet into context. Fetches all tabs "
             "and formats them as CSV with inline formulas (same format as synced "
-            "sheets). The data is cached locally so subsequent sheets tools can "
+            "sheets). Large sheets are previewed (~first 10k tokens) — use "
+            "sheets_read_range to access specific ranges beyond the preview. "
+            "The data is cached locally so subsequent sheets tools can "
             "resolve the sheet by name. Only ingest once per sheet per "
             "conversation — if you already ingested it or it's in synced "
             "sources, skip this step."
@@ -4056,7 +4059,17 @@ class ToolExecutor:
                 else:
                     cells.append(d_val)
             writer.writerow(cells)
-        return f"Range {range_str} ({max_rows} rows, starting row {start_row}):\n\n{out.getvalue()}"
+        result = f"Range {range_str} ({max_rows} rows, starting row {start_row}):\n\n{out.getvalue()}"
+
+        # Auto-save as toggleable context source
+        # TODO: may want to add opt-in pin feature in future version
+        source_name = f"sheet_{range_str.replace('!', '_').replace(':', '-')}"
+        self._sources[source_name] = {
+            "content": result,
+            "on": True,
+            "source": "sheets_read_range",
+        }
+        return f"Range loaded → source '{source_name}' [ON]\n\n{result}"
 
     @staticmethod
     def _coerce_values(values):
@@ -4657,6 +4670,9 @@ class ToolExecutor:
             f"{total_rows} total rows)\n"
             f"ID: {spreadsheet_id}\nURL: {ss_url}\n\n"
         )
+        from promaia.connectors.google_sheets_connector import truncate_sheet_content
+        ingest_properties = {"sheet_names": sheet_names, "row_counts": row_counts}
+        content = truncate_sheet_content(content, ingest_properties, title)
         return header + content
 
     # ── Google Drive tools ───────────────────────────────────────────────

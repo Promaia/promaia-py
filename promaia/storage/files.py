@@ -1239,12 +1239,15 @@ def _load_sheets_direct(database_config, days) -> List[Dict[str, Any]]:
                 except (json.JSONDecodeError, TypeError):
                     pass
             content = row_dict.get("content", "")
+            title = row_dict.get("title", "")
+            from promaia.connectors.google_sheets_connector import truncate_sheet_content
+            content = truncate_sheet_content(content, metadata, title)
             results.append({
                 "page_id": row_dict.get("page_id", ""),
-                "title": row_dict.get("title", ""),
+                "title": title,
                 "content": content,
                 "metadata": metadata,
-                "filename": row_dict.get("title", ""),
+                "filename": title,
                 "date": row_dict.get("updated_at", ""),
             })
 
