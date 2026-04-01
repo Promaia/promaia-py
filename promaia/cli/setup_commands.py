@@ -473,9 +473,285 @@ async def _run_single_service_setup(service):
                 "workflow_context": onboarding_context,
             },
         }
+    elif service == "mcp":
+        await _setup_mcp_server(console)
     else:
         console.print(f"[yellow]Unknown service: {service}[/yellow]")
-        console.print("[dim]Available: slack, notion, google, gmail, llm, agent[/dim]")
+        console.print("[dim]Available: slack, notion, google, gmail, llm, agent, mcp[/dim]")
+
+
+async def _setup_mcp_server(c):
+    """Interactive wizard to add an MCP server."""
+    import json as _json
+    from rich.prompt import Prompt, Confirm
+    from rich.panel import Panel
+    from promaia.agents.mcp_loader import _find_mcp_servers_json
+    from promaia.config.mcp_servers import McpServerManager, McpServerConfig
+    from promaia.agents.agent_config import load_agents, save_agent
+
+    c.print(Panel("[bold]MCP Server Setup[/bold]\n\n"
+                   "Paste a URL for a remote server, or a Claude Desktop JSON config block.\n"
+                   "End multi-line JSON with a blank line.",
+                   style="cyan", padding=(1, 2)))
+
+    # --- Step 1: Read input ---
+    raw = _read_mcp_multiline_input()
+    if not raw.strip():
+        c.print("[dim]Nothing entered, skipping.[/dim]")
+        return
+
+    # --- Step 2: Parse ---
+    suggested_name, transport, parsed = _parse_mcp_input(raw)
+    if parsed is None:
+        c.print("[red]Could not parse input.[/red] Expected a URL (https://...) or JSON config block.")
+        return
+
+    c.print(f"  Detected transport: [bold]{transport}[/bold]")
+
+    # --- Step 3: Server name ---
+    default_name = suggested_name or "my-server"
+    name = Prompt.ask("  Server name", default=default_name).strip()
+
+    # --- Step 4: Description ---
+    description = Prompt.ask("  Description (optional)", default="").strip()
+    parsed["description"] = description
+    parsed["transport"] = transport
+    parsed["enabled"] = True
+
+    # --- Step 5: Resolve env var placeholders ---
+    if parsed.get("env"):
+        parsed["env"] = _prompt_mcp_env_vars(parsed["env"], c)
+
+    # --- Step 6: Validate ---
+    config = McpServerConfig(
+        name=name,
+        description=parsed.get("description", ""),
+        command=parsed.get("command", []),
+        args=parsed.get("args", []),
+        env=parsed.get("env", {}),
+        working_dir=parsed.get("working_dir"),
+        timeout=parsed.get("timeout", 30),
+        enabled=True,
+        transport=transport,
+        url=parsed.get("url"),
+    )
+    config_path = _find_mcp_servers_json()
+    if not config_path:
+        from promaia.utils.env_writer import get_data_dir
+        config_path = get_data_dir() / "mcp_servers.json"
+    mgr = McpServerManager(str(config_path))
+    errors = mgr.validate_server_config(config)
+    if errors:
+        for e in errors:
+            c.print(f"  [yellow]Warning:[/yellow] {e}")
+        if not Confirm.ask("  Save anyway?", default=False):
+            return
+
+    # --- Step 7: Test connection ---
+    if Confirm.ask("  Test connection?", default=True):
+        await _safe_step(_test_mcp_connection(config, c), "connection test")
+
+    # --- Step 8: Save server ---
+    mgr.add_server(name, parsed)
+    c.print(f"\n  [green]Saved[/green] [bold]{name}[/bold] to mcp_servers.json")
+
+    # --- Step 9: Assign to agents ---
+    agents = load_agents()
+    if agents:
+        # Always assign to Maia (default agent)
+        maia_agent = None
+        other_agents = []
+        for agent in agents:
+            if agent.name.lower() == "maia":
+                maia_agent = agent
+            else:
+                other_agents.append(agent)
+
+        if maia_agent:
+            if name not in maia_agent.mcp_tools:
+                maia_agent.mcp_tools.append(name)
+                save_agent(maia_agent)
+            c.print(f"  [green]OK[/green] Added to [bold]Maia[/bold] (default agent)")
+
+        # Let user pick other agents
+        if other_agents:
+            from promaia.cli.setup_widgets import unified_source_selector
+            c.print("\n[bold]Which other agents should have access?[/bold]")
+            items = [
+                {"id": a.name, "label": a.name, "group": ""}
+                for a in other_agents
+            ]
+            selected = await unified_source_selector(
+                title=f"Assign '{name}' to agents",
+                items=items,
+            )
+            for sel in selected:
+                agent = next((a for a in other_agents if a.name == sel["id"]), None)
+                if agent and name not in agent.mcp_tools:
+                    agent.mcp_tools.append(name)
+                    save_agent(agent)
+                    c.print(f"  [green]OK[/green] Added to [bold]{agent.name}[/bold]")
+
+    c.print("\n[green]Done![/green] Run [bold]maia services restart all[/bold] to pick up the new server.\n")
+
+
+def _read_mcp_multiline_input() -> str:
+    """Read input until braces balance (JSON) or a single-line URL is detected."""
+    lines = []
+    brace_depth = 0
+    while True:
+        try:
+            line = input()
+        except (KeyboardInterrupt, EOFError):
+            break
+        lines.append(line)
+        brace_depth += line.count("{") - line.count("}")
+        # Single-line URL
+        if len(lines) == 1 and line.strip().startswith("http"):
+            break
+        # JSON looks complete
+        if brace_depth <= 0 and any("{" in l for l in lines):
+            break
+        # Blank line after content
+        if not line.strip() and len(lines) > 1:
+            break
+    return "\n".join(lines)
+
+
+def _parse_mcp_input(raw: str):
+    """Parse user input into (suggested_name, transport, config_dict) or (None, None, None).
+
+    Accepts:
+    - A URL (https://...)
+    - Claude Desktop format: {"mcpServers": {"name": {...}}}
+    - Single named server: {"name": {"command": ..., ...}}
+    - Bare config: {"command": "npx", "args": [...]}
+    """
+    import json as _json
+    from urllib.parse import urlparse
+
+    raw = raw.strip()
+
+    # URL detection
+    if raw.startswith("http://") or raw.startswith("https://"):
+        parsed_url = urlparse(raw)
+        hostname_parts = (parsed_url.hostname or "server").split(".")
+        suggested = hostname_parts[-2] if len(hostname_parts) >= 2 else hostname_parts[0]
+        return (suggested, "streamable_http", {"url": raw, "env": {}})
+
+    # JSON detection
+    try:
+        data = _json.loads(raw)
+    except _json.JSONDecodeError:
+        return (None, None, None)
+
+    if not isinstance(data, dict):
+        return (None, None, None)
+
+    # Claude Desktop format: {"mcpServers": {"name": {...}}}
+    if "mcpServers" in data:
+        servers = data["mcpServers"]
+        if not servers:
+            return (None, None, None)
+        name = next(iter(servers))
+        cfg = servers[name]
+        transport = "streamable_http" if "url" in cfg else cfg.get("transport", "stdio")
+        return (name, transport, _normalize_claude_desktop_config(cfg))
+
+    # Single named server: {"name": {"command": ..., ...}} or {"name": {"url": ...}}
+    if len(data) == 1:
+        key, val = next(iter(data.items()))
+        if isinstance(val, dict) and ("command" in val or "url" in val):
+            transport = "streamable_http" if "url" in val else val.get("transport", "stdio")
+            return (key, transport, _normalize_claude_desktop_config(val))
+
+    # Bare config: {"command": "npx", "args": [...]}
+    if "command" in data or "url" in data:
+        suggested = _suggest_mcp_name_from_config(data)
+        transport = "streamable_http" if "url" in data else "stdio"
+        return (suggested, transport, _normalize_claude_desktop_config(data))
+
+    return (None, None, None)
+
+
+def _normalize_claude_desktop_config(cfg: dict) -> dict:
+    """Convert Claude Desktop server config to promaia format.
+
+    Claude Desktop uses "command": "npx" (string) + "args": ["-y", "@pkg"]
+    Promaia uses "command": ["npx", "-y", "@pkg"] + "args": []
+    """
+    result = dict(cfg)
+    if isinstance(result.get("command"), str):
+        cmd_str = result["command"]
+        args = result.get("args", [])
+        result["command"] = [cmd_str] + list(args)
+        result["args"] = []
+    return result
+
+
+def _suggest_mcp_name_from_config(cfg: dict):
+    """Extract a suggested server name from command or URL."""
+    from urllib.parse import urlparse
+
+    cmd = cfg.get("command", [])
+    if isinstance(cmd, str):
+        cmd = [cmd] + cfg.get("args", [])
+    # Find npx package name
+    for part in cmd:
+        if "/" in part and not part.startswith("-"):
+            name = part.split("/")[-1]
+            # Strip common prefixes like "server-"
+            if name.startswith("server-"):
+                name = name[7:]
+            return name
+    if cfg.get("url"):
+        h = urlparse(cfg["url"]).hostname or ""
+        parts = h.split(".")
+        return parts[-2] if len(parts) >= 2 else parts[0]
+    return None
+
+
+def _prompt_mcp_env_vars(env: dict, c) -> dict:
+    """Prompt user for any ${PLACEHOLDER} values in env dict."""
+    import re
+    from rich.prompt import Prompt
+
+    resolved = {}
+    for key, value in env.items():
+        placeholders = re.findall(r'\$\{([^}]+)\}', str(value))
+        # Skip PROMAIA_AUTO placeholders — those resolve at runtime
+        if '{PROMAIA_AUTO:' in str(value):
+            resolved[key] = value
+            continue
+        if placeholders:
+            c.print(f"  [yellow]{key}[/yellow] needs: {', '.join(placeholders)}")
+            actual = Prompt.ask(f"    Value for {key}").strip()
+            resolved[key] = actual if actual else value
+        else:
+            resolved[key] = value
+    return resolved
+
+
+async def _test_mcp_connection(config, c):
+    """Attempt to connect to an MCP server and list its tools."""
+    from promaia.mcp.client import McpClient
+
+    c.print("  [dim]Connecting...[/dim]")
+    client = McpClient()
+    success = await client.connect_to_server(config)
+    if success:
+        caps = client.server_capabilities.get(config.name)
+        tool_count = len(caps.tools) if caps and caps.tools else 0
+        c.print(f"  [green]OK[/green] Connected — found {tool_count} tool(s)")
+        if caps and caps.tools:
+            for t in caps.tools[:5]:
+                desc = (t.description or "")[:60]
+                c.print(f"    - {t.name}: {desc}")
+            if tool_count > 5:
+                c.print(f"    ... and {tool_count - 5} more")
+        await client.disconnect_all()
+    else:
+        c.print("  [red]FAIL[/red] Could not connect to server")
 
 
 async def _safe_step(coro, name="step"):

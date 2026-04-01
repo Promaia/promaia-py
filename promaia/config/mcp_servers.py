@@ -211,6 +211,50 @@ class McpServerManager:
 
         return errors
 
+    def add_server(self, name: str, config_dict: dict) -> McpServerConfig:
+        """Add a new server from a config dict and persist to disk."""
+        server = McpServerConfig(
+            name=name,
+            description=config_dict.get('description', ''),
+            command=config_dict.get('command', []),
+            args=config_dict.get('args', []),
+            env=config_dict.get('env', {}),
+            working_dir=config_dict.get('working_dir'),
+            timeout=config_dict.get('timeout', 30),
+            enabled=config_dict.get('enabled', True),
+            transport=config_dict.get('transport', 'stdio'),
+            url=config_dict.get('url'),
+        )
+        self.servers[name] = server
+        self._save()
+        return server
+
+    def _save(self) -> None:
+        """Write current server configs back to disk."""
+        data = {"servers": {}}
+        for name, cfg in self.servers.items():
+            entry = {
+                "description": cfg.description,
+                "enabled": cfg.enabled,
+                "transport": cfg.transport,
+            }
+            if cfg.transport == "streamable_http":
+                entry["url"] = cfg.url
+            else:
+                entry["command"] = cfg.command
+                entry["args"] = cfg.args
+                if cfg.working_dir:
+                    entry["working_dir"] = cfg.working_dir
+            if cfg.env:
+                entry["env"] = cfg.env
+            if cfg.timeout != 30:
+                entry["timeout"] = cfg.timeout
+            data["servers"][name] = entry
+
+        with open(self.config_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        logger.info(f"Saved {len(self.servers)} MCP server configs to {self.config_path}")
+
 # Global MCP server manager instance
 _mcp_manager = None
 
