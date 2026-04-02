@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional
 from rich.console import Console, Group
 from rich.live import Live
 from rich.rule import Rule
+from rich.text import Text
 
 from promaia.agents.feed_events import FeedEvent, EventType
 from promaia.agents.feed_formatters import (
