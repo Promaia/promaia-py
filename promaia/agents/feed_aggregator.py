@@ -135,11 +135,13 @@ class FeedAggregator:
         elif self._current_goal_id:
             spinner = format_spinner_text("Working...")
         else:
-            spinner = format_idle_spinner()
+            spinner = None
+        parts = [rule]
         if self._show_checklist and self._live_tasks:
-            checklist = format_task_checklist(self._live_tasks)
-            return Group(rule, checklist, spinner)
-        return Group(rule, spinner)
+            parts.append(format_task_checklist(self._live_tasks))
+        if spinner:
+            parts.append(spinner)
+        return Group(*parts)
 
     # --- Bootstrap ---
 
