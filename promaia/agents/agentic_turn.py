@@ -235,6 +235,31 @@ GMAIL_TOOL_DEFINITIONS = [
             "required": ["thread_id", "message_id", "body"]
         }
     },
+    {
+        "name": "draft_reply_to_email",
+        "description": (
+            "Create a draft reply to an email thread (NOT sent). "
+            "The draft appears in Gmail Drafts, threaded in the original conversation. "
+            "Use query_sql to find the thread_id and message_id first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "thread_id": {"type": "string", "description": "Gmail thread ID"},
+                "message_id": {"type": "string", "description": "Original message ID"},
+                "body": {"type": "string", "description": "Reply body text"},
+                "attachment_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "List of workspace file paths to attach "
+                        "(from drive_download_file or list_workspace_files)"
+                    )
+                }
+            },
+            "required": ["thread_id", "message_id", "body"]
+        }
+    },
 ]
 
 GMAIL_READ_TOOL_DEFINITIONS = [
@@ -2746,6 +2771,8 @@ class ToolExecutor:
                 return await self._create_email_draft(tool_input)
             elif tool_name == "reply_to_email":
                 return await self._reply_to_email(tool_input)
+            elif tool_name == "draft_reply_to_email":
+                return await self._draft_reply_to_email(tool_input)
             # Gmail read tools
             elif tool_name == "search_emails":
                 return await self._search_emails(tool_input)
@@ -3420,6 +3447,60 @@ class ToolExecutor:
         if success:
             return f"Reply sent{attach_note} (thread: {tool_input['thread_id']})"
         return "Failed to send reply."
+
+    async def _draft_reply_to_email(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        try:
+            attachments = self._resolve_attachment_paths(tool_input)
+        except (FileNotFoundError, ValueError) as e:
+            return f"Error: {e}"
+
+        # Strip msg_ prefix for Gmail API
+        raw_message_id = tool_input["message_id"]
+        if raw_message_id.startswith("msg_"):
+            raw_message_id = raw_message_id[4:]
+
+        original = await self._gmail_connector._get_message(raw_message_id)
+        if not original:
+            return "Original message not found."
+
+        headers = {
+            h['name'].lower(): h['value']
+            for h in original.get('payload', {}).get('headers', [])
+        }
+
+        subject = headers.get('subject', '')
+        if not subject.lower().startswith('re:'):
+            subject = f"Re: {subject}"
+
+        reply_to = headers.get('reply-to') or headers.get('from')
+
+        # Build references chain for threading
+        existing_refs = headers.get('references', '')
+        msg_id_header = headers.get('message-id', '')
+        references = (
+            f"{existing_refs} {msg_id_header}".strip()
+            if msg_id_header else existing_refs or None
+        )
+
+        # Build quoted reply body
+        full_body = self._gmail_connector._build_quoted_reply(
+            tool_input["body"], original
+        )
+
+        draft_id = await self._gmail_connector._create_draft(
+            to=reply_to,
+            subject=subject,
+            body=full_body,
+            thread_id=tool_input["thread_id"],
+            in_reply_to=msg_id_header,
+            references=references,
+            attachments=attachments,
+        )
+        attach_note = f" with {len(attachments)} attachment(s)" if attachments else ""
+        if draft_id:
+            return f"Draft reply created{attach_note} in thread {tool_input['thread_id']} (ID: {draft_id})"
+        return "Failed to create draft reply."
 
     # ── Gmail read tools ─────────────────────────────────────────────────
 
@@ -7726,6 +7807,9 @@ def _summarize_tool_result(
 
     elif tool_name == "reply_to_email":
         return f"Replied to thread {tool_input.get('thread_id', '')[:12]}"
+
+    elif tool_name == "draft_reply_to_email":
+        return f"Draft reply created in thread {tool_input.get('thread_id', '')[:12]}"
 
     elif tool_name == "schedule_self":
         return f"Self-scheduled: {tool_input.get('summary', '')} at {tool_input.get('start_time', '')}"

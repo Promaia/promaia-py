@@ -211,6 +211,9 @@ async def _handle_draft_reply(args: dict) -> list[TextContent]:
     # Build quoted reply body
     full_body = GMAIL_CONNECTOR._build_quoted_reply(args["body"], original)
 
+    logger.info(f"draft_reply: thread_id={args['thread_id']}, to={reply_to}, subject={subject}")
+    logger.info(f"draft_reply: in_reply_to={msg_id_header}, references={references}")
+
     draft_id = await GMAIL_CONNECTOR._create_draft(
         to=reply_to,
         subject=subject,
@@ -220,7 +223,7 @@ async def _handle_draft_reply(args: dict) -> list[TextContent]:
         references=references,
     )
     if draft_id:
-        return [TextContent(type="text", text=f"✓ Draft reply created: {draft_id}")]
+        return [TextContent(type="text", text=f"✓ Draft reply created: {draft_id} (thread: {args['thread_id']}, in_reply_to: {msg_id_header})")]
     return [TextContent(type="text", text="❌ Draft reply creation failed")]
 
 
