@@ -856,40 +856,40 @@ async def handle_agent_reset_default(args):
         journal_memory_days=7,
     )
 
-    # 5. Create dedicated Google Calendar (if creds exist)
-    try:
-        from promaia.gcal.google_calendar import get_calendar_manager, google_account_for_workspace
-        google_account = google_account_for_workspace(workspace)
-        if google_account:
-            calendar_mgr = get_calendar_manager(account=google_account)
-
-            # Check for existing maia calendar to avoid duplicates
-            existing_calendars = calendar_mgr.list_agent_calendars()
-            maia_cal = next((c for c in existing_calendars if c.get("summary") == "maia"), None)
-
-            if maia_cal:
-                agent.calendar_id = maia_cal["id"]
-                console.print(f"   📅 Reusing existing 'maia' calendar: {maia_cal['id'][:20]}...")
-            else:
-                calendar_id = calendar_mgr.create_agent_calendar(
-                    agent_name="maia",
-                    description="Maia agent schedule — events created from maia chat",
-                )
-                if calendar_id:
-                    agent.calendar_id = calendar_id
-                    console.print(f"   📅 Created new calendar: {calendar_id[:20]}...")
-                else:
-                    console.print("   ⚠️  Could not create calendar (auth issue?)", style="yellow")
-        else:
-            console.print("   ℹ️  No Google account found — skipping calendar", style="dim")
-    except Exception as e:
-        console.print(f"   ⚠️  Calendar setup failed: {e}", style="yellow")
-
-    # 6. Preserve calendar_id from existing agent if we didn't get one
-    if not agent.calendar_id and existing and existing.calendar_id:
+    # 5. Resolve calendar — prefer existing agent's calendar_id, then search, then create
+    if existing and existing.calendar_id:
         agent.calendar_id = existing.calendar_id
+        console.print(f"   📅 Keeping existing calendar: {existing.calendar_id[:20]}...")
+    else:
+        try:
+            from promaia.gcal.google_calendar import get_calendar_manager, google_account_for_workspace
+            google_account = google_account_for_workspace(workspace)
+            if google_account:
+                calendar_mgr = get_calendar_manager(account=google_account)
 
-    # 7. Save
+                # Check for existing maia calendar to avoid duplicates
+                existing_calendars = calendar_mgr.list_agent_calendars()
+                maia_cal = next((c for c in existing_calendars if c.get("summary") == "maia"), None)
+
+                if maia_cal:
+                    agent.calendar_id = maia_cal["id"]
+                    console.print(f"   📅 Reusing existing 'maia' calendar: {maia_cal['id'][:20]}...")
+                else:
+                    calendar_id = calendar_mgr.create_agent_calendar(
+                        agent_name="maia",
+                        description="Maia agent schedule — events created from maia chat",
+                    )
+                    if calendar_id:
+                        agent.calendar_id = calendar_id
+                        console.print(f"   📅 Created new calendar: {calendar_id[:20]}...")
+                    else:
+                        console.print("   ⚠️  Could not create calendar (auth issue?)", style="yellow")
+            else:
+                console.print("   ℹ️  No Google account found — skipping calendar", style="dim")
+        except Exception as e:
+            console.print(f"   ⚠️  Calendar setup failed: {e}", style="yellow")
+
+    # 6. Save
     save_agent(agent)
 
     console.print()
