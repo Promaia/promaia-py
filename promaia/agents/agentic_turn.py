@@ -392,6 +392,36 @@ GMAIL_READ_TOOL_DEFINITIONS = [
             "required": ["draft_id"]
         }
     },
+    {
+        "name": "gmail_download_attachment",
+        "description": (
+            "Download an email attachment to the workspace. "
+            "Use the attachment_id and message_id from search_emails results. "
+            "Returns the workspace path for use with drive_upload_file, "
+            "slack_upload_file, send_email attachment_paths, etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": "Gmail message ID containing the attachment."
+                },
+                "attachment_id": {
+                    "type": "string",
+                    "description": "Gmail attachment ID from the attachment metadata."
+                },
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "Filename to save as in workspace "
+                        "(use the filename from attachment metadata)."
+                    )
+                },
+            },
+            "required": ["message_id", "attachment_id", "filename"]
+        }
+    },
 ]
 
 MESSAGING_TOOL_DEFINITIONS = [
@@ -1672,10 +1702,206 @@ GOOGLE_DRIVE_TOOL_DEFINITIONS = [
             "required": ["folder_id"]
         }
     },
+    {
+        "name": "drive_upload_file",
+        "description": (
+            "Upload a workspace file to Google Drive. Preserves original format "
+            "by default. Set convert_to_google_format=true to convert "
+            "(e.g., .docx -> Google Doc, .xlsx -> Google Sheet). "
+            "Specify a folder_path like 'Clients/Acme/Quotes' to auto-create "
+            "the folder hierarchy, or use folder_id for an existing folder."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "Workspace file to upload "
+                        "(from drive_download_file, slack_download_file, gmail_download_attachment, etc.)"
+                    )
+                },
+                "folder_id": {
+                    "type": "string",
+                    "description": (
+                        "Target Google Drive folder ID. "
+                        "Omit if using folder_path or uploading to root."
+                    )
+                },
+                "folder_path": {
+                    "type": "string",
+                    "description": (
+                        "Target folder path like 'Clients/Acme/Quotes'. "
+                        "Intermediate folders are created automatically. "
+                        "Ignored if folder_id is provided."
+                    )
+                },
+                "drive_filename": {
+                    "type": "string",
+                    "description": "Override the filename in Drive (optional, defaults to workspace filename)"
+                },
+                "convert_to_google_format": {
+                    "type": "boolean",
+                    "description": (
+                        "Convert to Google-native format on upload "
+                        "(e.g. .docx -> Google Doc, .xlsx -> Google Sheet). Default: false."
+                    )
+                },
+            },
+            "required": ["filename"]
+        }
+    },
+    {
+        "name": "drive_create_folder",
+        "description": (
+            "Create a folder in Google Drive. Supports nested paths like "
+            "'Clients/Acme/Quotes' — all intermediate folders are created "
+            "automatically. Returns the folder ID."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "folder_name": {
+                    "type": "string",
+                    "description": (
+                        "Folder name or nested path "
+                        "(e.g. 'Reports' or 'Clients/Acme/Quotes')."
+                    )
+                },
+                "parent_id": {
+                    "type": "string",
+                    "description": "Parent folder ID. Defaults to root Drive."
+                },
+            },
+            "required": ["folder_name"]
+        }
+    },
+    {
+        "name": "drive_manage_permissions",
+        "description": (
+            "Manage sharing permissions on a Google Drive file or folder. "
+            "Can share with specific users (reader/writer/commenter), "
+            "create anyone-with-link sharing, remove permissions, "
+            "or list current permissions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "Google Drive file or folder ID."
+                },
+                "action": {
+                    "type": "string",
+                    "enum": ["share", "unshare", "list"],
+                    "description": (
+                        "Action to perform: 'share' to grant access, "
+                        "'unshare' to remove access, 'list' to show current permissions."
+                    )
+                },
+                "email": {
+                    "type": "string",
+                    "description": "Email address to share with. Required for action=share with type=user."
+                },
+                "role": {
+                    "type": "string",
+                    "enum": ["reader", "writer", "commenter"],
+                    "description": "Permission role. Default: reader."
+                },
+                "type": {
+                    "type": "string",
+                    "enum": ["user", "anyone"],
+                    "description": (
+                        "Permission type. 'user' for specific email, "
+                        "'anyone' for link sharing. Default: user."
+                    )
+                },
+                "permission_id": {
+                    "type": "string",
+                    "description": "Permission ID to remove. Required for action=unshare."
+                },
+                "send_notification": {
+                    "type": "boolean",
+                    "description": "Send email notification when sharing. Default: true."
+                },
+            },
+            "required": ["file_id", "action"]
+        }
+    },
 ]
 
 
 # ── Config tools (always available) ─────────────────────────────────────
+
+SLACK_FILE_TOOL_DEFINITIONS = [
+    {
+        "name": "slack_upload_file",
+        "description": (
+            "Upload a workspace file to a Slack channel or thread. "
+            "The file must already exist in the workspace "
+            "(from drive_download_file, gmail_download_attachment, etc.). "
+            "Optionally include a message alongside the file."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "Workspace file to upload."
+                },
+                "channel_id": {
+                    "type": "string",
+                    "description": (
+                        "Slack channel ID to upload to. "
+                        "Use 'current' for the current channel."
+                    )
+                },
+                "thread_ts": {
+                    "type": "string",
+                    "description": "Thread timestamp to upload into (optional)."
+                },
+                "title": {
+                    "type": "string",
+                    "description": "File title in Slack (optional, defaults to filename)."
+                },
+                "initial_comment": {
+                    "type": "string",
+                    "description": "Message to post alongside the file (optional)."
+                },
+            },
+            "required": ["filename", "channel_id"]
+        }
+    },
+    {
+        "name": "slack_download_file",
+        "description": (
+            "Download a file shared in Slack to the workspace. "
+            "Use the file URL from a Slack message's file metadata. "
+            "Returns the workspace path for use with drive_upload_file, "
+            "send_email attachment_paths, etc."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_url": {
+                    "type": "string",
+                    "description": (
+                        "Slack file URL (url_private from the file object)."
+                    )
+                },
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "Override filename in workspace "
+                        "(optional, auto-detected from URL)."
+                    )
+                },
+            },
+            "required": ["file_url"]
+        }
+    },
+]
+
 
 CONFIG_TOOL_DEFINITIONS = [
     {
@@ -2480,6 +2706,9 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     if "google_drive" in mcp_tools or "google_sheets" in mcp_tools:
         tools.extend(GOOGLE_DRIVE_TOOL_DEFINITIONS)
 
+    if has_platform:
+        tools.extend(SLACK_FILE_TOOL_DEFINITIONS)
+
     # Task queue is always available
     tools.extend(TASK_QUEUE_TOOL_DEFINITIONS)
 
@@ -2572,7 +2801,7 @@ def _build_tool_suite_registry(agent, has_platform: bool = False) -> Dict[str, D
         tools = list(GOOGLE_DRIVE_TOOL_DEFINITIONS)
         registry["drive"] = {
             "tools": tools,
-            "description": "search, download, list folders",
+            "description": "search, download, upload, create folders, manage permissions",
             "count": len(tools),
         }
 
@@ -2599,10 +2828,10 @@ def _build_tool_suite_registry(agent, has_platform: bool = False) -> Dict[str, D
 
     # Messaging (platform-dependent)
     if has_platform:
-        tools = list(MESSAGING_TOOL_DEFINITIONS)
+        tools = list(MESSAGING_TOOL_DEFINITIONS) + list(SLACK_FILE_TOOL_DEFINITIONS)
         registry["messaging"] = {
             "tools": tools,
-            "description": "send messages, start conversations",
+            "description": "send messages, start conversations, upload/download files",
             "count": len(tools),
         }
 
@@ -2767,6 +2996,8 @@ class ToolExecutor:
                 return await self._forward_email(tool_input)
             elif tool_name == "delete_draft":
                 return await self._delete_draft(tool_input)
+            elif tool_name == "gmail_download_attachment":
+                return await self._gmail_download_attachment(tool_input)
             # Calendar tools
             elif tool_name == "schedule_self":
                 return await self._schedule_self(tool_input)
@@ -2801,6 +3032,9 @@ class ToolExecutor:
             # Google Drive tools
             elif tool_name.startswith("drive_"):
                 return await self._execute_drive_tool(tool_name, tool_input)
+            # Slack file tools
+            elif tool_name.startswith("slack_"):
+                return await self._execute_slack_file_tool(tool_name, tool_input)
             # Notion tools
             elif tool_name.startswith("notion_"):
                 return await self._execute_notion_tool(tool_name, tool_input)
@@ -3665,6 +3899,51 @@ class ToolExecutor:
             return f"Draft {draft_id} deleted."
         except Exception as e:
             return f"Error: {e}"
+
+    async def _gmail_download_attachment(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        message_id = tool_input.get("message_id", "").strip()
+        attachment_id = tool_input.get("attachment_id", "").strip()
+        filename = tool_input.get("filename", "").strip()
+
+        if not message_id or not attachment_id or not filename:
+            return "Error: message_id, attachment_id, and filename are all required."
+
+        # Strip msg_ prefix if present (internal convention)
+        if message_id.startswith("msg_"):
+            message_id = message_id[4:]
+
+        try:
+            out_path = self._sandbox.resolve(filename)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        try:
+            import base64
+            from promaia.utils.rate_limiter import google_api_execute_async
+
+            result = await google_api_execute_async(
+                self._gmail_connector.service.users().messages().attachments().get(
+                    userId='me', messageId=message_id, id=attachment_id
+                )
+            )
+
+            data = result.get("data", "")
+            # Gmail uses URL-safe base64 without padding
+            file_bytes = base64.urlsafe_b64decode(data + "==")
+            out_path.write_bytes(file_bytes)
+
+            import mimetypes
+            mime, _ = mimetypes.guess_type(str(out_path))
+
+            return (
+                f"Downloaded attachment to workspace: {filename}\n"
+                f"  Size: {len(file_bytes) / 1024:.1f} KB\n"
+                f"  Type: {mime or 'application/octet-stream'}"
+            )
+        except Exception as e:
+            return f"Error downloading attachment: {e}"
 
     # ── Calendar tools ───────────────────────────────────────────────────
 
@@ -4701,6 +4980,12 @@ class ToolExecutor:
             return await self._drive_download_file(tool_input)
         elif tool_name == "drive_list_folder":
             return await self._drive_list_folder(tool_input)
+        elif tool_name == "drive_upload_file":
+            return await self._drive_upload_file(tool_input)
+        elif tool_name == "drive_create_folder":
+            return await self._drive_create_folder(tool_input)
+        elif tool_name == "drive_manage_permissions":
+            return await self._drive_manage_permissions(tool_input)
         else:
             return f"Unknown Drive tool: {tool_name}"
 
@@ -4874,6 +5159,324 @@ class ToolExecutor:
             return "\n".join(lines)
         except Exception as e:
             return f"Error listing folder: {e}"
+
+    async def _drive_ensure_folder_path(self, path: str, parent_id: str = "root") -> str:
+        """Walk/create a nested folder path in Drive, returning the leaf folder ID."""
+        from promaia.utils.rate_limiter import google_api_execute_async
+
+        segments = [s.strip() for s in path.split("/") if s.strip()]
+        if not segments:
+            return parent_id
+
+        current_parent = parent_id
+        for segment in segments:
+            # Search for existing folder
+            q = (
+                f"name = '{segment}' and '{current_parent}' in parents "
+                f"and mimeType = 'application/vnd.google-apps.folder' "
+                f"and trashed = false"
+            )
+            results = await google_api_execute_async(
+                self._drive_service.files().list(
+                    q=q, pageSize=1,
+                    fields="files(id, name)",
+                    orderBy="createdTime",
+                )
+            )
+            found = results.get("files", [])
+            if found:
+                current_parent = found[0]["id"]
+            else:
+                # Create the folder
+                metadata = {
+                    "name": segment,
+                    "mimeType": "application/vnd.google-apps.folder",
+                    "parents": [current_parent],
+                }
+                folder = await google_api_execute_async(
+                    self._drive_service.files().create(
+                        body=metadata, fields="id, name"
+                    )
+                )
+                current_parent = folder["id"]
+                logger.info(f"[drive] Created folder '{segment}' (ID: {current_parent})")
+        return current_parent
+
+    async def _drive_create_folder(self, tool_input: Dict) -> str:
+        folder_name = tool_input.get("folder_name", "").strip()
+        if not folder_name:
+            return "Error: folder_name is required."
+        parent_id = tool_input.get("parent_id", "root").strip() or "root"
+
+        try:
+            folder_id = await self._drive_ensure_folder_path(folder_name, parent_id)
+            return (
+                f"Folder ready: {folder_name}\n"
+                f"  ID: {folder_id}\n"
+                f"  Parent: {parent_id}"
+            )
+        except Exception as e:
+            return f"Error creating folder: {e}"
+
+    async def _drive_upload_file(self, tool_input: Dict) -> str:
+        filename = tool_input.get("filename", "").strip()
+        if not filename:
+            return "Error: filename is required."
+
+        try:
+            abs_path = self._sandbox.resolve(filename)
+            if not abs_path.exists():
+                return f"Error: workspace file not found: {filename}"
+        except ValueError as e:
+            return f"Error: {e}"
+
+        folder_id = tool_input.get("folder_id", "").strip()
+        folder_path = tool_input.get("folder_path", "").strip()
+        drive_filename = tool_input.get("drive_filename", "").strip() or abs_path.name
+        convert = tool_input.get("convert_to_google_format", False)
+
+        try:
+            # Resolve target folder
+            if folder_id:
+                target_folder = folder_id
+            elif folder_path:
+                target_folder = await self._drive_ensure_folder_path(folder_path)
+            else:
+                target_folder = "root"
+
+            from googleapiclient.http import MediaFileUpload
+            import mimetypes as _mt
+
+            mime_type, _ = _mt.guess_type(str(abs_path))
+            mime_type = mime_type or "application/octet-stream"
+
+            file_metadata = {
+                "name": drive_filename,
+                "parents": [target_folder],
+            }
+
+            # Conversion MIME mapping (upload original -> Google native)
+            upload_conversion_map = {
+                ".docx": "application/vnd.google-apps.document",
+                ".doc": "application/vnd.google-apps.document",
+                ".xlsx": "application/vnd.google-apps.spreadsheet",
+                ".xls": "application/vnd.google-apps.spreadsheet",
+                ".csv": "application/vnd.google-apps.spreadsheet",
+                ".pptx": "application/vnd.google-apps.presentation",
+                ".ppt": "application/vnd.google-apps.presentation",
+                ".txt": "application/vnd.google-apps.document",
+            }
+
+            if convert:
+                from pathlib import Path as _Path
+                ext = _Path(abs_path).suffix.lower()
+                google_mime = upload_conversion_map.get(ext)
+                if google_mime:
+                    file_metadata["mimeType"] = google_mime
+
+            file_size = abs_path.stat().st_size
+            media = MediaFileUpload(
+                str(abs_path),
+                mimetype=mime_type,
+                resumable=file_size > 5 * 1024 * 1024,
+            )
+
+            from promaia.utils.rate_limiter import google_api_execute_async
+            result = await google_api_execute_async(
+                self._drive_service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields="id, name, webViewLink, mimeType",
+                )
+            )
+
+            location = folder_path or folder_id or "root"
+            return (
+                f"Uploaded '{result['name']}' to Drive\n"
+                f"  ID: {result['id']}\n"
+                f"  Location: {location}\n"
+                f"  Size: {file_size / 1024:.1f} KB\n"
+                f"  Type: {result.get('mimeType', mime_type)}\n"
+                f"  Link: {result.get('webViewLink', 'N/A')}"
+            )
+        except Exception as e:
+            return f"Error uploading file: {e}"
+
+    async def _drive_manage_permissions(self, tool_input: Dict) -> str:
+        file_id = tool_input.get("file_id", "").strip()
+        action = tool_input.get("action", "").strip()
+        if not file_id:
+            return "Error: file_id is required."
+        if action not in ("share", "unshare", "list"):
+            return "Error: action must be 'share', 'unshare', or 'list'."
+
+        try:
+            from promaia.utils.rate_limiter import google_api_execute_async
+
+            if action == "list":
+                result = await google_api_execute_async(
+                    self._drive_service.permissions().list(
+                        fileId=file_id,
+                        fields="permissions(id, type, role, emailAddress, displayName)",
+                    )
+                )
+                perms = result.get("permissions", [])
+                if not perms:
+                    return "No permissions found."
+                lines = [f"Permissions for {file_id}:\n"]
+                for p in perms:
+                    email = p.get("emailAddress", "")
+                    name = p.get("displayName", "")
+                    label = f"{name} ({email})" if email else p.get("type", "unknown")
+                    lines.append(f"  - {label}: {p['role']} (ID: {p['id']})")
+                return "\n".join(lines)
+
+            elif action == "share":
+                perm_type = tool_input.get("type", "user").strip()
+                role = tool_input.get("role", "reader").strip()
+                email = tool_input.get("email", "").strip()
+                send_notification = tool_input.get("send_notification", True)
+
+                if perm_type == "user" and not email:
+                    return "Error: email is required when sharing with type=user."
+
+                permission_body = {"type": perm_type, "role": role}
+                if email:
+                    permission_body["emailAddress"] = email
+
+                result = await google_api_execute_async(
+                    self._drive_service.permissions().create(
+                        fileId=file_id,
+                        body=permission_body,
+                        sendNotificationEmail=send_notification,
+                        fields="id, type, role, emailAddress",
+                    )
+                )
+                target = email or "anyone with link"
+                return (
+                    f"Shared with {target} as {role}\n"
+                    f"  Permission ID: {result['id']}"
+                )
+
+            elif action == "unshare":
+                permission_id = tool_input.get("permission_id", "").strip()
+                if not permission_id:
+                    return "Error: permission_id is required for unshare. Use action=list to find it."
+                await google_api_execute_async(
+                    self._drive_service.permissions().delete(
+                        fileId=file_id, permissionId=permission_id
+                    )
+                )
+                return f"Removed permission {permission_id} from {file_id}"
+
+        except Exception as e:
+            return f"Error managing permissions: {e}"
+
+    # ── Slack file tools ────────────────────────────────────────────────
+
+    async def _execute_slack_file_tool(self, tool_name: str, tool_input: Dict) -> str:
+        """Route and execute Slack file tool calls."""
+        if tool_name == "slack_upload_file":
+            return await self._slack_upload_file(tool_input)
+        elif tool_name == "slack_download_file":
+            return await self._slack_download_file(tool_input)
+        else:
+            return f"Unknown Slack file tool: {tool_name}"
+
+    async def _slack_upload_file(self, tool_input: Dict) -> str:
+        if not self.platform or getattr(self.platform, "platform_name", "") != "slack":
+            return "Error: Slack file upload requires a Slack platform connection."
+
+        filename = tool_input.get("filename", "").strip()
+        if not filename:
+            return "Error: filename is required."
+
+        channel_id = tool_input.get("channel_id", "").strip()
+        if not channel_id:
+            return "Error: channel_id is required."
+
+        # Resolve 'current' channel
+        if channel_id == "current":
+            if not self.channel_context:
+                return "Error: no current channel context available."
+            channel_id = self.channel_context["channel_id"]
+
+        try:
+            abs_path = self._sandbox.resolve(filename)
+            if not abs_path.exists():
+                return f"Error: workspace file not found: {filename}"
+        except ValueError as e:
+            return f"Error: {e}"
+
+        thread_ts = tool_input.get("thread_ts", "").strip() or None
+        # Default to current thread if in a threaded conversation
+        if not thread_ts and self.channel_context:
+            thread_ts = self.channel_context.get("thread_id")
+
+        title = tool_input.get("title", "").strip() or abs_path.name
+        initial_comment = tool_input.get("initial_comment", "").strip() or None
+
+        try:
+            import asyncio
+            response = await asyncio.to_thread(
+                self.platform.client.files_upload_v2,
+                channel=channel_id,
+                file=str(abs_path),
+                title=title,
+                thread_ts=thread_ts,
+                initial_comment=initial_comment,
+            )
+            file_info = response.get("file", {})
+            permalink = file_info.get("permalink", "uploaded")
+            return (
+                f"Uploaded '{title}' to Slack\n"
+                f"  Channel: {channel_id}\n"
+                f"  Size: {abs_path.stat().st_size / 1024:.1f} KB\n"
+                f"  Link: {permalink}"
+            )
+        except Exception as e:
+            return f"Error uploading file to Slack: {e}"
+
+    async def _slack_download_file(self, tool_input: Dict) -> str:
+        if not self.platform or getattr(self.platform, "platform_name", "") != "slack":
+            return "Error: Slack file download requires a Slack platform connection."
+
+        file_url = tool_input.get("file_url", "").strip()
+        if not file_url:
+            return "Error: file_url is required."
+
+        filename = tool_input.get("filename", "").strip()
+        if not filename:
+            # Auto-detect from URL (last path segment)
+            from urllib.parse import urlparse
+            path = urlparse(file_url).path
+            filename = path.split("/")[-1] if path else "slack_file"
+
+        try:
+            out_path = self._sandbox.resolve(filename)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        try:
+            import aiohttp
+            headers = {"Authorization": f"Bearer {self.platform.bot_token}"}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(file_url, headers=headers) as resp:
+                    if resp.status != 200:
+                        return f"Error: Slack returned HTTP {resp.status} downloading file."
+                    data = await resp.read()
+                    out_path.write_bytes(data)
+
+            import mimetypes
+            mime, _ = mimetypes.guess_type(str(out_path))
+            return (
+                f"Downloaded to workspace: {filename}\n"
+                f"  Size: {len(data) / 1024:.1f} KB\n"
+                f"  Type: {mime or 'application/octet-stream'}"
+            )
+        except Exception as e:
+            return f"Error downloading Slack file: {e}"
 
     # ── Notion tools ────────────────────────────────────────────────────
 
