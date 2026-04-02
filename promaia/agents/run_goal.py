@@ -165,7 +165,7 @@ def _make_feed_logger(agent_name: str):
 async def _run_agentic(agent_config, goal: str, metadata: dict) -> dict:
     """Run a goal using agentic_turn — same engine as maia chat."""
     from promaia.agents.agentic_turn import (
-        agentic_turn, build_tool_definitions, ToolExecutor, _generate_plan,
+        agentic_turn, build_tool_definitions, ToolExecutor,
     )
     from promaia.chat.agentic_adapter import build_agentic_system_prompt
 
@@ -221,27 +221,13 @@ async def _run_agentic(agent_config, goal: str, metadata: dict) -> dict:
     if cal_summary:
         enhanced_prompt += f"\n\nTriggered by calendar event: {cal_summary}"
 
-    # 6. Generate plan
-    plan = await _generate_plan(
-        user_message=goal,
-        agent=agent_config,
-        available_tools=tool_names,
-    )
-
-    # 7. Build feed-friendly activity callback
+    # 6. Build feed-friendly activity callback
     activity_cb = _make_feed_logger(name)
 
     # ── Feed lifecycle: signal goal start ──
     logger.info(f"[{name}] Starting goal: {goal}")
 
-    # Emit plan via callback
-    if plan and activity_cb:
-        await activity_cb(
-            tool_name="__plan__",
-            tool_input={"steps": plan},
-        )
-
-    # 8. Run the agentic loop
+    # 7. Run the agentic loop
     messages = [{"role": "user", "content": goal}]
     result = await agentic_turn(
         system_prompt=enhanced_prompt,
@@ -250,7 +236,6 @@ async def _run_agentic(agent_config, goal: str, metadata: dict) -> dict:
         tool_executor=executor,
         max_iterations=agent_config.max_iterations or 40,
         on_tool_activity=activity_cb,
-        plan=plan,
     )
 
     logger.info(
