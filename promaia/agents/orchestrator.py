@@ -350,11 +350,11 @@ class Orchestrator:
         """
         config = task.config
 
-        # Get platform from config or agent config
-        platform = config.get('platform', self.agent_config.messaging_platform)
+        # Get platform from config or agent config (legacy fallback)
+        platform = config.get('platform', getattr(self.agent_config, 'messaging_platform', None))
 
         # Determine channel: either DM with user or use configured channel
-        channel_id = config.get('channel', self.agent_config.messaging_channel_id)
+        channel_id = config.get('channel', getattr(self.agent_config, 'messaging_channel_id', None))
         target_user_id = None
         target_user_name = config.get('user', 'there')
 

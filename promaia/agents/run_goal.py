@@ -55,33 +55,32 @@ def _load_agent_prompt(agent_config) -> str:
 
 
 def _init_messaging_platform(agent_config):
-    """Create a SlackPlatform or DiscordPlatform from agent config + env vars.
+    """Create a messaging platform from environment bot tokens.
 
-    Returns None if the agent has no messaging platform configured or the
-    required bot token is missing.
+    Returns the first available platform (Slack preferred) if the agent
+    has messaging_enabled=True. Returns None if the agent doesn't have
+    messaging permission or no bot tokens are in the environment.
     """
     import os
 
-    platform_name = getattr(agent_config, "messaging_platform", None)
-    if not platform_name:
+    if not getattr(agent_config, "messaging_enabled", False):
         return None
 
-    if platform_name == "slack":
-        bot_token = os.environ.get("SLACK_BOT_TOKEN")
-        if bot_token:
-            try:
-                from promaia.agents.messaging.slack_platform import SlackPlatform
-                return SlackPlatform(bot_token=bot_token)
-            except ImportError:
-                logger.warning("slack-sdk not installed, skipping Slack platform")
-    elif platform_name == "discord":
-        bot_token = os.environ.get("DISCORD_BOT_TOKEN")
-        if bot_token:
-            try:
-                from promaia.agents.messaging.discord_platform import DiscordPlatform
-                return DiscordPlatform(bot_token=bot_token)
-            except ImportError:
-                logger.warning("discord.py not installed, skipping Discord platform")
+    bot_token = os.environ.get("SLACK_BOT_TOKEN")
+    if bot_token:
+        try:
+            from promaia.agents.messaging.slack_platform import SlackPlatform
+            return SlackPlatform(bot_token=bot_token)
+        except ImportError:
+            logger.warning("slack-sdk not installed, skipping Slack platform")
+
+    bot_token = os.environ.get("DISCORD_BOT_TOKEN")
+    if bot_token:
+        try:
+            from promaia.agents.messaging.discord_platform import DiscordPlatform
+            return DiscordPlatform(bot_token=bot_token)
+        except ImportError:
+            logger.warning("discord.py not installed, skipping Discord platform")
 
     return None
 
@@ -286,7 +285,7 @@ async def _run(agent_name: str, goal: str, metadata: dict, use_orchestrator: boo
     # Start the Slack bot listener as a background task so conversation
     # replies (DMs) are processed while the agent waits.
     slack_task = None
-    has_messaging = getattr(agent_config, "messaging_platform", None)
+    has_messaging = getattr(agent_config, "messaging_enabled", False)
     if use_orchestrator or has_messaging:
         try:
             slack_task = asyncio.create_task(_start_slack_listener())

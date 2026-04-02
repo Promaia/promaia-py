@@ -74,13 +74,9 @@ class AgentConfig:
     # NEW: Agentic loop for conversations (tool use in tag-to-chat)
     agentic_loop_enabled: bool = True  # Use agentic turn with tools in conversations
     
-    # NEW: Messaging platform configuration (platform-agnostic)
-    messaging_platform: Optional[str] = None  # "slack" or "discord"
-    messaging_channel_id: Optional[str] = None  # Platform-specific channel ID
-    messaging_enabled: bool = False  # Enable messaging integration
-    initiate_conversation: bool = False  # Start conversation vs one-way post
-    conversation_timeout_minutes: int = 15  # Minutes before timeout
-    conversation_max_turns: Optional[int] = None  # Max turns (None = unlimited)
+    # Messaging: permission gate (platforms are environment-based, not per-agent)
+    messaging_enabled: bool = False  # Agent can use messaging tools
+    conversation_timeout_minutes: int = 15  # Minutes before conversation timeout
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""

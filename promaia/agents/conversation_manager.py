@@ -467,13 +467,6 @@ class ConversationManager:
             'timestamp': now
         })
 
-        # Agentic conversations: just store the message, no AI response.
-        # The agentic_turn loop polls for this message and handles the reply.
-        if getattr(state, 'conversation_type', None) == 'agentic':
-            await self._save_state(state)
-            logger.info(f"Stored agentic message in {conversation_id} (no auto-response)")
-            return None
-
         # Check turn limit
         if state.max_turns and state.turn_count >= state.max_turns:
             await self.end_conversation(conversation_id, "max_turns_reached")
