@@ -91,6 +91,17 @@ Please generate a PO, find the spec, look up the vendor, and draft me an email.
 - **Drive folder ID**: Agent needs to know the Part Specs folder ID. Either search for it by name first, or provide it in the prompt.
 - **Spec file format**: Agent needs to pick the PDF spec, not the .step/.stl. The prompt should guide this or the agent should ask.
 
+## 1.2 Stretch: Remote MCP Server on Mitchell's Machine
+
+Mitchell's PO Manager MCP server runs on his local machine, not a hosted service. To test the full flow:
+
+1. **SSH into Mitchell's machine** and start the MCP server
+2. **Verify connectivity** — confirm the Replit URL (`mitchrp-PO.replit.app/mcp`) is reachable from the Koii droplet
+3. **If not hosted on Replit**: Set up a tunnel (e.g., ngrok, Cloudflare Tunnel) from Mitchell's machine to expose the MCP server, then update `mcp_servers.json` with the tunnel URL
+4. **Alternative**: Ask Mitchell to deploy the PO Manager to a persistent host (Replit always-on, Railway, or a simple VPS)
+
+The goal is for the Koii droplet (or local dev) to be able to call the PO Manager MCP tools during the test flow.
+
 ## After Testing
 
 If the full flow works:

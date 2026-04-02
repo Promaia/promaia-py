@@ -12,7 +12,7 @@ from enum import Enum
 
 class SourcePermission(Enum):
     """Permission levels for data sources"""
-    READ_INITIAL = "read_initial"  # Load in initial context boundary
+    READ_INITIAL = "read_initial"  # Deprecated: bulk pre-loading removed
     QUERY = "query"                # Can query dynamically at runtime
     WRITE = "write"                # Can write/modify via MCP tools
 
@@ -122,16 +122,12 @@ class AgentConfig:
         return errors
 
     def get_initial_context_sources(self) -> Dict[str, Optional[int]]:
-        """Get sources to load in initial context boundary"""
-        if self.source_access:
-            return {
-                access.source_name: access.initial_days
-                for access in self.source_access
-                if SourcePermission.READ_INITIAL in access.permissions
-            }
-        else:
-            # Fall back to old databases format
-            return self._parse_legacy_databases()
+        """Deprecated: bulk context pre-loading removed.
+
+        Agents now use query tools to load data on demand. Returns empty
+        dict. Kept for backward compatibility.
+        """
+        return {}
 
     def _parse_legacy_databases(self) -> Dict[str, Optional[int]]:
         """Parse legacy databases field into dict of source -> days"""

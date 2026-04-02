@@ -342,8 +342,8 @@ async def handle_agent_add(args):
         console.print("❌ Cancelled", style="red")
         return
 
-    # Format databases with days for agent config
-    databases = [f"{db_name}:{days}" for db_name, days in selected_dbs]
+    # Databases are access permissions (no :days suffix needed)
+    databases = selected_dbs
     console.print(f"✓ Databases: {len(selected_dbs)} selected", style="dim")
 
     # Step 4: Use default prompt - user edits in Notion System Prompt page after creation
@@ -1836,8 +1836,7 @@ async def handle_agent_edit(args):
         # select_databases expects (workspace, available_databases)
         selected_databases = await select_databases(agent.workspace, available_databases)
         if selected_databases:
-            # Convert selection tuples [("db", "7"), ...] into legacy "db:days" strings
-            agent.databases = [f"{db_name}:{days}" for db_name, days in selected_databases]
+            agent.databases = selected_databases
             console.print(f"✓ Updated databases: [cyan]{', '.join(agent.databases)}[/cyan]", style="dim")
 
     if choice in ["4", "8"]:

@@ -170,16 +170,10 @@ class AgentExecutor:
             execution_id = self.tracker.start_execution(self.config.name)
             logger.info(f"🤖 [exec:{execution_id}] Starting agent '{self.config.name}'")
 
-            # Step 1: Load initial context (or use cached)
-            if cached_context:
-                logger.info(f"📚 [exec:{execution_id}] Using cached context (performance optimization)")
-                initial_context = cached_context
-            else:
-                logger.info(f"📚 [exec:{execution_id}] Loading context from {len(self.config.databases)} source(s)...")
-                initial_context = await self._load_initial_context()
-
-            if not initial_context:
-                logger.warning("No context data loaded")
+            # Step 1: Context is available via query tools, not pre-loaded.
+            # The system prompt includes a database preview so the agent knows
+            # what data sources exist and can query them on demand.
+            initial_context = {}
 
             # Step 2: Execute agent (SDK or legacy mode)
             logger.debug(f"sdk_enabled={self.config.sdk_enabled}, SDK_AVAILABLE={SDK_AVAILABLE}")
@@ -320,8 +314,10 @@ class AgentExecutor:
             }
 
     async def _load_initial_context(self) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Load initial context from configured databases.
+        """Deprecated: bulk context pre-loading removed.
+
+        Agents now use query tools to load data on demand. Kept for
+        backward compatibility but no longer called from execute().
 
         Returns:
             Dictionary mapping database names to lists of pages
