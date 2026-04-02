@@ -3237,10 +3237,11 @@ class ToolExecutor:
                 or getattr(self.agent, "name", "agent")
             )
 
-            # Send message directly (no agent-name formatting from ConversationManager)
-            await self.platform.send_message(
+            # Send message at top-level — this becomes the thread parent
+            meta = await self.platform.send_message(
                 channel_id=dm_channel, content=message,
             )
+            dm_thread_id = meta.message_id  # ts of the posted message
 
             # Create a passive conversation record — the Slack bot will find
             # this via get_active_conversation and store user replies, but
@@ -3255,7 +3256,7 @@ class ToolExecutor:
                 platform=platform_name,
                 channel_id=dm_channel,
                 user_id=user_info["id"],
-                thread_id=None,  # DMs don't use threads
+                thread_id=dm_thread_id,  # Bot's message is the thread parent
                 status="active",
                 last_message_at=now,
                 messages=[{
@@ -4013,19 +4014,20 @@ class ToolExecutor:
         from promaia.connectors.google_sheets_connector import GoogleSheetsConnector
 
         # Fetch both formula and display values for inline format
-        formula_result = await asyncio.to_thread(
+        from promaia.utils.rate_limiter import google_api_execute_async
+        formula_result = await google_api_execute_async(
             self._sheets_service.spreadsheets().values().get(
                 spreadsheetId=spreadsheet_id,
                 range=range_str,
                 valueRenderOption='FORMULA',
-            ).execute
+            )
         )
-        display_result = await asyncio.to_thread(
+        display_result = await google_api_execute_async(
             self._sheets_service.spreadsheets().values().get(
                 spreadsheetId=spreadsheet_id,
                 range=range_str,
                 valueRenderOption='FORMATTED_VALUE',
-            ).execute
+            )
         )
         formula_rows = formula_result.get("values", [])
         display_rows = display_result.get("values", [])
@@ -4094,14 +4096,15 @@ class ToolExecutor:
                 }
                 for r in batch_ranges
             ]
-            result = await asyncio.to_thread(
+            from promaia.utils.rate_limiter import google_api_execute_async
+            result = await google_api_execute_async(
                 self._sheets_service.spreadsheets().values().batchUpdate(
                     spreadsheetId=spreadsheet_id,
                     body={
                         "valueInputOption": value_input,
                         "data": data,
                     },
-                ).execute
+                )
             )
             updated = result.get("totalUpdatedCells", 0)
             return f"Updated {updated} cells across {len(data)} ranges."
@@ -4112,13 +4115,14 @@ class ToolExecutor:
         if not range_str or not values:
             return "Error: 'range' and 'values' required (or use 'ranges' for batch)"
 
-        result = await asyncio.to_thread(
+        from promaia.utils.rate_limiter import google_api_execute_async
+        result = await google_api_execute_async(
             self._sheets_service.spreadsheets().values().update(
                 spreadsheetId=spreadsheet_id,
                 range=range_str,
                 valueInputOption=value_input,
                 body={"values": values},
-            ).execute
+            )
         )
         updated = result.get("updatedCells", 0)
         return f"Updated {updated} cells in {range_str}."
@@ -4134,14 +4138,15 @@ class ToolExecutor:
 
         value_input = tool_input.get("value_input", "USER_ENTERED")
 
-        result = await asyncio.to_thread(
+        from promaia.utils.rate_limiter import google_api_execute_async
+        result = await google_api_execute_async(
             self._sheets_service.spreadsheets().values().append(
                 spreadsheetId=spreadsheet_id,
                 range=range_str,
                 valueInputOption=value_input,
                 insertDataOption="INSERT_ROWS",
                 body={"values": values},
-            ).execute
+            )
         )
         updates = result.get("updates", {})
         updated_rows = updates.get("updatedRows", len(values))
@@ -4160,8 +4165,9 @@ class ToolExecutor:
             ],
         }
 
-        ss = await asyncio.to_thread(
-            self._sheets_service.spreadsheets().create(body=body).execute
+        from promaia.utils.rate_limiter import google_api_execute_async
+        ss = await google_api_execute_async(
+            self._sheets_service.spreadsheets().create(body=body)
         )
         ss_id = ss["spreadsheetId"]
         ss_url = ss["spreadsheetUrl"]
@@ -4171,19 +4177,19 @@ class ToolExecutor:
         if folder_id:
             try:
                 # Get current parents, then move
-                file_info = await asyncio.to_thread(
+                file_info = await google_api_execute_async(
                     self._drive_service.files().get(
                         fileId=ss_id, fields="parents"
-                    ).execute
+                    )
                 )
                 current_parents = ",".join(file_info.get("parents", []))
-                await asyncio.to_thread(
+                await google_api_execute_async(
                     self._drive_service.files().update(
                         fileId=ss_id,
                         addParents=folder_id,
                         removeParents=current_parents,
                         fields="id, parents",
-                    ).execute
+                    )
                 )
             except Exception as e:
                 logger.warning(f"Could not move spreadsheet to folder: {e}")
@@ -4196,11 +4202,11 @@ class ToolExecutor:
                 for rng, vals in initial_data.items()
             ]
             if data:
-                await asyncio.to_thread(
+                await google_api_execute_async(
                     self._sheets_service.spreadsheets().values().batchUpdate(
                         spreadsheetId=ss_id,
                         body={"valueInputOption": "USER_ENTERED", "data": data},
-                    ).execute
+                    )
                 )
 
         # Auto-register so _resolve_spreadsheet_id can find it by name
@@ -4244,11 +4250,12 @@ class ToolExecutor:
         self, spreadsheet_id: str, sheet_name: str
     ) -> Optional[int]:
         """Resolve a tab name to its numeric sheetId."""
-        meta = await asyncio.to_thread(
+        from promaia.utils.rate_limiter import google_api_execute_async
+        meta = await google_api_execute_async(
             self._sheets_service.spreadsheets().get(
                 spreadsheetId=spreadsheet_id,
                 fields="sheets.properties",
-            ).execute
+            )
         )
         for sheet in meta.get("sheets", []):
             props = sheet.get("properties", {})
@@ -4262,11 +4269,12 @@ class ToolExecutor:
         )
 
         # Fetch current sheet metadata for name → sheetId resolution
-        meta = await asyncio.to_thread(
+        from promaia.utils.rate_limiter import google_api_execute_async
+        meta = await google_api_execute_async(
             self._sheets_service.spreadsheets().get(
                 spreadsheetId=spreadsheet_id,
                 fields="sheets.properties",
-            ).execute
+            )
         )
         name_to_id = {
             s["properties"]["title"]: s["properties"]["sheetId"]
@@ -4309,11 +4317,11 @@ class ToolExecutor:
         if not requests:
             return "No sheet operations to perform."
 
-        await asyncio.to_thread(
+        await google_api_execute_async(
             self._sheets_service.spreadsheets().batchUpdate(
                 spreadsheetId=spreadsheet_id,
                 body={"requests": requests},
-            ).execute
+            )
         )
         return "\n".join(summaries)
 
@@ -4330,11 +4338,12 @@ class ToolExecutor:
                 return f"Error: tab '{sheet_name}' not found"
         else:
             # Use first sheet
-            meta = await asyncio.to_thread(
+            from promaia.utils.rate_limiter import google_api_execute_async
+            meta = await google_api_execute_async(
                 self._sheets_service.spreadsheets().get(
                     spreadsheetId=spreadsheet_id,
                     fields="sheets.properties",
-                ).execute
+                )
             )
             sheets = meta.get("sheets", [])
             if not sheets:
@@ -4426,11 +4435,12 @@ class ToolExecutor:
         if not requests:
             return "No format operations to perform."
 
-        await asyncio.to_thread(
+        from promaia.utils.rate_limiter import google_api_execute_async
+        await google_api_execute_async(
             self._sheets_service.spreadsheets().batchUpdate(
                 spreadsheetId=spreadsheet_id,
                 body={"requests": requests},
-            ).execute
+            )
         )
         return f"Applied {len(requests)} format operations."
 
@@ -4446,16 +4456,17 @@ class ToolExecutor:
         sheet_name = tool_input.get("sheet")
 
         # Resolve sheet ID
+        from promaia.utils.rate_limiter import google_api_execute_async
         if sheet_name:
             sheet_id = await self._get_sheet_id_by_name(spreadsheet_id, sheet_name)
             if sheet_id is None:
                 return f"Error: tab '{sheet_name}' not found"
         else:
-            meta = await asyncio.to_thread(
+            meta = await google_api_execute_async(
                 self._sheets_service.spreadsheets().get(
                     spreadsheetId=spreadsheet_id,
                     fields="sheets.properties",
-                ).execute
+                )
             )
             sheets = meta.get("sheets", [])
             if not sheets:
@@ -4464,7 +4475,7 @@ class ToolExecutor:
             sheet_name = sheets[0]["properties"]["title"]
 
         # Insert blank rows (0-indexed: row 6 in sheet = startIndex 5)
-        await asyncio.to_thread(
+        await google_api_execute_async(
             self._sheets_service.spreadsheets().batchUpdate(
                 spreadsheetId=spreadsheet_id,
                 body={"requests": [{
@@ -4478,7 +4489,7 @@ class ToolExecutor:
                         "inheritFromBefore": True,
                     }
                 }]},
-            ).execute
+            )
         )
 
         # Optionally fill inserted rows with data
@@ -4486,13 +4497,13 @@ class ToolExecutor:
         if values:
             values = self._coerce_values(values)
             write_range = f"'{sheet_name}'!A{row}"
-            await asyncio.to_thread(
+            await google_api_execute_async(
                 self._sheets_service.spreadsheets().values().update(
                     spreadsheetId=spreadsheet_id,
                     range=write_range,
                     valueInputOption="USER_ENTERED",
                     body={"values": values},
-                ).execute
+                )
             )
             return f"Inserted {count} row(s) at row {row} and wrote {len(values)} row(s) of data."
 
@@ -4510,13 +4521,14 @@ class ToolExecutor:
             f"mimeType='application/vnd.google-apps.spreadsheet' "
             f"and name contains '{safe_query}' and trashed=false"
         )
-        results = await asyncio.to_thread(
+        from promaia.utils.rate_limiter import google_api_execute_async
+        results = await google_api_execute_async(
             self._drive_service.files().list(
                 q=q,
                 fields="files(id, name, modifiedTime, webViewLink)",
                 pageSize=20,
                 orderBy="modifiedTime desc",
-            ).execute
+            )
         )
         files = results.get("files", [])
         if not files:
@@ -4562,19 +4574,20 @@ class ToolExecutor:
                 pass
 
         # Fall back to Drive search by name
+        from promaia.utils.rate_limiter import google_api_execute_async
         if not spreadsheet_id:
             safe_query = identifier.replace("'", "\\'")
             q = (
                 f"mimeType='application/vnd.google-apps.spreadsheet' "
                 f"and name contains '{safe_query}' and trashed=false"
             )
-            results = await asyncio.to_thread(
+            results = await google_api_execute_async(
                 self._drive_service.files().list(
                     q=q,
                     fields="files(id, name)",
                     pageSize=1,
                     orderBy="modifiedTime desc",
-                ).execute
+                )
             )
             files = results.get("files", [])
             if files:
@@ -4584,11 +4597,11 @@ class ToolExecutor:
             return f"Error: could not find spreadsheet '{identifier}'. Try sheets_find first."
 
         # Fetch metadata
-        meta = await asyncio.to_thread(
+        meta = await google_api_execute_async(
             self._sheets_service.spreadsheets().get(
                 spreadsheetId=spreadsheet_id,
                 fields="properties.title,sheets.properties.title,spreadsheetUrl",
-            ).execute
+            )
         )
         title = meta.get("properties", {}).get("title", "Untitled")
         ss_url = meta.get("spreadsheetUrl", "")
@@ -4602,19 +4615,19 @@ class ToolExecutor:
         row_counts = {}
         for sheet_title in sheet_names:
             safe_range = f"'{sheet_title}'"
-            formula_resp = await asyncio.to_thread(
+            formula_resp = await google_api_execute_async(
                 self._sheets_service.spreadsheets().values().get(
                     spreadsheetId=spreadsheet_id,
                     range=safe_range,
                     valueRenderOption='FORMULA',
-                ).execute
+                )
             )
-            display_resp = await asyncio.to_thread(
+            display_resp = await google_api_execute_async(
                 self._sheets_service.spreadsheets().values().get(
                     spreadsheetId=spreadsheet_id,
                     range=safe_range,
                     valueRenderOption='FORMATTED_VALUE',
-                ).execute
+                )
             )
             formula_rows = formula_resp.get('values', [])
             display_rows = display_resp.get('values', [])
@@ -4726,13 +4739,14 @@ class ToolExecutor:
         drive_query = " and ".join(q_parts)
 
         try:
-            results = await asyncio.to_thread(
+            from promaia.utils.rate_limiter import google_api_execute_async
+            results = await google_api_execute_async(
                 self._drive_service.files().list(
                     q=drive_query,
                     pageSize=max_results,
                     fields="files(id, name, mimeType, size, modifiedTime, parents)",
                     orderBy="modifiedTime desc",
-                ).execute
+                )
             )
 
             files = results.get("files", [])
@@ -4791,10 +4805,11 @@ class ToolExecutor:
             from pathlib import Path
 
             # Get file metadata
-            meta = await asyncio.to_thread(
+            from promaia.utils.rate_limiter import google_api_execute_async
+            meta = await google_api_execute_async(
                 self._drive_service.files().get(
                     fileId=file_id, fields="name, mimeType"
-                ).execute
+                )
             )
 
             native_mime = meta["mimeType"]
@@ -4837,13 +4852,14 @@ class ToolExecutor:
         folder_id = tool_input.get("folder_id", "root").strip()
 
         try:
-            results = await asyncio.to_thread(
+            from promaia.utils.rate_limiter import google_api_execute_async
+            results = await google_api_execute_async(
                 self._drive_service.files().list(
                     q=f"'{folder_id}' in parents and trashed = false",
                     pageSize=50,
                     fields="files(id, name, mimeType, size, modifiedTime)",
                     orderBy="folder,name",
-                ).execute
+                )
             )
 
             files = results.get("files", [])
