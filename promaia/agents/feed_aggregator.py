@@ -127,7 +127,6 @@ class FeedAggregator:
 
     def _build_live_renderable(self):
         """Build the composite Live renderable: rule + task checklist + spinner."""
-        rule = Rule(style="dim")
         if self._spinner_text:
             spinner = format_spinner_text(self._spinner_text)
         elif self._awaiting_response:
@@ -135,11 +134,14 @@ class FeedAggregator:
         elif self._current_goal_id:
             spinner = format_spinner_text("Working...")
         else:
-            spinner = format_idle_spinner()
+            # Nothing active — hide the live renderable entirely
+            return Text("")
+
+        parts = [Rule(style="dim")]
         if self._show_checklist and self._live_tasks:
-            checklist = format_task_checklist(self._live_tasks)
-            return Group(rule, checklist, spinner)
-        return Group(rule, spinner)
+            parts.append(format_task_checklist(self._live_tasks))
+        parts.append(spinner)
+        return Group(*parts)
 
     # --- Bootstrap ---
 

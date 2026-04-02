@@ -157,6 +157,9 @@ class TagToChatState:
     # Lifecycle: "active", "dormant", "paused", "stopped"
     status: str = "active"
 
+    # DM flag — suppresses leave announcements, etc.
+    is_dm: bool = False
+
 
 class TagToChatLoop:
     """
@@ -176,6 +179,7 @@ class TagToChatLoop:
         platform_impl: "BaseMessagingPlatform",
         conv_manager: "ConversationManager",
         is_wake: bool = False,
+        is_dm: bool = False,
     ):
         self.state = TagToChatState(
             conversation_id=conversation_id,
@@ -186,6 +190,7 @@ class TagToChatLoop:
             last_message_at=time.time(),
             ultimate_timeout=time.time() + ULTIMATE_TIMEOUT,
             status="dormant" if is_wake else "active",
+            is_dm=is_dm,
         )
         self.platform = platform_impl
         self.conv_manager = conv_manager
@@ -259,11 +264,10 @@ class TagToChatLoop:
                     break
 
                 if time.time() > self.state.ultimate_timeout:
-                    is_dm = not self.state.thread_id
-                    logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or 'dm')[:12]}] Ultimate timeout reached (dm={is_dm})")
+                    logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or 'dm')[:12]}] Ultimate timeout reached (dm={self.state.is_dm})")
                     # DMs: go dormant silently, stay is_active for resume on next message
                     # Channels: announce leave so users know to re-tag
-                    await self._go_dormant(announce=not is_dm)
+                    await self._go_dormant(announce=not self.state.is_dm)
                     break
 
                 # If paused, wait for wake-up signal
@@ -369,20 +373,12 @@ class TagToChatLoop:
             return ("answer_now", None)
 
     async def _get_thread_context(self) -> str:
-        """Get the last few thread/DM messages for decision context."""
+        """Get the last few thread messages for decision context."""
         try:
-            if self.state.thread_id:
-                messages = await self.platform.get_thread_messages(
-                    channel_id=self.state.channel_id,
-                    thread_id=self.state.thread_id,
-                )
-            else:
-                # DM without thread — use conversation history from state
-                messages = [
-                    {"user_id": m.get("role", "?"), "text": m.get("content", "")}
-                    for m in (self.conv_manager._get_state(self.state.conversation_id) or self.state).messages[-5:]
-                    if isinstance(m.get("content"), str)
-                ]
+            messages = await self.platform.get_thread_messages(
+                channel_id=self.state.channel_id,
+                thread_id=self.state.thread_id,
+            )
             recent = messages[-5:] if len(messages) > 5 else messages
             return "\n".join(
                 f"[{m.get('user_id', '?')}] {m.get('text', '')}"
@@ -980,8 +976,8 @@ class TagToChatLoop:
         """Post a 'left the chat' message so users know how to re-engage.
         Skipped for DMs — it's a 1-on-1 conversation, no need to announce.
         """
-        # DMs have thread_id=None — don't post leave messages in DMs
-        if not self.state.thread_id:
+        # Don't post leave messages in DMs — it's a 1-on-1 conversation
+        if self.state.is_dm:
             return
         try:
             await self.platform.send_message(
