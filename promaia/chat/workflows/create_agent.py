@@ -29,9 +29,10 @@ do. One sentence is fine. This helps both humans and the system understand \
 the agent's purpose.
 
 4. **Data sources**: Use `list_databases` to show available databases. \
-Ask which sources the agent needs access to, and how many days of data \
-for each (e.g., "journal:7" means last 7 days, "gmail:all" means everything). \
-If the user isn't sure, suggest reasonable defaults based on the agent's \
+Ask which sources the agent should have access to query. Just list the \
+database names (e.g., "journal", "gmail", "slack") — no day limits needed. \
+The agent will use query tools to load relevant data on demand. \
+If the user isn't sure, suggest relevant sources based on the agent's \
 purpose. Sources are optional — an agent can run with just tools.
 
 5. **MCP tools**: Ask what tools the agent should have access to. \

@@ -179,9 +179,9 @@ Only mention capabilities that are relevant to their specific need.
 - google_sheets: Read and write spreadsheet data
 - web_search: Search the internet for current information
 
-**Data sources** (format: "source_name:days"):
-- Examples: "gmail:7" (last 7 days of email), "journal:30", "tasks:all"
-- The agent loads these as initial context before each run
+**Data sources** (access permissions — just source names):
+- Examples: "gmail", "journal", "slack", "tasks"
+- The agent can query these sources on demand using query tools
 - Available sources come from what the user just set up
 
 **Scheduling** (via Google Calendar):

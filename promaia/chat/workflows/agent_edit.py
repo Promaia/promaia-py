@@ -49,8 +49,8 @@ If yes, go back to step 4. If no, proceed to complete.
 
 ### Notes
 
-- For database changes, use `list_databases` to show what's available \
-and help the user format sources correctly (e.g., "journal:7", "gmail:all").
+- For database changes, use `list_databases` to show what's available. \
+Databases are access permissions — just use plain names (e.g., "journal", "gmail").
 - When editing the prompt, show the current prompt first and ask how \
 they want to modify it. They can provide a full replacement or describe \
 changes and you can draft the new version.

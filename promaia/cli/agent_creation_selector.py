@@ -297,16 +297,19 @@ async def select_workspace(workspaces: List[str], preselected: str = None) -> Op
 async def select_databases(
     workspace: str,
     available_databases: List[Dict[str, Any]]
-) -> Optional[List[Tuple[str, str]]]:
+) -> Optional[List[str]]:
     """
-    Interactive database selector with inline day editing and Discord channel hierarchy.
+    Interactive database selector with checkboxes and Discord channel hierarchy.
+
+    Databases are access permissions — the agent can query these sources
+    via query tools at runtime. No content is pre-loaded.
 
     Args:
         workspace: Workspace name
-        available_databases: List of database configs with 'name', 'default_days', and optional 'channels'
+        available_databases: List of database configs with 'name' and optional 'channels'
 
     Returns:
-        List of tuples like [("journal", "7"), ("discord_server#channel_id", "7")] or None if cancelled
+        List of database names like ["journal", "gmail", "discord_server#channel_id"] or None if cancelled
     """
     console = Console()
 
@@ -361,30 +364,30 @@ async def select_databases(
                 'default_include': db.get('default_include', True)
             })
 
-    # Create TextArea widgets for each entry
+    # Create focusable widgets and state for each entry
+    # (TextArea kept as a minimal focusable widget — prompt_toolkit requires
+    # a focusable control for key bindings to work with up/down navigation)
     text_areas = []
     enabled_states = []
     source_windows = []
 
     for idx, entry in enumerate(entries):
-        # Create text area for days input
-        days_text = str(entry['days']) if entry['days'] != "all" else "all"
+        # Minimal focusable widget (hidden, just for focus tracking)
         text_area = TextArea(
-            text=days_text,
+            text="",
             height=1,
             multiline=False,
             wrap_lines=False,
             scrollbar=False,
             focusable=True,
         )
-        text_area.buffer.cursor_position = len(days_text)
         text_areas.append(text_area)
 
         # Start with default_include
         is_enabled = entry.get('default_include', True)
         enabled_states.append(is_enabled)
 
-        # Create window for this entry
+        # Create window for this entry — just checkbox + name
         prefix_text = _get_entry_prefix(is_enabled)
         display_name = entry['display_name']
 
@@ -395,16 +398,11 @@ async def select_databases(
                 dont_extend_width=True,
             ),
             Window(
-                FormattedTextControl(text=f"{display_name}: "),
-                width=len(display_name) + 2,
+                FormattedTextControl(text=display_name),
+                width=len(display_name) + 1,
                 dont_extend_width=True,
             ),
-            text_area,
-            Window(
-                FormattedTextControl(text=" days"),
-                width=5,
-                dont_extend_width=True,
-            ),
+            text_area,  # hidden focusable for navigation
         ])
         source_windows.append(source_window)
 
@@ -533,30 +531,16 @@ async def select_databases(
     await app.run_async()
 
     if confirmed:
-        # Return enabled databases/channels with their days values
+        # Return enabled database names (access permissions)
         result = []
-        for i, (text_area, enabled, entry) in enumerate(zip(text_areas, enabled_states, entries)):
+        for i, (enabled, entry) in enumerate(zip(enabled_states, entries)):
             # Skip parent entries if they have channels (only include actual channels)
             if entry.get('is_parent'):
                 continue
 
             if enabled:
-                days_value = text_area.text.strip()
-                # Validate days value
-                if days_value.lower() in ['all', 'unlimited', 'max']:
-                    days_value = 'all'
-                else:
-                    try:
-                        days_int = int(days_value)
-                        if days_int <= 0:
-                            days_value = '7'  # Fallback to default
-                        else:
-                            days_value = str(days_int)
-                    except ValueError:
-                        days_value = '7'  # Fallback to default
-
                 # Use entry['name'] which includes channel ID for Discord: "server#channel_id"
-                result.append((entry['name'], days_value))
+                result.append(entry['name'])
 
         if not result:
             console.print("❌ No databases selected", style="red")

@@ -2142,7 +2142,7 @@ AGENT_TOOL_DEFINITIONS = [
                 "description": {"type": "string", "description": "New description"},
                 "databases": {
                     "type": "array", "items": {"type": "string"},
-                    "description": "Database sources (e.g. ['journal:7', 'gmail:3'])"
+                    "description": "Database sources the agent can access (e.g. ['journal', 'gmail', 'slack'])"
                 },
                 "mcp_tools": {
                     "type": "array", "items": {"type": "string"},
@@ -2197,7 +2197,7 @@ AGENT_TOOL_DEFINITIONS = [
                 },
                 "databases": {
                     "type": "array", "items": {"type": "string"},
-                    "description": "Sources with day limits (e.g. ['journal:7', 'gmail:all'])"
+                    "description": "Database sources the agent can access (e.g. ['journal', 'gmail', 'slack'])"
                 },
                 "mcp_tools": {
                     "type": "array", "items": {"type": "string"},
