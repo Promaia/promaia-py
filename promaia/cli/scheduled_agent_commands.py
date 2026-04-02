@@ -789,11 +789,37 @@ async def handle_agent_reset_default(args):
         console.print(f"   Default:    {existing.is_default_agent}")
         console.print()
 
-        if existing.is_default_agent and existing.calendar_id and existing.mcp_tools:
+        healthy = (
+            existing.is_default_agent
+            and existing.calendar_id
+            and existing.mcp_tools
+            and existing.workspace
+            and existing.databases
+            and existing.messaging_platform
+            and existing.messaging_enabled
+            and existing.sdk_enabled
+            and existing.agentic_loop_enabled
+        )
+        if healthy:
             console.print("✅ Default agent looks healthy. Nothing to reset.", style="green")
             return
 
-        console.print("⚠️  Agent needs repair. Resetting to defaults...", style="yellow")
+        issues = []
+        if not existing.workspace:
+            issues.append("missing workspace")
+        if not existing.databases:
+            issues.append("no databases")
+        if not existing.calendar_id:
+            issues.append("no calendar")
+        if not existing.mcp_tools:
+            issues.append("no MCP tools")
+        if not existing.messaging_platform or not existing.messaging_enabled:
+            issues.append("messaging not configured")
+        if not existing.sdk_enabled:
+            issues.append("SDK disabled")
+        if not existing.agentic_loop_enabled:
+            issues.append("agentic loop disabled")
+        console.print(f"⚠️  Issues: {', '.join(issues)}. Resetting to defaults...", style="yellow")
     else:
         console.print(f"\n🔧 No 'maia' agent found. Creating default agent for workspace '{workspace}'...", style="bold")
 
