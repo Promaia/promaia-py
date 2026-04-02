@@ -235,6 +235,31 @@ GMAIL_TOOL_DEFINITIONS = [
             "required": ["thread_id", "message_id", "body"]
         }
     },
+    {
+        "name": "draft_reply_to_email",
+        "description": (
+            "Create a draft reply to an email thread (NOT sent). "
+            "The draft appears in Gmail Drafts, threaded in the original conversation. "
+            "Use query_sql to find the thread_id and message_id first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "thread_id": {"type": "string", "description": "Gmail thread ID"},
+                "message_id": {"type": "string", "description": "Original message ID"},
+                "body": {"type": "string", "description": "Reply body text"},
+                "attachment_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "List of workspace file paths to attach "
+                        "(from drive_download_file or list_workspace_files)"
+                    )
+                }
+            },
+            "required": ["thread_id", "message_id", "body"]
+        }
+    },
 ]
 
 GMAIL_READ_TOOL_DEFINITIONS = [
@@ -2368,7 +2393,7 @@ AGENT_TOOL_DEFINITIONS = [
                 "description": {"type": "string", "description": "New description"},
                 "databases": {
                     "type": "array", "items": {"type": "string"},
-                    "description": "Database sources (e.g. ['journal:7', 'gmail:3'])"
+                    "description": "Database sources the agent can access (e.g. ['journal', 'gmail', 'slack'])"
                 },
                 "mcp_tools": {
                     "type": "array", "items": {"type": "string"},
@@ -2423,7 +2448,7 @@ AGENT_TOOL_DEFINITIONS = [
                 },
                 "databases": {
                     "type": "array", "items": {"type": "string"},
-                    "description": "Sources with day limits (e.g. ['journal:7', 'gmail:all'])"
+                    "description": "Database sources the agent can access (e.g. ['journal', 'gmail', 'slack'])"
                 },
                 "mcp_tools": {
                     "type": "array", "items": {"type": "string"},
@@ -2445,14 +2470,9 @@ AGENT_TOOL_DEFINITIONS = [
                     "type": "integer",
                     "description": "Max iterations per run (default 40)"
                 },
-                "messaging_platform": {
-                    "type": "string",
-                    "enum": ["slack", "discord"],
-                    "description": "Messaging platform for notifications"
-                },
-                "messaging_channel_id": {
-                    "type": "string",
-                    "description": "Channel ID for messaging notifications"
+                "messaging_enabled": {
+                    "type": "boolean",
+                    "description": "Whether this agent can use messaging tools"
                 },
             },
             "required": ["name"]
@@ -2975,6 +2995,8 @@ class ToolExecutor:
                 return await self._create_email_draft(tool_input)
             elif tool_name == "reply_to_email":
                 return await self._reply_to_email(tool_input)
+            elif tool_name == "draft_reply_to_email":
+                return await self._draft_reply_to_email(tool_input)
             # Gmail read tools
             elif tool_name == "search_emails":
                 return await self._search_emails(tool_input)
@@ -3424,11 +3446,12 @@ class ToolExecutor:
         return f"Message sent to {target_desc}"
 
     async def _start_conversation(self, tool_input: Dict) -> str:
-        """Start a DM conversation, wait for the user's reply, and return it.
+        """Start a real interactive DM conversation and wait for it to complete.
 
-        Creates a passive 'agentic' conversation — the Slack bot stores
-        incoming messages but does NOT generate AI responses.  The agentic
-        loop is the brain; this tool is just the ears.
+        Creates a TagToChatLoop that drives a full back-and-forth conversation
+        using the agent's personality. The agentic turn suspends until the
+        conversation goes dormant (user stops replying), then resumes with
+        the full transcript.
         """
         import asyncio
         if not self.platform:
@@ -3436,7 +3459,7 @@ class ToolExecutor:
 
         user_name = tool_input.get("user", "")
         message = tool_input.get("message", "")
-        timeout_minutes = tool_input.get("timeout_minutes", 15)
+        timeout_minutes = tool_input.get("timeout_minutes", 60)
 
         if not user_name:
             return "Error: missing 'user' parameter"
@@ -3457,6 +3480,7 @@ class ToolExecutor:
             from promaia.agents.conversation_manager import (
                 ConversationManager, ConversationState,
             )
+            from promaia.agents.tag_to_chat import TagToChatLoop
             from datetime import datetime, timezone
 
             conv_manager = ConversationManager()
@@ -3470,15 +3494,15 @@ class ToolExecutor:
                 getattr(self.agent, "agent_id", None)
                 or getattr(self.agent, "name", "agent")
             )
+            real_name = user_info.get("real_name") or user_info.get("name") or user_name
 
-            # Send message directly (no agent-name formatting from ConversationManager)
-            await self.platform.send_message(
+            # Send message at top-level — this becomes the thread parent
+            meta = await self.platform.send_message(
                 channel_id=dm_channel, content=message,
             )
+            dm_thread_id = meta.message_id
 
-            # Create a passive conversation record — the Slack bot will find
-            # this via get_active_conversation and store user replies, but
-            # handle_user_message won't generate AI responses for type='agentic'.
+            # Create a real conversation state (not passive — agent personality drives it)
             now = datetime.now(timezone.utc).isoformat()
             msg_ts = str(int(datetime.now(timezone.utc).timestamp()))
             conversation_id = f"{platform_name}_{dm_channel}_{msg_ts}"
@@ -3489,7 +3513,7 @@ class ToolExecutor:
                 platform=platform_name,
                 channel_id=dm_channel,
                 user_id=user_info["id"],
-                thread_id=None,  # DMs don't use threads
+                thread_id=dm_thread_id,
                 status="active",
                 last_message_at=now,
                 messages=[{
@@ -3497,42 +3521,64 @@ class ToolExecutor:
                     "content": message,
                     "timestamp": now,
                 }],
-                context={},
+                context={"is_dm": True, "user_name": real_name},
                 timeout_seconds=timeout_minutes * 60,
                 max_turns=None,
                 turn_count=0,
                 created_at=now,
-                conversation_type="agentic",  # passive — no auto-response
+                conversation_type="tag_to_chat",
+                is_active=True,
+                conversation_partner=real_name,
             )
             await conv_manager._save_state(state)
 
-            # Poll for user reply (stored by Slack bot → handle_user_message)
-            poll_interval = 3
-            max_wait = timeout_minutes * 60
-            elapsed = 0
+            # Start a real TagToChatLoop — agent personality drives the conversation
+            loop = TagToChatLoop(
+                conversation_id=conversation_id,
+                channel_id=dm_channel,
+                thread_id=dm_thread_id,
+                platform=platform_name,
+                agent_id=agent_id,
+                platform_impl=self.platform,
+                conv_manager=conv_manager,
+                is_dm=True,
+            )
 
-            while elapsed < max_wait:
-                await asyncio.sleep(poll_interval)
-                elapsed += poll_interval
+            # Dormancy signal — fires when the loop exits (dormant/stopped)
+            done_event = asyncio.Event()
+            loop.on_done(done_event.set)
 
-                state = await conv_manager._load_state(conversation_id)
-                if not state:
-                    return "Error: conversation state lost"
+            # Start the conversation loop
+            asyncio.create_task(loop.run())
+            logger.info(f"Started interactive conversation {conversation_id} with {real_name}")
 
-                # Check for user messages
-                user_msgs = [m for m in state.messages if m["role"] == "user"]
-                if user_msgs:
-                    last_msg = user_msgs[-1]["content"]
-                    # End the conversation so the channel is free
-                    await conv_manager.end_conversation(
-                        conversation_id, "handed_to_agent",
-                    )
-                    return f"User replied: {last_msg}"
+            # Suspend the agentic turn until conversation goes dormant or times out
+            try:
+                await asyncio.wait_for(
+                    done_event.wait(),
+                    timeout=timeout_minutes * 60,
+                )
+            except asyncio.TimeoutError:
+                logger.info(f"Conversation {conversation_id} timed out after {timeout_minutes}min")
+                loop._stop_requested = True
 
-            # Timeout
-            await conv_manager.end_conversation(conversation_id, "timeout")
-            real_name = user_info.get("real_name", user_name)
-            return f"No reply from {real_name} after {timeout_minutes} minutes."
+            # Load final transcript
+            final_state = await conv_manager._load_state(conversation_id)
+            if final_state and final_state.messages:
+                transcript_lines = []
+                for msg in final_state.messages:
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        text_parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                        content = "\n".join(text_parts)
+                    if isinstance(content, str) and content.strip():
+                        speaker = real_name if role == "user" else "You"
+                        transcript_lines.append(f"[{speaker}]: {content}")
+                transcript = "\n".join(transcript_lines)
+                return f"Conversation with {real_name} completed.\n\nTranscript:\n{transcript}"
+            else:
+                return f"Conversation with {real_name} ended (no messages exchanged)."
 
         except Exception as e:
             logger.error(f"start_conversation error: {e}", exc_info=True)
@@ -3653,6 +3699,60 @@ class ToolExecutor:
         if success:
             return f"Reply sent{attach_note} (thread: {tool_input['thread_id']})"
         return "Failed to send reply."
+
+    async def _draft_reply_to_email(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        try:
+            attachments = self._resolve_attachment_paths(tool_input)
+        except (FileNotFoundError, ValueError) as e:
+            return f"Error: {e}"
+
+        # Strip msg_ prefix for Gmail API
+        raw_message_id = tool_input["message_id"]
+        if raw_message_id.startswith("msg_"):
+            raw_message_id = raw_message_id[4:]
+
+        original = await self._gmail_connector._get_message(raw_message_id)
+        if not original:
+            return "Original message not found."
+
+        headers = {
+            h['name'].lower(): h['value']
+            for h in original.get('payload', {}).get('headers', [])
+        }
+
+        subject = headers.get('subject', '')
+        if not subject.lower().startswith('re:'):
+            subject = f"Re: {subject}"
+
+        reply_to = headers.get('reply-to') or headers.get('from')
+
+        # Build references chain for threading
+        existing_refs = headers.get('references', '')
+        msg_id_header = headers.get('message-id', '')
+        references = (
+            f"{existing_refs} {msg_id_header}".strip()
+            if msg_id_header else existing_refs or None
+        )
+
+        # Build quoted reply body
+        full_body = self._gmail_connector._build_quoted_reply(
+            tool_input["body"], original
+        )
+
+        draft_id = await self._gmail_connector._create_draft(
+            to=reply_to,
+            subject=subject,
+            body=full_body,
+            thread_id=tool_input["thread_id"],
+            in_reply_to=msg_id_header,
+            references=references,
+            attachments=attachments,
+        )
+        attach_note = f" with {len(attachments)} attachment(s)" if attachments else ""
+        if draft_id:
+            return f"Draft reply created{attach_note} in thread {tool_input['thread_id']} (ID: {draft_id})"
+        return "Failed to create draft reply."
 
     # ── Gmail read tools ─────────────────────────────────────────────────
 
@@ -4292,19 +4392,20 @@ class ToolExecutor:
         from promaia.connectors.google_sheets_connector import GoogleSheetsConnector
 
         # Fetch both formula and display values for inline format
-        formula_result = await asyncio.to_thread(
+        from promaia.utils.rate_limiter import google_api_execute_async
+        formula_result = await google_api_execute_async(
             self._sheets_service.spreadsheets().values().get(
                 spreadsheetId=spreadsheet_id,
                 range=range_str,
                 valueRenderOption='FORMULA',
-            ).execute
+            )
         )
-        display_result = await asyncio.to_thread(
+        display_result = await google_api_execute_async(
             self._sheets_service.spreadsheets().values().get(
                 spreadsheetId=spreadsheet_id,
                 range=range_str,
                 valueRenderOption='FORMATTED_VALUE',
-            ).execute
+            )
         )
         formula_rows = formula_result.get("values", [])
         display_rows = display_result.get("values", [])
@@ -4373,14 +4474,15 @@ class ToolExecutor:
                 }
                 for r in batch_ranges
             ]
-            result = await asyncio.to_thread(
+            from promaia.utils.rate_limiter import google_api_execute_async
+            result = await google_api_execute_async(
                 self._sheets_service.spreadsheets().values().batchUpdate(
                     spreadsheetId=spreadsheet_id,
                     body={
                         "valueInputOption": value_input,
                         "data": data,
                     },
-                ).execute
+                )
             )
             updated = result.get("totalUpdatedCells", 0)
             return f"Updated {updated} cells across {len(data)} ranges."
@@ -4391,13 +4493,14 @@ class ToolExecutor:
         if not range_str or not values:
             return "Error: 'range' and 'values' required (or use 'ranges' for batch)"
 
-        result = await asyncio.to_thread(
+        from promaia.utils.rate_limiter import google_api_execute_async
+        result = await google_api_execute_async(
             self._sheets_service.spreadsheets().values().update(
                 spreadsheetId=spreadsheet_id,
                 range=range_str,
                 valueInputOption=value_input,
                 body={"values": values},
-            ).execute
+            )
         )
         updated = result.get("updatedCells", 0)
         return f"Updated {updated} cells in {range_str}."
@@ -4413,14 +4516,15 @@ class ToolExecutor:
 
         value_input = tool_input.get("value_input", "USER_ENTERED")
 
-        result = await asyncio.to_thread(
+        from promaia.utils.rate_limiter import google_api_execute_async
+        result = await google_api_execute_async(
             self._sheets_service.spreadsheets().values().append(
                 spreadsheetId=spreadsheet_id,
                 range=range_str,
                 valueInputOption=value_input,
                 insertDataOption="INSERT_ROWS",
                 body={"values": values},
-            ).execute
+            )
         )
         updates = result.get("updates", {})
         updated_rows = updates.get("updatedRows", len(values))
@@ -4439,8 +4543,9 @@ class ToolExecutor:
             ],
         }
 
-        ss = await asyncio.to_thread(
-            self._sheets_service.spreadsheets().create(body=body).execute
+        from promaia.utils.rate_limiter import google_api_execute_async
+        ss = await google_api_execute_async(
+            self._sheets_service.spreadsheets().create(body=body)
         )
         ss_id = ss["spreadsheetId"]
         ss_url = ss["spreadsheetUrl"]
@@ -4450,19 +4555,19 @@ class ToolExecutor:
         if folder_id:
             try:
                 # Get current parents, then move
-                file_info = await asyncio.to_thread(
+                file_info = await google_api_execute_async(
                     self._drive_service.files().get(
                         fileId=ss_id, fields="parents"
-                    ).execute
+                    )
                 )
                 current_parents = ",".join(file_info.get("parents", []))
-                await asyncio.to_thread(
+                await google_api_execute_async(
                     self._drive_service.files().update(
                         fileId=ss_id,
                         addParents=folder_id,
                         removeParents=current_parents,
                         fields="id, parents",
-                    ).execute
+                    )
                 )
             except Exception as e:
                 logger.warning(f"Could not move spreadsheet to folder: {e}")
@@ -4475,11 +4580,11 @@ class ToolExecutor:
                 for rng, vals in initial_data.items()
             ]
             if data:
-                await asyncio.to_thread(
+                await google_api_execute_async(
                     self._sheets_service.spreadsheets().values().batchUpdate(
                         spreadsheetId=ss_id,
                         body={"valueInputOption": "USER_ENTERED", "data": data},
-                    ).execute
+                    )
                 )
 
         # Auto-register so _resolve_spreadsheet_id can find it by name
@@ -4523,11 +4628,12 @@ class ToolExecutor:
         self, spreadsheet_id: str, sheet_name: str
     ) -> Optional[int]:
         """Resolve a tab name to its numeric sheetId."""
-        meta = await asyncio.to_thread(
+        from promaia.utils.rate_limiter import google_api_execute_async
+        meta = await google_api_execute_async(
             self._sheets_service.spreadsheets().get(
                 spreadsheetId=spreadsheet_id,
                 fields="sheets.properties",
-            ).execute
+            )
         )
         for sheet in meta.get("sheets", []):
             props = sheet.get("properties", {})
@@ -4541,11 +4647,12 @@ class ToolExecutor:
         )
 
         # Fetch current sheet metadata for name → sheetId resolution
-        meta = await asyncio.to_thread(
+        from promaia.utils.rate_limiter import google_api_execute_async
+        meta = await google_api_execute_async(
             self._sheets_service.spreadsheets().get(
                 spreadsheetId=spreadsheet_id,
                 fields="sheets.properties",
-            ).execute
+            )
         )
         name_to_id = {
             s["properties"]["title"]: s["properties"]["sheetId"]
@@ -4588,11 +4695,11 @@ class ToolExecutor:
         if not requests:
             return "No sheet operations to perform."
 
-        await asyncio.to_thread(
+        await google_api_execute_async(
             self._sheets_service.spreadsheets().batchUpdate(
                 spreadsheetId=spreadsheet_id,
                 body={"requests": requests},
-            ).execute
+            )
         )
         return "\n".join(summaries)
 
@@ -4609,11 +4716,12 @@ class ToolExecutor:
                 return f"Error: tab '{sheet_name}' not found"
         else:
             # Use first sheet
-            meta = await asyncio.to_thread(
+            from promaia.utils.rate_limiter import google_api_execute_async
+            meta = await google_api_execute_async(
                 self._sheets_service.spreadsheets().get(
                     spreadsheetId=spreadsheet_id,
                     fields="sheets.properties",
-                ).execute
+                )
             )
             sheets = meta.get("sheets", [])
             if not sheets:
@@ -4705,11 +4813,12 @@ class ToolExecutor:
         if not requests:
             return "No format operations to perform."
 
-        await asyncio.to_thread(
+        from promaia.utils.rate_limiter import google_api_execute_async
+        await google_api_execute_async(
             self._sheets_service.spreadsheets().batchUpdate(
                 spreadsheetId=spreadsheet_id,
                 body={"requests": requests},
-            ).execute
+            )
         )
         return f"Applied {len(requests)} format operations."
 
@@ -4725,16 +4834,17 @@ class ToolExecutor:
         sheet_name = tool_input.get("sheet")
 
         # Resolve sheet ID
+        from promaia.utils.rate_limiter import google_api_execute_async
         if sheet_name:
             sheet_id = await self._get_sheet_id_by_name(spreadsheet_id, sheet_name)
             if sheet_id is None:
                 return f"Error: tab '{sheet_name}' not found"
         else:
-            meta = await asyncio.to_thread(
+            meta = await google_api_execute_async(
                 self._sheets_service.spreadsheets().get(
                     spreadsheetId=spreadsheet_id,
                     fields="sheets.properties",
-                ).execute
+                )
             )
             sheets = meta.get("sheets", [])
             if not sheets:
@@ -4743,7 +4853,7 @@ class ToolExecutor:
             sheet_name = sheets[0]["properties"]["title"]
 
         # Insert blank rows (0-indexed: row 6 in sheet = startIndex 5)
-        await asyncio.to_thread(
+        await google_api_execute_async(
             self._sheets_service.spreadsheets().batchUpdate(
                 spreadsheetId=spreadsheet_id,
                 body={"requests": [{
@@ -4757,7 +4867,7 @@ class ToolExecutor:
                         "inheritFromBefore": True,
                     }
                 }]},
-            ).execute
+            )
         )
 
         # Optionally fill inserted rows with data
@@ -4765,13 +4875,13 @@ class ToolExecutor:
         if values:
             values = self._coerce_values(values)
             write_range = f"'{sheet_name}'!A{row}"
-            await asyncio.to_thread(
+            await google_api_execute_async(
                 self._sheets_service.spreadsheets().values().update(
                     spreadsheetId=spreadsheet_id,
                     range=write_range,
                     valueInputOption="USER_ENTERED",
                     body={"values": values},
-                ).execute
+                )
             )
             return f"Inserted {count} row(s) at row {row} and wrote {len(values)} row(s) of data."
 
@@ -4789,13 +4899,14 @@ class ToolExecutor:
             f"mimeType='application/vnd.google-apps.spreadsheet' "
             f"and name contains '{safe_query}' and trashed=false"
         )
-        results = await asyncio.to_thread(
+        from promaia.utils.rate_limiter import google_api_execute_async
+        results = await google_api_execute_async(
             self._drive_service.files().list(
                 q=q,
                 fields="files(id, name, modifiedTime, webViewLink)",
                 pageSize=20,
                 orderBy="modifiedTime desc",
-            ).execute
+            )
         )
         files = results.get("files", [])
         if not files:
@@ -4841,19 +4952,20 @@ class ToolExecutor:
                 pass
 
         # Fall back to Drive search by name
+        from promaia.utils.rate_limiter import google_api_execute_async
         if not spreadsheet_id:
             safe_query = identifier.replace("'", "\\'")
             q = (
                 f"mimeType='application/vnd.google-apps.spreadsheet' "
                 f"and name contains '{safe_query}' and trashed=false"
             )
-            results = await asyncio.to_thread(
+            results = await google_api_execute_async(
                 self._drive_service.files().list(
                     q=q,
                     fields="files(id, name)",
                     pageSize=1,
                     orderBy="modifiedTime desc",
-                ).execute
+                )
             )
             files = results.get("files", [])
             if files:
@@ -4863,11 +4975,11 @@ class ToolExecutor:
             return f"Error: could not find spreadsheet '{identifier}'. Try sheets_find first."
 
         # Fetch metadata
-        meta = await asyncio.to_thread(
+        meta = await google_api_execute_async(
             self._sheets_service.spreadsheets().get(
                 spreadsheetId=spreadsheet_id,
                 fields="properties.title,sheets.properties.title,spreadsheetUrl",
-            ).execute
+            )
         )
         title = meta.get("properties", {}).get("title", "Untitled")
         ss_url = meta.get("spreadsheetUrl", "")
@@ -4881,19 +4993,19 @@ class ToolExecutor:
         row_counts = {}
         for sheet_title in sheet_names:
             safe_range = f"'{sheet_title}'"
-            formula_resp = await asyncio.to_thread(
+            formula_resp = await google_api_execute_async(
                 self._sheets_service.spreadsheets().values().get(
                     spreadsheetId=spreadsheet_id,
                     range=safe_range,
                     valueRenderOption='FORMULA',
-                ).execute
+                )
             )
-            display_resp = await asyncio.to_thread(
+            display_resp = await google_api_execute_async(
                 self._sheets_service.spreadsheets().values().get(
                     spreadsheetId=spreadsheet_id,
                     range=safe_range,
                     valueRenderOption='FORMATTED_VALUE',
-                ).execute
+                )
             )
             formula_rows = formula_resp.get('values', [])
             display_rows = display_resp.get('values', [])
@@ -5011,13 +5123,14 @@ class ToolExecutor:
         drive_query = " and ".join(q_parts)
 
         try:
-            results = await asyncio.to_thread(
+            from promaia.utils.rate_limiter import google_api_execute_async
+            results = await google_api_execute_async(
                 self._drive_service.files().list(
                     q=drive_query,
                     pageSize=max_results,
                     fields="files(id, name, mimeType, size, modifiedTime, parents)",
                     orderBy="modifiedTime desc",
-                ).execute
+                )
             )
 
             files = results.get("files", [])
@@ -5076,10 +5189,11 @@ class ToolExecutor:
             from pathlib import Path
 
             # Get file metadata
-            meta = await asyncio.to_thread(
+            from promaia.utils.rate_limiter import google_api_execute_async
+            meta = await google_api_execute_async(
                 self._drive_service.files().get(
                     fileId=file_id, fields="name, mimeType"
-                ).execute
+                )
             )
 
             native_mime = meta["mimeType"]
@@ -5122,13 +5236,14 @@ class ToolExecutor:
         folder_id = tool_input.get("folder_id", "root").strip()
 
         try:
-            results = await asyncio.to_thread(
+            from promaia.utils.rate_limiter import google_api_execute_async
+            results = await google_api_execute_async(
                 self._drive_service.files().list(
                     q=f"'{folder_id}' in parents and trashed = false",
                     pageSize=50,
                     fields="files(id, name, mimeType, size, modifiedTime)",
                     orderBy="folder,name",
-                ).execute
+                )
             )
 
             files = results.get("files", [])
@@ -7138,14 +7253,9 @@ class ToolExecutor:
                 created_at=datetime.now().isoformat(),
             )
 
-            # Set messaging if provided
-            messaging_platform = tool_input.get("messaging_platform")
-            if messaging_platform:
-                agent_config.messaging_platform = messaging_platform
+            # Set messaging permission if provided
+            if tool_input.get("messaging_enabled"):
                 agent_config.messaging_enabled = True
-                channel_id = tool_input.get("messaging_channel_id")
-                if channel_id:
-                    agent_config.messaging_channel_id = channel_id
 
             # Validate
             errors = agent_config.validate()
@@ -8313,6 +8423,9 @@ def _summarize_tool_result(
 
     elif tool_name == "reply_to_email":
         return f"Replied to thread {tool_input.get('thread_id', '')[:12]}"
+
+    elif tool_name == "draft_reply_to_email":
+        return f"Draft reply created in thread {tool_input.get('thread_id', '')[:12]}"
 
     elif tool_name == "schedule_self":
         return f"Self-scheduled: {tool_input.get('summary', '')} at {tool_input.get('start_time', '')}"

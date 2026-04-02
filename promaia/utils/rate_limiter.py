@@ -4,8 +4,12 @@ Intelligently manages request rates to avoid hitting API limits.
 """
 import time
 import asyncio
+import logging
 from collections import deque
+from functools import wraps
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class AdaptiveRateLimiter:
@@ -114,3 +118,51 @@ def reset_notion_rate_limiter():
     global _notion_rate_limiter
     if _notion_rate_limiter:
         _notion_rate_limiter.reset()
+
+
+# ── Google API retry-on-rate-limit ──────────────────────────────────────
+
+def google_api_execute(request, max_retries: int = 5):
+    """Execute a Google API request with exponential backoff on rate limits.
+
+    Retries on 429 (rate limit), 500, and 503 errors with exponential
+    backoff starting at 1 second, doubling each attempt.
+
+    Args:
+        request: A Google API HttpRequest object (before .execute()).
+        max_retries: Maximum number of retries (default 5, ~31s total wait).
+
+    Returns:
+        The API response dict.
+    """
+    from googleapiclient.errors import HttpError
+
+    for attempt in range(max_retries + 1):
+        try:
+            return request.execute()
+        except HttpError as e:
+            if e.resp.status in (429, 500, 503) and attempt < max_retries:
+                wait = 2 ** attempt  # 1, 2, 4, 8, 16
+                logger.warning(
+                    "Google API %d error (attempt %d/%d), retrying in %ds: %s",
+                    e.resp.status, attempt + 1, max_retries, wait, e,
+                )
+                time.sleep(wait)
+            else:
+                raise
+
+
+async def google_api_execute_async(request, max_retries: int = 5):
+    """Async version of google_api_execute — runs in a thread with backoff.
+
+    Suitable for use in async code where Google API calls are already
+    wrapped with asyncio.to_thread().
+
+    Args:
+        request: A Google API HttpRequest object (before .execute()).
+        max_retries: Maximum number of retries (default 5).
+
+    Returns:
+        The API response dict.
+    """
+    return await asyncio.to_thread(google_api_execute, request, max_retries)

@@ -402,21 +402,14 @@ Use this to check your current messaging setup before making changes.""",
             config_data = {
                 "agent_id": agent_config.agent_id,
                 "agent_name": agent_config.name,
-                "messaging_platform": agent_config.messaging_platform,
-                "messaging_channel_id": agent_config.messaging_channel_id,
                 "messaging_enabled": agent_config.messaging_enabled,
-                "initiate_conversation": agent_config.initiate_conversation,
                 "conversation_timeout_minutes": agent_config.conversation_timeout_minutes,
-                "conversation_max_turns": agent_config.conversation_max_turns
             }
-            
-            result_text = f"✅ Current Messaging Configuration:\n\n"
-            result_text += f"Platform: {config_data['messaging_platform'] or 'Not set'}\n"
-            result_text += f"Channel ID: {config_data['messaging_channel_id'] or 'Not set'}\n"
+
+            result_text = f"Current Messaging Configuration:\n\n"
             result_text += f"Enabled: {config_data['messaging_enabled']}\n"
-            result_text += f"Mode: {'Interactive conversation' if config_data['initiate_conversation'] else 'One-way post'}\n"
-            result_text += f"Timeout: {config_data['conversation_timeout_minutes']} minutes\n"
-            result_text += f"Max turns: {config_data['conversation_max_turns'] or 'Unlimited'}\n"
+            result_text += f"Conversation timeout: {config_data['conversation_timeout_minutes']} minutes\n"
+            result_text += f"\nPlatforms are environment-based (available if bot tokens are set).\n"
             
             return {
                 "content": [{
@@ -440,20 +433,14 @@ Use this to check your current messaging setup before making changes.""",
         description="""Update agent's messaging configuration.
 
 Allows you to configure or change:
-- messaging_platform: "slack" or "discord"
-- messaging_channel_id: Platform-specific channel ID (e.g., "C06ABC123" for Slack)
-- messaging_enabled: true/false to enable/disable messaging
-- initiate_conversation: true for interactive conversations, false for one-way posts
+- messaging_enabled: true/false to enable/disable messaging tools
 - conversation_timeout_minutes: How long to wait before timing out (default 15)
 
-Example: update_agent_messaging_config(messaging_platform="slack", messaging_channel_id="C06ABC123", messaging_enabled=True)
+Example: update_agent_messaging_config(messaging_enabled=True)
 
 Only provide the fields you want to change - others remain unchanged.""",
         input_schema={
-            "messaging_platform": Optional[str],
-            "messaging_channel_id": Optional[str],
             "messaging_enabled": Optional[bool],
-            "initiate_conversation": Optional[bool],
             "conversation_timeout_minutes": Optional[int],
         }
     )
@@ -461,39 +448,27 @@ Only provide the fields you want to change - others remain unchanged.""",
         """Update agent messaging configuration"""
         try:
             from promaia.agents import save_agents, load_agents
-            
+
             # Reload agents to get latest state
             agents = load_agents()
             agent = next((a for a in agents if a.agent_id == agent_config.agent_id), None)
-            
+
             if not agent:
                 return {
                     "content": [{
                         "type": "text",
-                        "text": f"❌ Agent {agent_config.agent_id} not found"
+                        "text": f"Agent {agent_config.agent_id} not found"
                     }],
                     "isError": True
                 }
-            
+
             # Update fields if provided
             updated_fields = []
-            
-            if 'messaging_platform' in args and args['messaging_platform'] is not None:
-                agent.messaging_platform = args['messaging_platform']
-                updated_fields.append(f"platform={args['messaging_platform']}")
-            
-            if 'messaging_channel_id' in args and args['messaging_channel_id'] is not None:
-                agent.messaging_channel_id = args['messaging_channel_id']
-                updated_fields.append(f"channel_id={args['messaging_channel_id']}")
-            
+
             if 'messaging_enabled' in args and args['messaging_enabled'] is not None:
                 agent.messaging_enabled = args['messaging_enabled']
                 updated_fields.append(f"enabled={args['messaging_enabled']}")
-            
-            if 'initiate_conversation' in args and args['initiate_conversation'] is not None:
-                agent.initiate_conversation = args['initiate_conversation']
-                updated_fields.append(f"initiate_conversation={args['initiate_conversation']}")
-            
+
             if 'conversation_timeout_minutes' in args and args['conversation_timeout_minutes'] is not None:
                 agent.conversation_timeout_minutes = args['conversation_timeout_minutes']
                 updated_fields.append(f"timeout={args['conversation_timeout_minutes']} min")
@@ -501,12 +476,10 @@ Only provide the fields you want to change - others remain unchanged.""",
             # Save configuration
             save_agents(agents)
             
-            result_text = f"✅ Configuration updated!\n\nUpdated fields: {', '.join(updated_fields)}\n\n"
+            result_text = f"Configuration updated!\n\nUpdated fields: {', '.join(updated_fields)}\n\n"
             result_text += "New configuration:\n"
-            result_text += f"- Platform: {agent.messaging_platform}\n"
-            result_text += f"- Channel: {agent.messaging_channel_id}\n"
             result_text += f"- Enabled: {agent.messaging_enabled}\n"
-            result_text += f"- Mode: {'Interactive' if agent.initiate_conversation else 'One-way'}\n"
+            result_text += f"- Conversation timeout: {agent.conversation_timeout_minutes} min\n"
             
             return {
                 "content": [{

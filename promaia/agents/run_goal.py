@@ -55,33 +55,47 @@ def _load_agent_prompt(agent_config) -> str:
 
 
 def _init_messaging_platform(agent_config):
-    """Create a SlackPlatform or DiscordPlatform from agent config + env vars.
+    """Create a messaging platform if the agent has messaging permission.
 
-    Returns None if the agent has no messaging platform configured or the
-    required bot token is missing.
+    Resolves Slack bot token via the auth module first (works in all
+    containers), falls back to SLACK_BOT_TOKEN env var.
     """
     import os
 
-    platform_name = getattr(agent_config, "messaging_platform", None)
-    if not platform_name:
+    if not getattr(agent_config, "messaging_enabled", False):
         return None
 
-    if platform_name == "slack":
+    # Slack: try auth module first (same as slack_bot.py)
+    bot_token = None
+    try:
+        from promaia.auth.registry import get_integration
+        from promaia.config.workspaces import get_workspace_manager
+        slack_int = get_integration("slack")
+        ws = get_workspace_manager().get_default_workspace()
+        creds = slack_int.get_slack_credentials(ws)
+        if creds:
+            bot_token = creds.get("bot_token")
+    except Exception:
+        pass
+
+    if not bot_token:
         bot_token = os.environ.get("SLACK_BOT_TOKEN")
-        if bot_token:
-            try:
-                from promaia.agents.messaging.slack_platform import SlackPlatform
-                return SlackPlatform(bot_token=bot_token)
-            except ImportError:
-                logger.warning("slack-sdk not installed, skipping Slack platform")
-    elif platform_name == "discord":
-        bot_token = os.environ.get("DISCORD_BOT_TOKEN")
-        if bot_token:
-            try:
-                from promaia.agents.messaging.discord_platform import DiscordPlatform
-                return DiscordPlatform(bot_token=bot_token)
-            except ImportError:
-                logger.warning("discord.py not installed, skipping Discord platform")
+
+    if bot_token:
+        try:
+            from promaia.agents.messaging.slack_platform import SlackPlatform
+            return SlackPlatform(bot_token=bot_token)
+        except ImportError:
+            logger.warning("slack-sdk not installed, skipping Slack platform")
+
+    # Discord: env var only (no auth module integration yet)
+    discord_token = os.environ.get("DISCORD_BOT_TOKEN")
+    if discord_token:
+        try:
+            from promaia.agents.messaging.discord_platform import DiscordPlatform
+            return DiscordPlatform(bot_token=discord_token)
+        except ImportError:
+            logger.warning("discord.py not installed, skipping Discord platform")
 
     return None
 
@@ -166,7 +180,7 @@ def _make_feed_logger(agent_name: str):
 async def _run_agentic(agent_config, goal: str, metadata: dict) -> dict:
     """Run a goal using agentic_turn — same engine as maia chat."""
     from promaia.agents.agentic_turn import (
-        agentic_turn, build_tool_definitions, ToolExecutor, _generate_plan,
+        agentic_turn, build_tool_definitions, ToolExecutor,
     )
     from promaia.chat.agentic_adapter import build_agentic_system_prompt
 
@@ -222,27 +236,13 @@ async def _run_agentic(agent_config, goal: str, metadata: dict) -> dict:
     if cal_summary:
         enhanced_prompt += f"\n\nTriggered by calendar event: {cal_summary}"
 
-    # 6. Generate plan
-    plan = await _generate_plan(
-        user_message=goal,
-        agent=agent_config,
-        available_tools=tool_names,
-    )
-
-    # 7. Build feed-friendly activity callback
+    # 6. Build feed-friendly activity callback
     activity_cb = _make_feed_logger(name)
 
     # ── Feed lifecycle: signal goal start ──
     logger.info(f"[{name}] Starting goal: {goal}")
 
-    # Emit plan via callback
-    if plan and activity_cb:
-        await activity_cb(
-            tool_name="__plan__",
-            tool_input={"steps": plan},
-        )
-
-    # 8. Run the agentic loop
+    # 7. Run the agentic loop
     messages = [{"role": "user", "content": goal}]
     result = await agentic_turn(
         system_prompt=enhanced_prompt,
@@ -251,7 +251,6 @@ async def _run_agentic(agent_config, goal: str, metadata: dict) -> dict:
         tool_executor=executor,
         max_iterations=agent_config.max_iterations or 40,
         on_tool_activity=activity_cb,
-        plan=plan,
     )
 
     logger.info(
@@ -286,7 +285,7 @@ async def _run(agent_name: str, goal: str, metadata: dict, use_orchestrator: boo
     # Start the Slack bot listener as a background task so conversation
     # replies (DMs) are processed while the agent waits.
     slack_task = None
-    has_messaging = getattr(agent_config, "messaging_platform", None)
+    has_messaging = getattr(agent_config, "messaging_enabled", False)
     if use_orchestrator or has_messaging:
         try:
             slack_task = asyncio.create_task(_start_slack_listener())

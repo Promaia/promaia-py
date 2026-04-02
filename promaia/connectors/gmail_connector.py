@@ -1701,6 +1701,9 @@ Subject: {subject}
         Returns:
             True if sent successfully, False otherwise
         """
+        # Strip internal 'msg_' prefix if present
+        if message_id and message_id.startswith('msg_'):
+            message_id = message_id[4:]
         try:
             # Get the original message to extract recipient info and references
             # If message_id doesn't exist, fall back to latest message in thread
@@ -1781,6 +1784,9 @@ Subject: {subject}
 
     async def _get_message(self, message_id: str) -> Optional[Dict]:
         """Fetch a single Gmail message by ID."""
+        # Strip internal 'msg_' prefix if present
+        if message_id and message_id.startswith('msg_'):
+            message_id = message_id[4:]
         try:
             msg = await self._retry_with_backoff(
                 lambda: self.service.users().messages().get(
@@ -1858,15 +1864,18 @@ Subject: {subject}
 
             draft_body: Dict[str, Any] = {'message': {'raw': raw_message}}
             if thread_id:
-                draft_body['message']['threadId'] = self._get_raw_thread_id(thread_id)
+                raw_tid = self._get_raw_thread_id(thread_id)
+                draft_body['message']['threadId'] = raw_tid
+                self.logger.info(f"_create_draft: threadId={raw_tid} (from {thread_id}), In-Reply-To={in_reply_to}")
 
             draft = self.service.users().drafts().create(
                 userId='me', body=draft_body
             ).execute()
 
             draft_id = draft.get('id')
+            result_thread = draft.get('message', {}).get('threadId', 'N/A')
             attach_note = f" with {len(attachments)} attachment(s)" if attachments else ""
-            self.logger.info(f"Draft created{attach_note}: {draft_id}")
+            self.logger.info(f"Draft created{attach_note}: {draft_id}, result threadId={result_thread}")
             return draft_id
         except Exception as e:
             self.logger.error(f"Failed to create draft: {e}")

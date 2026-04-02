@@ -212,6 +212,7 @@ def create_system_prompt(
     mcp_tools_info: Optional[str] = None,
     include_query_tools: bool = True,
     workspace: Optional[str] = None,
+    limit_to_databases: Optional[List[str]] = None,
 ) -> str:
     """
     Create a system prompt that includes content from multiple data sources.
@@ -221,6 +222,7 @@ def create_system_prompt(
         mcp_tools_info: Optional formatted MCP tools information
         include_query_tools: Whether to include built-in query tools (default: True)
         workspace: Current workspace for database preview (default: None)
+        limit_to_databases: Only show these databases in preview (agent permission filter)
     """
     today = datetime.datetime.now()
     today_str = today.strftime("%Y-%m-%d")
@@ -250,7 +252,11 @@ def create_system_prompt(
 
     # Database preview — shows available data sources regardless of query tools
     loaded_databases = list(multi_source_data.keys())
-    db_preview = generate_database_preview(workspace=workspace, exclude_databases=loaded_databases)
+    db_preview = generate_database_preview(
+        workspace=workspace,
+        exclude_databases=loaded_databases,
+        limit_to_databases=limit_to_databases,
+    )
     if db_preview:
         base_prompt += "\n\n" + db_preview
 

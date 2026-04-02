@@ -85,6 +85,19 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["thread_id", "message_id", "body"]
             }
+        ),
+        Tool(
+            name="draft_reply",
+            description="Create a draft reply to an existing email thread (not sent). Use Promaia query tools to find the thread_id and message_id.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "thread_id": {"type": "string", "description": "Gmail thread ID"},
+                    "message_id": {"type": "string", "description": "Original message ID to reply to"},
+                    "body": {"type": "string", "description": "Reply body text"}
+                },
+                "required": ["thread_id", "message_id", "body"]
+            }
         )
     ]
 
@@ -103,6 +116,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return await _handle_create_draft(arguments)
         elif name == "reply_to_message":
             return await _handle_reply_to_message(arguments)
+        elif name == "draft_reply":
+            return await _handle_draft_reply(arguments)
         else:
             return [TextContent(type="text", text=f"❌ Unknown tool: {name}")]
     except Exception as e:
@@ -173,6 +188,45 @@ async def _handle_reply_to_message(args: dict) -> list[TextContent]:
     return [TextContent(type="text", text="✓ Reply sent" if success else "❌ Reply failed")]
 
 
+async def _handle_draft_reply(args: dict) -> list[TextContent]:
+    """Create a draft reply in an existing thread"""
+    original = await GMAIL_CONNECTOR._get_message(args["message_id"])
+    if not original:
+        return [TextContent(type="text", text="❌ Original message not found")]
+
+    headers = {h['name'].lower(): h['value']
+               for h in original.get('payload', {}).get('headers', [])}
+
+    subject = headers.get('subject', '')
+    if not subject.lower().startswith('re:'):
+        subject = f"Re: {subject}"
+
+    reply_to = headers.get('reply-to') or headers.get('from')
+
+    # Build references chain for threading
+    existing_refs = headers.get('references', '')
+    msg_id_header = headers.get('message-id', '')
+    references = f"{existing_refs} {msg_id_header}".strip() if msg_id_header else existing_refs or None
+
+    # Build quoted reply body
+    full_body = GMAIL_CONNECTOR._build_quoted_reply(args["body"], original)
+
+    logger.info(f"draft_reply: thread_id={args['thread_id']}, to={reply_to}, subject={subject}")
+    logger.info(f"draft_reply: in_reply_to={msg_id_header}, references={references}")
+
+    draft_id = await GMAIL_CONNECTOR._create_draft(
+        to=reply_to,
+        subject=subject,
+        body=full_body,
+        thread_id=args["thread_id"],
+        in_reply_to=msg_id_header,
+        references=references,
+    )
+    if draft_id:
+        return [TextContent(type="text", text=f"✓ Draft reply created: {draft_id} (thread: {args['thread_id']}, in_reply_to: {msg_id_header})")]
+    return [TextContent(type="text", text="❌ Draft reply creation failed")]
+
+
 async def main():
     """Run the MCP server"""
     global WORKSPACE, AGENT_CONFIG
@@ -194,7 +248,7 @@ async def main():
         except Exception as e:
             logger.warning(f"Could not load agent config: {e}")
 
-    logger.info("Tools: send_message, create_draft, reply_to_message")
+    logger.info("Tools: send_message, create_draft, reply_to_message, draft_reply")
     logger.info("Note: Use Promaia query tools for reading emails")
 
     async with stdio_server() as (read_stream, write_stream):

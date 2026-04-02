@@ -232,12 +232,20 @@ class GoogleIntegration(Integration):
 
         from google.oauth2.credentials import Credentials
 
+        # Only pass refresh fields when the Google client can actually use them
+        # (user_oauth mode with client_id/secret).  For proxy-refreshed tokens
+        # we handle refresh ourselves above — passing incomplete fields causes
+        # the Google client to attempt its own refresh and fail with a 401 loop.
+        client_id = token_data.get("client_id")
+        client_secret = token_data.get("client_secret")
+        can_self_refresh = client_id and client_secret
+
         return Credentials(
             token=token_data["access_token"],
-            refresh_token=token_data.get("refresh_token"),
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=token_data.get("client_id"),
-            client_secret=token_data.get("client_secret"),
+            refresh_token=token_data.get("refresh_token") if can_self_refresh else None,
+            token_uri="https://oauth2.googleapis.com/token" if can_self_refresh else None,
+            client_id=client_id if can_self_refresh else None,
+            client_secret=client_secret if can_self_refresh else None,
         )
 
     # ── validation ───────────────────────────────────────────────────

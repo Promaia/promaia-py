@@ -348,8 +348,6 @@ class Planner:
         try:
             team_manager = get_team_manager()
             platform = "slack"  # default
-            if self.agent_config and hasattr(self.agent_config, 'messaging_platform'):
-                platform = self.agent_config.messaging_platform or "slack"
             summary = team_manager.get_roster_summary(platform)
             return summary
         except Exception as e:

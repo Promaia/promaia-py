@@ -233,10 +233,10 @@ def _show_agent_summary(agent: AgentConfig, console):
 
     console.print(f"Journal Memory: [cyan]{agent.journal_memory_days} days[/cyan]")
 
-    if agent.messaging_enabled and agent.messaging_platform:
-        console.print(f"Messaging: [cyan]{agent.messaging_platform.title()}[/cyan]")
+    if agent.messaging_enabled:
+        console.print(f"Messaging: [cyan]Enabled[/cyan]")
     else:
-        console.print(f"Messaging: [dim]None[/dim]")
+        console.print(f"Messaging: [dim]Disabled[/dim]")
 
     if agent.mcp_tools:
         console.print(f"MCP Tools: [cyan]{', '.join(agent.mcp_tools)}[/cyan]")
@@ -342,8 +342,8 @@ async def handle_agent_add(args):
         console.print("❌ Cancelled", style="red")
         return
 
-    # Format databases with days for agent config
-    databases = [f"{db_name}:{days}" for db_name, days in selected_dbs]
+    # Databases are access permissions (no :days suffix needed)
+    databases = selected_dbs
     console.print(f"✓ Databases: {len(selected_dbs)} selected", style="dim")
 
     # Step 4: Use default prompt - user edits in Notion System Prompt page after creation
@@ -755,6 +755,152 @@ async def handle_agent_logs_scheduled(args):
         print()
 
 
+async def handle_agent_reset_default(args):
+    """Reset or recreate the default 'maia' agent with full access."""
+    from rich.console import Console
+    from promaia.agents.agent_config import load_config
+    from promaia.config.databases import get_database_manager
+
+    console = Console()
+
+    # 1. Resolve workspace
+    config = load_config()
+    workspace = config.get("default_workspace")
+    if not workspace:
+        workspaces = list(config.get("workspaces", {}).keys())
+        if len(workspaces) == 1:
+            workspace = workspaces[0]
+        elif workspaces:
+            console.print(f"Multiple workspaces found: {', '.join(workspaces)}")
+            console.print("Set a default_workspace in promaia.config.json first.")
+            return
+        else:
+            console.print("❌ No workspaces configured. Run maia setup first.", style="red")
+            return
+
+    # 2. Check existing maia agent
+    existing = get_agent("maia")
+    if existing:
+        console.print(f"\n📋 Existing 'maia' agent found:", style="bold")
+        console.print(f"   Workspace:  {existing.workspace}")
+        console.print(f"   Databases:  {', '.join(existing.databases) or '(none)'}")
+        console.print(f"   MCP tools:  {', '.join(existing.mcp_tools) or '(none)'}")
+        console.print(f"   Calendar:   {existing.calendar_id or '(none)'}")
+        console.print(f"   Default:    {existing.is_default_agent}")
+        console.print()
+
+        healthy = (
+            existing.is_default_agent
+            and existing.calendar_id
+            and existing.mcp_tools
+            and existing.workspace
+            and existing.databases
+            and existing.messaging_enabled
+            and existing.sdk_enabled
+            and existing.agentic_loop_enabled
+        )
+        if healthy:
+            console.print("✅ Default agent looks healthy. Nothing to reset.", style="green")
+            return
+
+        issues = []
+        if not existing.workspace:
+            issues.append("missing workspace")
+        if not existing.databases:
+            issues.append("no databases")
+        if not existing.calendar_id:
+            issues.append("no calendar")
+        if not existing.mcp_tools:
+            issues.append("no MCP tools")
+        if not existing.messaging_enabled:
+            issues.append("messaging not enabled")
+        if not existing.sdk_enabled:
+            issues.append("SDK disabled")
+        if not existing.agentic_loop_enabled:
+            issues.append("agentic loop disabled")
+        console.print(f"⚠️  Issues: {', '.join(issues)}. Resetting to defaults...", style="yellow")
+    else:
+        console.print(f"\n🔧 No 'maia' agent found. Creating default agent for workspace '{workspace}'...", style="bold")
+
+    # 3. Gather all databases for the workspace
+    try:
+        db_manager = get_database_manager()
+        all_dbs = db_manager.list_databases(workspace=workspace)
+    except Exception:
+        all_dbs = []
+
+    # 4. Build the agent config
+    from datetime import datetime as _dt
+    agent = AgentConfig(
+        name="maia",
+        workspace=workspace,
+        databases=all_dbs,
+        prompt_file=f"You are maia, the default Promaia assistant for the {workspace} workspace.",
+        mcp_tools=["calendar", "notion", "gmail", "google_sheets"],
+        is_default_agent=True,
+        max_iterations=40,
+        enabled=True,
+        agent_id="maia",
+        description="Default Promaia agent",
+        created_at=_dt.utcnow().isoformat(),
+        sdk_enabled=True,
+        sdk_permission_mode="bypassPermissions",
+        sdk_allowed_tools=None,
+        agentic_loop_enabled=True,
+        messaging_platform="slack",
+        messaging_enabled=True,
+        initiate_conversation=False,
+        conversation_timeout_minutes=15,
+        conversation_max_turns=None,
+        journal_memory_days=7,
+    )
+
+    # 5. Resolve calendar — prefer existing agent's calendar_id, then search, then create
+    if existing and existing.calendar_id:
+        agent.calendar_id = existing.calendar_id
+        console.print(f"   📅 Keeping existing calendar: {existing.calendar_id[:20]}...")
+    else:
+        try:
+            from promaia.gcal.google_calendar import get_calendar_manager, google_account_for_workspace
+            google_account = google_account_for_workspace(workspace)
+            if google_account:
+                calendar_mgr = get_calendar_manager(account=google_account)
+
+                # Check for existing maia calendar to avoid duplicates
+                existing_calendars = calendar_mgr.list_agent_calendars()
+                maia_cal = next((c for c in existing_calendars if c.get("summary") == "maia"), None)
+
+                if maia_cal:
+                    agent.calendar_id = maia_cal["id"]
+                    console.print(f"   📅 Reusing existing 'maia' calendar: {maia_cal['id'][:20]}...")
+                else:
+                    calendar_id = calendar_mgr.create_agent_calendar(
+                        agent_name="maia",
+                        description="Maia agent schedule — events created from maia chat",
+                    )
+                    if calendar_id:
+                        agent.calendar_id = calendar_id
+                        console.print(f"   📅 Created new calendar: {calendar_id[:20]}...")
+                    else:
+                        console.print("   ⚠️  Could not create calendar (auth issue?)", style="yellow")
+            else:
+                console.print("   ℹ️  No Google account found — skipping calendar", style="dim")
+        except Exception as e:
+            console.print(f"   ⚠️  Calendar setup failed: {e}", style="yellow")
+
+    # 6. Save
+    save_agent(agent)
+
+    console.print()
+    console.print("✅ Default 'maia' agent configured:", style="bold green")
+    console.print(f"   Workspace:  {agent.workspace}")
+    console.print(f"   Databases:  {', '.join(agent.databases) or '(none)'}")
+    console.print(f"   MCP tools:  {', '.join(agent.mcp_tools)}")
+    console.print(f"   Calendar:   {agent.calendar_id or '(none)'}")
+    console.print(f"   Default:    {agent.is_default_agent}")
+    console.print()
+
+
 async def handle_agent_remove_scheduled(args):
     """
     Remove an agent and cascade-delete all associated Notion sub-resources.
@@ -967,8 +1113,8 @@ async def handle_agent_info_scheduled(args):
         for tool in agent.mcp_tools:
             print(f"  - {tool}")
 
-    if agent.messaging_enabled and agent.messaging_platform:
-        print(f"\nMessaging: {agent.messaging_platform.title()}")
+    if agent.messaging_enabled:
+        print(f"\nMessaging: Enabled")
     print(f"Journal Memory: {agent.journal_memory_days} days")
 
     if agent.description:
@@ -1377,7 +1523,9 @@ async def handle_run_calendar_event(args):
                     continue
 
                 start_time = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
-                all_events.append((start_time, event, agent))
+                # Convert to local timezone for display
+                start_local = start_time.astimezone()
+                all_events.append((start_time, start_local, event, agent))
 
         if not all_events:
             console.print("❌ No upcoming calendar events found in the next 7 days", style="yellow")
@@ -1389,10 +1537,10 @@ async def handle_run_calendar_event(args):
 
         # Show numbered list of upcoming events
         console.print(f"[bold]Upcoming events ({len(all_events)}):[/bold]\n")
-        for i, (start_time, event, agent) in enumerate(all_events, 1):
+        for i, (start_time, start_local, event, agent) in enumerate(all_events, 1):
             summary = event.get("summary") or "No title"
             marker = " 👈" if i == n else ""
-            console.print(f"  {i}. [{agent.name}] {summary}  —  {start_time.strftime('%H:%M')}{marker}")
+            console.print(f"  {i}. [{agent.name}] {summary}  —  {start_local.strftime('%H:%M')}{marker}")
 
         console.print()
 
@@ -1402,7 +1550,7 @@ async def handle_run_calendar_event(args):
             return
 
         # Select the Nth event
-        selected_time, selected_event, selected_agent = all_events[n - 1]
+        selected_time, selected_local, selected_event, selected_agent = all_events[n - 1]
 
         summary = selected_event.get("summary") or "No title"
         description = (selected_event.get("description") or "").strip()
@@ -1411,7 +1559,7 @@ async def handle_run_calendar_event(args):
 
         console.print(f"📅 Running: [bold]{summary}[/bold]")
         console.print(f"   Agent: [cyan]{selected_agent.name}[/cyan]")
-        console.print(f"   Scheduled: {selected_time.strftime('%Y-%m-%d %H:%M')}")
+        console.print(f"   Scheduled: {selected_local.strftime('%Y-%m-%d %H:%M')}")
         if description:
             console.print(f"   Description: {description[:100]}...")
 
@@ -1836,8 +1984,7 @@ async def handle_agent_edit(args):
         # select_databases expects (workspace, available_databases)
         selected_databases = await select_databases(agent.workspace, available_databases)
         if selected_databases:
-            # Convert selection tuples [("db", "7"), ...] into legacy "db:days" strings
-            agent.databases = [f"{db_name}:{days}" for db_name, days in selected_databases]
+            agent.databases = selected_databases
             console.print(f"✓ Updated databases: [cyan]{', '.join(agent.databases)}[/cyan]", style="dim")
 
     if choice in ["4", "8"]:
@@ -2229,6 +2376,10 @@ def add_scheduled_agent_commands(agent_subparsers):
     calendar_share_parser = agent_subparsers.add_parser('calendar-share', help='Share agent calendar with team member')
     calendar_share_parser.add_argument('name', help='Agent name')
     calendar_share_parser.set_defaults(func=handle_calendar_share)
+
+    # Reset default agent
+    reset_default_parser = agent_subparsers.add_parser('reset-default', help='Reset/recreate the default maia agent')
+    reset_default_parser.set_defaults(func=handle_agent_reset_default)
 
     # Stop running agent(s)
     stop_parser = agent_subparsers.add_parser('stop', help='Stop running agent(s)')

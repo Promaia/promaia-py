@@ -467,13 +467,6 @@ class ConversationManager:
             'timestamp': now
         })
 
-        # Agentic conversations: just store the message, no AI response.
-        # The agentic_turn loop polls for this message and handles the reply.
-        if getattr(state, 'conversation_type', None) == 'agentic':
-            await self._save_state(state)
-            logger.info(f"Stored agentic message in {conversation_id} (no auto-response)")
-            return None
-
         # Check turn limit
         if state.max_turns and state.turn_count >= state.max_turns:
             await self.end_conversation(conversation_id, "max_turns_reached")
@@ -546,44 +539,12 @@ class ConversationManager:
             # Build system prompt from agent personality
             system_prompt = self._build_conversation_system_prompt(agent, state)
 
-            # Load context on first turn, cache for subsequent turns.
-            # Invalidate cache daily so calendar/date-sensitive data stays fresh.
+            # Build messages from conversation history only.
+            # Context is available via query tools (query_source, query_sql,
+            # query_vector) — not pre-loaded.  The system prompt already
+            # includes a lightweight database preview via generate_database_preview().
             context_block = ""
-            cache_stale = False
-            if state.cached_context:
-                try:
-                    # Check if cache was from a different day
-                    cached_date = state.context.get('_cached_context_date')
-                    today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-                    if cached_date and cached_date != today_str:
-                        cache_stale = True
-                        logger.info("📅 Cached context is from a different day, reloading")
-                    else:
-                        context_block = state.cached_context
-                        logger.info("♻️ Reusing cached context")
-                except Exception:
-                    pass
-
-            if not context_block:
-                context_block = await self._load_conversation_context(agent)
-                if context_block:
-                    state.cached_context = context_block
-                    state.context['_cached_context_date'] = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-                    await self._save_state(state)
-                    logger.info("💾 Cached context for future turns")
-
-            # Build messages: context + conversation history
             messages = []
-
-            if context_block:
-                messages.append({
-                    "role": "user",
-                    "content": f"# Background Context\n\nHere is relevant context about the people and projects you work with:\n\n{context_block}"
-                })
-                messages.append({
-                    "role": "assistant",
-                    "content": "Got it, I have the background context. I'm ready to continue our conversation."
-                })
 
             # Add conversation history (last 20 messages, plain text only)
             # Strip tool_use/tool_result blocks to avoid mismatched pairs
@@ -732,12 +693,14 @@ class ConversationManager:
         from promaia.ai.prompts import create_system_prompt
 
         # Build the same base prompt as terminal chat
-        # (prompt.md + database preview + context data)
+        # (prompt.md + database preview — scoped to agent's accessible sources)
+        queryable = agent.get_queryable_sources() if hasattr(agent, 'get_queryable_sources') else None
         base_prompt = create_system_prompt(
-            multi_source_data={},  # No pre-loaded context — agentic loop handles this
+            multi_source_data={},  # No pre-loaded context — agent uses query tools
             mcp_tools_info=None,
             include_query_tools=False,  # agentic loop has its own tools
             workspace=agent.workspace,
+            limit_to_databases=queryable,
         )
 
         # Add agent personality if it has one
@@ -839,23 +802,12 @@ class ConversationManager:
             return [dict(row) for row in cursor.fetchall()]
 
     async def _load_conversation_context(self, agent) -> str:
-        """Load preloaded context for conversation (lighter than full executor)."""
-        try:
-            from promaia.agents.executor import AgentExecutor
-            executor = AgentExecutor(agent)
-            initial_context = await executor._load_initial_context()
-            if initial_context:
-                from promaia.ai.prompts import format_context_data
-                formatted = format_context_data(initial_context)
-                # Trim only if approaching model context limit
-                # Claude Sonnet 4.6 has 200K token context (~700K chars)
-                # Reserve ~50K tokens for system prompt, conversation history, and response
-                max_context_chars = 525_000  # ~150K tokens worth
-                if len(formatted) > max_context_chars:
-                    formatted = formatted[:max_context_chars] + "\n\n[... context trimmed to fit model limit ...]"
-                return formatted
-        except Exception as e:
-            logger.warning(f"Failed to load conversation context: {e}")
+        """Deprecated: bulk context pre-loading removed.
+
+        Agents now use query tools (query_source, query_sql, query_vector)
+        to load relevant data on demand. The system prompt includes a
+        lightweight database preview via generate_database_preview().
+        """
         return ""
     
     def _save_conversation_context_log(

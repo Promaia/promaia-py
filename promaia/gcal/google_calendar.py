@@ -380,9 +380,10 @@ class GoogleCalendarManager:
         Returns:
             List of upcoming events with agent metadata
         """
-        if not self.service:
-            if not self.authenticate():
-                return []
+        # Always re-authenticate so we pick up freshly-refreshed tokens
+        # from the proxy auth flow (tokens expire hourly).
+        if not self.authenticate():
+            return []
 
         cal_id = calendar_id or self.calendar_id
 

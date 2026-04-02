@@ -12,7 +12,7 @@ from enum import Enum
 
 class SourcePermission(Enum):
     """Permission levels for data sources"""
-    READ_INITIAL = "read_initial"  # Load in initial context boundary
+    READ_INITIAL = "read_initial"  # Deprecated: bulk pre-loading removed
     QUERY = "query"                # Can query dynamically at runtime
     WRITE = "write"                # Can write/modify via MCP tools
 
@@ -74,13 +74,9 @@ class AgentConfig:
     # NEW: Agentic loop for conversations (tool use in tag-to-chat)
     agentic_loop_enabled: bool = True  # Use agentic turn with tools in conversations
     
-    # NEW: Messaging platform configuration (platform-agnostic)
-    messaging_platform: Optional[str] = None  # "slack" or "discord"
-    messaging_channel_id: Optional[str] = None  # Platform-specific channel ID
-    messaging_enabled: bool = False  # Enable messaging integration
-    initiate_conversation: bool = False  # Start conversation vs one-way post
-    conversation_timeout_minutes: int = 15  # Minutes before timeout
-    conversation_max_turns: Optional[int] = None  # Max turns (None = unlimited)
+    # Messaging: permission gate (platforms are environment-based, not per-agent)
+    messaging_enabled: bool = False  # Agent can use messaging tools
+    conversation_timeout_minutes: int = 15  # Minutes before conversation timeout
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -122,16 +118,12 @@ class AgentConfig:
         return errors
 
     def get_initial_context_sources(self) -> Dict[str, Optional[int]]:
-        """Get sources to load in initial context boundary"""
-        if self.source_access:
-            return {
-                access.source_name: access.initial_days
-                for access in self.source_access
-                if SourcePermission.READ_INITIAL in access.permissions
-            }
-        else:
-            # Fall back to old databases format
-            return self._parse_legacy_databases()
+        """Deprecated: bulk context pre-loading removed.
+
+        Agents now use query tools to load data on demand. Returns empty
+        dict. Kept for backward compatibility.
+        """
+        return {}
 
     def _parse_legacy_databases(self) -> Dict[str, Optional[int]]:
         """Parse legacy databases field into dict of source -> days"""

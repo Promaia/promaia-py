@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 from .base import BaseConnector, QueryFilter, DateRangeFilter, SyncResult
+from promaia.utils.rate_limiter import google_api_execute
 
 logger = logging.getLogger(__name__)
 
@@ -127,10 +128,10 @@ class GoogleSheetsConnector(BaseConnector):
         try:
             if not self._drive_service:
                 await self.connect()
-            self._drive_service.files().list(
+            google_api_execute(self._drive_service.files().list(
                 q="mimeType='application/vnd.google-apps.spreadsheet'",
                 pageSize=1,
-            ).execute()
+            ))
             return True
         except Exception as e:
             self.logger.error(f"Sheets connection test failed: {e}")
@@ -160,9 +161,9 @@ class GoogleSheetsConnector(BaseConnector):
     async def get_page_content(self, page_id: str, include_properties: bool = True) -> Dict[str, Any]:
         if not self._sheets_service:
             await self.connect()
-        return self._sheets_service.spreadsheets().get(
+        return google_api_execute(self._sheets_service.spreadsheets().get(
             spreadsheetId=page_id
-        ).execute()
+        ))
 
     async def get_page_properties(self, page_id: str) -> Dict[str, Any]:
         return await self.get_page_content(page_id)
@@ -214,10 +215,10 @@ class GoogleSheetsConnector(BaseConnector):
 
                     try:
                         # Get sheet metadata
-                        meta = self._sheets_service.spreadsheets().get(
+                        meta = google_api_execute(self._sheets_service.spreadsheets().get(
                             spreadsheetId=ss_id,
                             fields="sheets.properties.title,sheets.properties.gridProperties",
-                        ).execute()
+                        ))
                         result.api_calls_count += 1
                         sheets = meta.get('sheets', [])
                         sheet_names = [
@@ -230,16 +231,16 @@ class GoogleSheetsConnector(BaseConnector):
                         row_counts = {}
                         for sheet_title in sheet_names:
                             safe_range = f"'{sheet_title}'"
-                            formula_resp = self._sheets_service.spreadsheets().values().get(
+                            formula_resp = google_api_execute(self._sheets_service.spreadsheets().values().get(
                                 spreadsheetId=ss_id,
                                 range=safe_range,
                                 valueRenderOption='FORMULA',
-                            ).execute()
-                            display_resp = self._sheets_service.spreadsheets().values().get(
+                            ))
+                            display_resp = google_api_execute(self._sheets_service.spreadsheets().values().get(
                                 spreadsheetId=ss_id,
                                 range=safe_range,
                                 valueRenderOption='FORMATTED_VALUE',
-                            ).execute()
+                            ))
                             result.api_calls_count += 2
 
                             formula_rows = formula_resp.get('values', [])
@@ -317,10 +318,10 @@ class GoogleSheetsConnector(BaseConnector):
         # Try as a single spreadsheet first (unless it's "root")
         if source and source != "root":
             try:
-                file_meta = self._drive_service.files().get(
+                file_meta = google_api_execute(self._drive_service.files().get(
                     fileId=source,
                     fields="id, name, mimeType, modifiedTime, createdTime",
-                ).execute()
+                ))
                 if file_meta.get("mimeType") == "application/vnd.google-apps.spreadsheet":
                     self.logger.info(f"Source ID is a single spreadsheet: {file_meta.get('name')}")
                     return [file_meta]
@@ -335,12 +336,12 @@ class GoogleSheetsConnector(BaseConnector):
         all_files = []
         page_token = None
         while True:
-            resp = self._drive_service.files().list(
+            resp = google_api_execute(self._drive_service.files().list(
                 q=q,
                 pageSize=min(limit or 100, 100),
                 fields="nextPageToken, files(id, name, modifiedTime, createdTime)",
                 pageToken=page_token,
-            ).execute()
+            ))
             all_files.extend(resp.get('files', []))
             if limit and len(all_files) >= limit:
                 all_files = all_files[:limit]

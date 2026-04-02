@@ -170,16 +170,10 @@ class AgentExecutor:
             execution_id = self.tracker.start_execution(self.config.name)
             logger.info(f"🤖 [exec:{execution_id}] Starting agent '{self.config.name}'")
 
-            # Step 1: Load initial context (or use cached)
-            if cached_context:
-                logger.info(f"📚 [exec:{execution_id}] Using cached context (performance optimization)")
-                initial_context = cached_context
-            else:
-                logger.info(f"📚 [exec:{execution_id}] Loading context from {len(self.config.databases)} source(s)...")
-                initial_context = await self._load_initial_context()
-
-            if not initial_context:
-                logger.warning("No context data loaded")
+            # Step 1: Context is available via query tools, not pre-loaded.
+            # The system prompt includes a database preview so the agent knows
+            # what data sources exist and can query them on demand.
+            initial_context = {}
 
             # Step 2: Execute agent (SDK or legacy mode)
             logger.debug(f"sdk_enabled={self.config.sdk_enabled}, SDK_AVAILABLE={SDK_AVAILABLE}")
@@ -232,22 +226,6 @@ class AgentExecutor:
             else:
                 result['notion_written'] = False
             
-            # Step 5.5: Send to messaging platform (if configured)
-            # Skip if: already responding within an active conversation, OR
-            # this is a synthesis task (journal writing) — output is the journal, not a message.
-            in_conversation = run_metadata and run_metadata.get('conversation_id')
-            is_synthesis = run_metadata and run_metadata.get('write_to_journal')
-
-            if result.get('output') and self.config.messaging_enabled and not in_conversation and not is_synthesis:
-                try:
-                    messaging_success = await self._send_to_messaging_platform(result['output'])
-                    result['messaging_sent'] = messaging_success
-                except Exception as e:
-                    logger.error(f"Error sending to messaging platform: {e}", exc_info=True)
-                    result['messaging_sent'] = False
-            else:
-                result['messaging_sent'] = False
-
             # Step 6: Calculate metrics
             end_time = datetime.now(timezone.utc)
             duration = (end_time - start_time).total_seconds()
@@ -320,8 +298,10 @@ class AgentExecutor:
             }
 
     async def _load_initial_context(self) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        Load initial context from configured databases.
+        """Deprecated: bulk context pre-loading removed.
+
+        Agents now use query tools to load data on demand. Kept for
+        backward compatibility but no longer called from execute().
 
         Returns:
             Dictionary mapping database names to lists of pages
@@ -723,83 +703,6 @@ Current time: {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}
             logger.error(f"Error writing to Notion: {e}")
             return False
     
-    async def _send_to_messaging_platform(self, output: str) -> bool:
-        """
-        Send agent output to configured messaging platform.
-        
-        Supports both one-way posts and conversation initiation.
-        Platform-agnostic: works with Slack, Discord, or any registered platform.
-        
-        Args:
-            output: The agent's output text
-        
-        Returns:
-            True if successful
-        """
-        try:
-            if not self.config.messaging_platform or not self.config.messaging_channel_id:
-                logger.warning("Messaging enabled but platform or channel not configured")
-                return False
-            
-            # Import conversation manager
-            from promaia.agents.conversation_manager import ConversationManager
-            
-            conv_manager = ConversationManager()
-            
-            # Register appropriate platform
-            if self.config.messaging_platform == 'slack':
-                from promaia.agents.messaging.slack_platform import SlackPlatform
-                
-                bot_token = os.environ.get('SLACK_BOT_TOKEN')
-                if not bot_token:
-                    logger.error("SLACK_BOT_TOKEN not found in environment")
-                    return False
-                
-                platform = SlackPlatform(bot_token=bot_token)
-                conv_manager.register_platform('slack', platform)
-            
-            elif self.config.messaging_platform == 'discord':
-                from promaia.agents.messaging.discord_platform import DiscordPlatform
-                
-                bot_token = os.environ.get('DISCORD_BOT_TOKEN')
-                if not bot_token:
-                    logger.error("DISCORD_BOT_TOKEN not found in environment")
-                    return False
-                
-                platform = DiscordPlatform(bot_token=bot_token)
-                conv_manager.register_platform('discord', platform)
-            
-            else:
-                logger.error(f"Unknown messaging platform: {self.config.messaging_platform}")
-                return False
-            
-            # Either start conversation or post one-way message
-            if self.config.initiate_conversation:
-                # Start interactive conversation
-                conversation = await conv_manager.start_conversation(
-                    agent_id=self.config.agent_id or self.config.name,
-                    platform=self.config.messaging_platform,
-                    channel_id=self.config.messaging_channel_id,
-                    initial_message=output,
-                    timeout_minutes=self.config.conversation_timeout_minutes,
-                    max_turns=self.config.conversation_max_turns
-                )
-                logger.info(f"💬 Started conversation on {self.config.messaging_platform}: {conversation.conversation_id}")
-            else:
-                # Just post output (one-way)
-                platform_impl = conv_manager.platforms[self.config.messaging_platform]
-                await platform_impl.send_message(
-                    channel_id=self.config.messaging_channel_id,
-                    content=platform_impl.format_message(output, self.config.name)
-                )
-                logger.info(f"📤 Posted to {self.config.messaging_platform} channel {self.config.messaging_channel_id}")
-            
-            return True
-        
-        except Exception as e:
-            logger.error(f"Error sending to messaging platform: {e}", exc_info=True)
-            return False
-
     @staticmethod
     def _summarize_tool_input(tool_name: str, tool_input: dict) -> str:
         """Return a concise, human-readable summary of a tool call's input."""
