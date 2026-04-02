@@ -1523,7 +1523,9 @@ async def handle_run_calendar_event(args):
                     continue
 
                 start_time = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
-                all_events.append((start_time, event, agent))
+                # Convert to local timezone for display
+                start_local = start_time.astimezone()
+                all_events.append((start_time, start_local, event, agent))
 
         if not all_events:
             console.print("❌ No upcoming calendar events found in the next 7 days", style="yellow")
@@ -1535,10 +1537,10 @@ async def handle_run_calendar_event(args):
 
         # Show numbered list of upcoming events
         console.print(f"[bold]Upcoming events ({len(all_events)}):[/bold]\n")
-        for i, (start_time, event, agent) in enumerate(all_events, 1):
+        for i, (start_time, start_local, event, agent) in enumerate(all_events, 1):
             summary = event.get("summary") or "No title"
             marker = " 👈" if i == n else ""
-            console.print(f"  {i}. [{agent.name}] {summary}  —  {start_time.strftime('%H:%M')}{marker}")
+            console.print(f"  {i}. [{agent.name}] {summary}  —  {start_local.strftime('%H:%M')}{marker}")
 
         console.print()
 
@@ -1548,7 +1550,7 @@ async def handle_run_calendar_event(args):
             return
 
         # Select the Nth event
-        selected_time, selected_event, selected_agent = all_events[n - 1]
+        selected_time, selected_local, selected_event, selected_agent = all_events[n - 1]
 
         summary = selected_event.get("summary") or "No title"
         description = (selected_event.get("description") or "").strip()
@@ -1557,7 +1559,7 @@ async def handle_run_calendar_event(args):
 
         console.print(f"📅 Running: [bold]{summary}[/bold]")
         console.print(f"   Agent: [cyan]{selected_agent.name}[/cyan]")
-        console.print(f"   Scheduled: {selected_time.strftime('%Y-%m-%d %H:%M')}")
+        console.print(f"   Scheduled: {selected_local.strftime('%Y-%m-%d %H:%M')}")
         if description:
             console.print(f"   Description: {description[:100]}...")
 
