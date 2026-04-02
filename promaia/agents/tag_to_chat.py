@@ -490,7 +490,7 @@ class TagToChatLoop:
                 # Format like Claude Code: `tool_name`(params) ⎿ result
                 from promaia.agents.run_goal import _summarize_tool_input
                 params = _summarize_tool_input(tool_name, current_tool_input)
-                call_str = f"`{tool_name}`({params})" if params else f"`{tool_name}`"
+                call_str = f"`{tool_name}` ({params})" if params else f"`{tool_name}`"
                 if summary:
                     result = summary[:120] + "..." if len(summary) > 120 else summary
                     tool_steps.append(f"{call_str}\n     ⎿  {result}")
@@ -517,7 +517,7 @@ class TagToChatLoop:
                     if current_tool:
                         from promaia.agents.run_goal import _summarize_tool_input
                         params = _summarize_tool_input(current_tool, current_tool_input)
-                        tool_label = f"`{current_tool}`({params})" if params else f"`{current_tool}`"
+                        tool_label = f"`{current_tool}` ({params})" if params else f"`{current_tool}`"
                         lines.append(
                             f"{len(tool_steps)+1}. {tool_label}... "
                             f"{random.choice(THINKING_EMOJIS)}"
