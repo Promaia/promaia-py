@@ -55,18 +55,32 @@ def _load_agent_prompt(agent_config) -> str:
 
 
 def _init_messaging_platform(agent_config):
-    """Create a messaging platform from environment bot tokens.
+    """Create a messaging platform if the agent has messaging permission.
 
-    Returns the first available platform (Slack preferred) if the agent
-    has messaging_enabled=True. Returns None if the agent doesn't have
-    messaging permission or no bot tokens are in the environment.
+    Resolves Slack bot token via the auth module first (works in all
+    containers), falls back to SLACK_BOT_TOKEN env var.
     """
     import os
 
     if not getattr(agent_config, "messaging_enabled", False):
         return None
 
-    bot_token = os.environ.get("SLACK_BOT_TOKEN")
+    # Slack: try auth module first (same as slack_bot.py)
+    bot_token = None
+    try:
+        from promaia.auth.registry import get_integration
+        from promaia.config.workspaces import get_workspace_manager
+        slack_int = get_integration("slack")
+        ws = get_workspace_manager().get_default_workspace()
+        creds = slack_int.get_slack_credentials(ws)
+        if creds:
+            bot_token = creds.get("bot_token")
+    except Exception:
+        pass
+
+    if not bot_token:
+        bot_token = os.environ.get("SLACK_BOT_TOKEN")
+
     if bot_token:
         try:
             from promaia.agents.messaging.slack_platform import SlackPlatform
@@ -74,11 +88,12 @@ def _init_messaging_platform(agent_config):
         except ImportError:
             logger.warning("slack-sdk not installed, skipping Slack platform")
 
-    bot_token = os.environ.get("DISCORD_BOT_TOKEN")
-    if bot_token:
+    # Discord: env var only (no auth module integration yet)
+    discord_token = os.environ.get("DISCORD_BOT_TOKEN")
+    if discord_token:
         try:
             from promaia.agents.messaging.discord_platform import DiscordPlatform
-            return DiscordPlatform(bot_token=bot_token)
+            return DiscordPlatform(bot_token=discord_token)
         except ImportError:
             logger.warning("discord.py not installed, skipping Discord platform")
 
