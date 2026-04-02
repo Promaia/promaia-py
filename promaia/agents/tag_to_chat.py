@@ -429,6 +429,7 @@ class TagToChatLoop:
         plan_active_step = 0      # Currently active step (1-indexed, 0 = none)
         tool_steps = []           # Completed tool summaries
         current_tool = None       # Tool name while executing (None = thinking)
+        current_tool_input = {}   # Tool input for current call (for display)
 
         def _strikethrough(text: str) -> str:
             if self.state.platform == "slack":
@@ -451,7 +452,7 @@ class TagToChatLoop:
             return lines
 
         async def on_tool_activity(tool_name, tool_input, completed, summary=None):
-            nonlocal current_tool, plan_active_step
+            nonlocal current_tool, current_tool_input, plan_active_step
 
             # Special event: plan was generated
             if tool_name == "__plan__":
@@ -484,9 +485,19 @@ class TagToChatLoop:
 
             if not completed:
                 current_tool = tool_name
+                current_tool_input = tool_input or {}
             else:
-                tool_steps.append(summary or f"{tool_name} completed")
+                # Format like Claude Code: `tool_name`(params) ⎿ result
+                from promaia.agents.run_goal import _summarize_tool_input
+                params = _summarize_tool_input(tool_name, current_tool_input)
+                call_str = f"`{tool_name}`({params})" if params else f"`{tool_name}`"
+                if summary:
+                    result = summary[:120] + "..." if len(summary) > 120 else summary
+                    tool_steps.append(f"{call_str}\n     ⎿  {result}")
+                else:
+                    tool_steps.append(call_str)
                 current_tool = None
+                current_tool_input = {}
 
         # Unified animation: renders thinking OR tool activity with cycling emoji
         async def animate():
@@ -504,8 +515,11 @@ class TagToChatLoop:
                     for i, s in enumerate(tool_steps):
                         lines.append(f"{i+1}. {s}")
                     if current_tool:
+                        from promaia.agents.run_goal import _summarize_tool_input
+                        params = _summarize_tool_input(current_tool, current_tool_input)
+                        tool_label = f"`{current_tool}`({params})" if params else f"`{current_tool}`"
                         lines.append(
-                            f"{len(tool_steps)+1}. *{current_tool}...* "
+                            f"{len(tool_steps)+1}. {tool_label}... "
                             f"{random.choice(THINKING_EMOJIS)}"
                         )
                     else:
