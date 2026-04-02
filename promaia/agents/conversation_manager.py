@@ -85,6 +85,9 @@ class ConversationState:
     orchestrator_task_id: Optional[str] = None  # Link to orchestrator task
     cached_context: Optional[str] = None  # Cached preloaded context (markdown format)
     conversation_type: str = "direct"  # "direct" (1:1) or "tag_to_chat" (thread-based, multi-user)
+    is_active: bool = True  # True = ongoing conversation, False = done
+    summary: Optional[str] = None  # Agent-provided summary when conversation ends
+    conversation_partner: Optional[str] = None  # Who this DM conversation is with
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -170,7 +173,12 @@ class ConversationManager:
         if self._agent_cache_mtime is None or current_mtime > self._agent_cache_mtime:
             logger.info("🔄 Reloading agent cache (config changed)")
             agents = load_agents()
-            self._agent_cache = {a.agent_id: a for a in agents}
+            new_cache = {(a.agent_id or a.name): a for a in agents}
+            # Don't replace a working cache with an empty one (config file race condition)
+            if new_cache or not self._agent_cache:
+                self._agent_cache = new_cache
+            else:
+                logger.warning("⚠️ Config reload returned 0 agents, keeping previous cache")
             self._agent_cache_mtime = current_mtime
             logger.info(f"✅ Cached {len(self._agent_cache)} agents")
 
@@ -286,6 +294,21 @@ class ConversationManager:
                 logger.info("Added conversation_type column to conversations table")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+            # Migration: Add is_active, summary, conversation_partner columns
+            try:
+                cursor.execute("ALTER TABLE conversations ADD COLUMN is_active BOOLEAN DEFAULT 1")
+                logger.info("Added is_active column to conversations table")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+            try:
+                cursor.execute("ALTER TABLE conversations ADD COLUMN summary TEXT")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cursor.execute("ALTER TABLE conversations ADD COLUMN conversation_partner TEXT")
+            except sqlite3.OperationalError:
+                pass
 
             # Index for thread-based lookups (tag-to-chat uses thread_id matching)
             cursor.execute("""
@@ -467,8 +490,8 @@ class ConversationManager:
             response = await self._get_ai_response(state, user_message)
         except Exception as e:
             logger.error(f"Error generating AI response: {e}", exc_info=True)
-            response = "I'm sorry, I encountered an error generating a response. Please try again."
-        
+            response = f"I'm sorry, I encountered an error generating a response ({type(e).__name__}: {e}). Please try again."
+
         # Add response to conversation (skip if agentic turn already stored history_messages)
         if not getattr(state, '_skip_response_append', False):
             response_time = datetime.now(timezone.utc).isoformat()
@@ -562,12 +585,25 @@ class ConversationManager:
                     "content": "Got it, I have the background context. I'm ready to continue our conversation."
                 })
 
-            # Add conversation history (last 20 messages)
+            # Add conversation history (last 20 messages, plain text only)
+            # Strip tool_use/tool_result blocks to avoid mismatched pairs
             for msg in state.messages[-20:]:
-                messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"]
-                })
+                content = msg.get("content", "")
+                # Skip messages with tool_use/tool_result content blocks
+                if isinstance(content, list):
+                    # Extract only text blocks from structured content
+                    text_parts = []
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_parts.append(block["text"])
+                        elif isinstance(block, str):
+                            text_parts.append(block)
+                    content = "\n".join(text_parts) if text_parts else ""
+                if content and isinstance(content, str) and content.strip():
+                    messages.append({
+                        "role": msg["role"],
+                        "content": content
+                    })
 
             # Save context log for debugging
             try:
@@ -581,112 +617,131 @@ class ConversationManager:
             except Exception as e:
                 logger.debug(f"Failed to save context log: {e}")
 
-            # Generate response: agentic loop (with tools) or single LLM call
-            agentic_enabled = getattr(agent, 'agentic_loop_enabled', True)
+            # Generate response using the shared agentic adapter
+            # This gives Slack/Discord the same Think/Act mode, context sources,
+            # memory, suite registry, and conversation_mode.md prompt as terminal chat.
+            from promaia.chat.agentic_adapter import run_agentic_turn
 
-            if agentic_enabled:
-                from promaia.agents.agentic_turn import (
-                    agentic_turn, ToolExecutor, build_tool_definitions,
-                    _generate_plan,
+            # Auto-add calendar to mcp_tools if agent has a dedicated calendar
+            if getattr(agent, 'calendar_id', None):
+                agent_mcp = getattr(agent, 'mcp_tools', None) or []
+                if "calendar" not in agent_mcp:
+                    agent.mcp_tools = list(agent_mcp) + ["calendar"]
+
+            mcp_tools = getattr(agent, 'mcp_tools', []) or []
+            databases = getattr(agent, 'databases', []) or []
+
+            # Restore persisted notepad and source states from conversation context
+            notepad_content = state.context.get('notepad_content')
+            source_states = state.context.get('source_states')
+
+            # Create a no-op print function for non-terminal contexts
+            # (the on_tool_activity callback handles UX for Slack/Discord)
+            def _noop_print(*args, **kwargs):
+                pass
+
+            result = await run_agentic_turn(
+                system_prompt=system_prompt,
+                messages=messages,
+                workspace=agent.workspace,
+                mcp_tools=mcp_tools,
+                databases=databases,
+                print_text_fn=_noop_print,
+                notepad_content=notepad_content,
+                source_states=source_states,
+                on_tool_activity=on_tool_activity,
+            )
+
+            output = result.response_text
+
+            # Log the turn for debugging (separate from terminal logs)
+            try:
+                from promaia.utils.env_writer import get_data_dir
+                platform_name = state.platform or "messaging"
+                log_dir = get_data_dir() / "context_logs" / f"{platform_name}_turn_logs"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                agent_name = getattr(agent, 'name', state.agent_id)
+                log_path = log_dir / f"{ts}_{agent_name}.md"
+                log_content = (
+                    f"# {platform_name} turn — {agent_name}\n\n"
+                    f"## System Prompt\n\n{system_prompt[:2000]}...\n\n"
+                    f"## Messages ({len(messages)})\n\n"
                 )
-                # Auto-add calendar to mcp_tools if agent has a dedicated calendar
-                if getattr(agent, 'calendar_id', None):
-                    agent_mcp = getattr(agent, 'mcp_tools', None) or []
-                    if "calendar" not in agent_mcp:
-                        agent.mcp_tools = list(agent_mcp) + ["calendar"]
+                for msg in messages[-5:]:
+                    content = msg.get('content', '')
+                    if isinstance(content, str):
+                        log_content += f"**{msg['role']}**: {content[:200]}\n\n"
+                log_content += f"## Response\n\n{output[:1000]}\n"
+                log_path.write_text(log_content)
+            except Exception:
+                pass
 
-                has_platform = platform is not None
-                tools = build_tool_definitions(agent, has_platform=has_platform)
-                executor = ToolExecutor(
-                    agent=agent,
-                    workspace=agent.workspace,
-                    platform=platform,
-                    channel_context=channel_context,
+            # Persist notepad and source states for next turn
+            if result.notepad_content is not None:
+                state.context['notepad_content'] = result.notepad_content
+            if result.source_states is not None:
+                state.context['source_states'] = result.source_states
+
+            # Store tool_use/tool_result blocks for conversation history
+            if hasattr(result, 'history_messages') and result.history_messages:
+                state.messages.extend(result.history_messages)
+                state._skip_response_append = True
+            if result.tool_calls_made:
+                logger.info(
+                    f"Agentic turn: {result.iterations_used} iterations, "
+                    f"{len(result.tool_calls_made)} tool calls, "
+                    f"{result.input_tokens}+{result.output_tokens} tokens"
                 )
-
-                # Planning: decompose complex requests before the agentic loop
-                tool_names = [t["name"] for t in tools]
-                plan = await _generate_plan(user_message, agent, tool_names)
-
-                # Emit plan to UX callback so tag_to_chat can display it
-                if plan and on_tool_activity:
-                    try:
-                        await on_tool_activity(
-                            tool_name="__plan__",
-                            tool_input={"steps": plan},
-                            completed=True,
-                            summary=None,
-                        )
-                    except Exception:
-                        pass
-
-                # Proactive context trimming before agentic turn
-                from promaia.agents.context_trimmer import trim_context_to_fit
-                system_prompt, messages = await trim_context_to_fit(
-                    system_prompt, messages, tools=tools
-                )
-
-                result = await agentic_turn(
-                    system_prompt=system_prompt,
-                    messages=messages,
-                    tools=tools,
-                    tool_executor=executor,
-                    max_iterations=agent.max_iterations or 40,
-                    on_tool_activity=on_tool_activity,
-                    plan=plan,
-                )
-                output = result.response_text
-                # Store tool_use/tool_result blocks for conversation history
-                if hasattr(result, 'history_messages') and result.history_messages:
-                    state.messages.extend(result.history_messages)
-                    # Don't append plain text below — history_messages includes it
-                    state._skip_response_append = True
-                if result.tool_calls_made:
-                    logger.info(
-                        f"Agentic turn: {result.iterations_used} iterations, "
-                        f"{len(result.tool_calls_made)} tool calls, "
-                        f"{result.input_tokens}+{result.output_tokens} tokens"
-                    )
-            else:
-                # Fallback: single LLM call (no tool use)
-                from promaia.utils.ai import get_anthropic_client
-                client, prefix = get_anthropic_client()
-                if not client:
-                    logger.error("No API key configured (Anthropic or OpenRouter)")
-                    return "I'm sorry, I couldn't generate a response (missing API key)."
-
-                response = await asyncio.to_thread(
-                    client.messages.create,
-                    model=f"{prefix}claude-sonnet-4-6",
-                    max_tokens=2048,
-                    system=system_prompt,
-                    messages=messages,
-                )
-                output = response.content[0].text if response.content else ""
 
             if not output:
                 logger.warning(f"Agent {state.agent_id} returned empty response")
                 return "I'm sorry, I couldn't generate a response."
+
+            # Handle end_conversation signal — mark DM conversations done with summary
+            if result.signal and result.signal.get("type") == "end_conversation":
+                summary = result.signal.get("summary")
+                is_dm = state.context.get("is_dm", False)
+                if is_dm and summary:
+                    await self.mark_conversation_done(
+                        state.conversation_id,
+                        summary=summary,
+                        reason=result.signal.get("reason", "agent_ended"),
+                    )
+                else:
+                    await self.end_conversation(
+                        state.conversation_id,
+                        reason="agent_ended",
+                    )
 
             logger.info(f"Agent {state.agent_id} generated response ({len(output)} chars)")
             return output
 
         except Exception as e:
             logger.error(f"Error generating response for {state.agent_id}: {e}", exc_info=True)
-            return "I'm sorry, I encountered an error. Please try again."
+            return f"I'm sorry, I encountered an error ({type(e).__name__}: {e}). Please try again."
 
     def _build_conversation_system_prompt(self, agent, state: ConversationState) -> str:
-        """Build the system prompt for conversation mode.
+        """Build the base system prompt for conversation mode.
 
-        Loads the agent's personality prompt and the conversation_mode.md
-        template from the prompts directory, filling in dynamic variables.
+        Uses the same create_system_prompt() as terminal chat for the base
+        (prompt.md + database preview), then adds platform-specific context.
+        The conversation_mode.md template is added later by run_agentic_turn()
+        via build_agentic_system_prompt().
         """
-        from promaia.utils.env_writer import get_prompts_dir
+        from promaia.ai.prompts import create_system_prompt
 
-        # ── Agent personality ──────────────────────────────────────────
+        # Build the same base prompt as terminal chat
+        # (prompt.md + database preview + context data)
+        base_prompt = create_system_prompt(
+            multi_source_data={},  # No pre-loaded context — agentic loop handles this
+            mcp_tools_info=None,
+            include_query_tools=False,  # agentic loop has its own tools
+            workspace=agent.workspace,
+        )
+
+        # Add agent personality if it has one
         prompt_value = agent.prompt_file or ""
-
-        # Check if it's a file path
         looks_like_path = (
             isinstance(prompt_value, str)
             and "\n" not in prompt_value
@@ -703,130 +758,85 @@ class ConversationManager:
             except OSError:
                 pass
 
-        # ── Date/time ──────────────────────────────────────────────────
-        try:
-            import zoneinfo
-            local_tz = zoneinfo.ZoneInfo("America/Los_Angeles")
-        except Exception:
-            local_tz = timezone.utc
-        now = datetime.now(local_tz)
+        if prompt_value:
+            base_prompt = prompt_value + "\n\n" + base_prompt
 
-        # ── Header ─────────────────────────────────────────────────────
-        parts = [
-            prompt_value,
-            "",
-            f"Current date: {now.strftime('%A, %B %d, %Y %I:%M %p %Z')}",
-            "",
-        ]
-
-        # ── Conversation mode template ─────────────────────────────────
-        agentic_enabled = getattr(agent, 'agentic_loop_enabled', True)
-
-        if agentic_enabled:
-            conv_prompt_path = get_prompts_dir() / "conversation_mode.md"
-            if conv_prompt_path.is_file():
-                template = conv_prompt_path.read_text(encoding="utf-8")
-
-                # Fill in template variables
-                queryable = agent.get_queryable_sources()
-                sources_list = ", ".join(queryable) if queryable else "(none configured)"
-
-                # Build conditional tool sections
-                mcp_tools = getattr(agent, 'mcp_tools', []) or []
-                tool_sections_parts = []
-
-                if "gmail" in mcp_tools:
-                    tool_sections_parts.append(
-                        "## Gmail Tools (Write)\n\n"
-                        "- **send_email**: Send email (to, subject, body)\n"
-                        "- **create_email_draft**: Create draft (not sent)\n"
-                        "- **reply_to_email**: Reply to a thread (thread_id, message_id, body)\n"
-                        "  Always search for the thread first to get the thread_id and message_id."
-                    )
-                if "calendar" in mcp_tools:
-                    cal_section = (
-                        "## Calendar Tools (Write)\n\n"
-                        "- **create_calendar_event**: Create event on the **user's** calendar (summary, start_time, end_time)\n"
-                        "- **update_calendar_event**: Update event (event_id + fields to change)\n"
-                        "- **delete_calendar_event**: Delete event (event_id)\n"
-                        "  Always check for conflicts with query_sql before creating events."
-                    )
-                    if getattr(agent, 'calendar_id', None):
-                        cal_section += (
-                            "\n\n## Self-Scheduling\n\n"
-                            "- **schedule_self**: Schedule a future task for **yourself**. Creates an event "
-                            "on your own dedicated calendar that will trigger you to run at the specified time.\n"
-                            "  - Use for: reminders, follow-ups, multi-step workflows spanning hours/days\n"
-                            "  - Params: summary (required), start_time (required), end_time (optional), "
-                            "description (optional — include context for your future self)\n\n"
-                            "### Which calendar tool to use\n\n"
-                            "- User says \"put X on my calendar\" / \"schedule a meeting\" → **create_calendar_event** (user's calendar)\n"
-                            "- You need to follow up later / check on something tomorrow / continue a workflow → **schedule_self** (your calendar)"
-                        )
-                    tool_sections_parts.append(cal_section)
-                if "notion" in mcp_tools:
-                    tool_sections_parts.append(
-                        "## Notion Tools (Read & Write)\n\n"
-                        "- **notion_search**: Search Notion for pages/databases by title\n"
-                        "- **notion_create_page**: Create a new page in a Notion database\n"
-                        "- **notion_update_page**: Update an existing page's properties or content\n"
-                        "- **notion_query_database**: Query a Notion database with filters"
-                    )
-
-                tool_sections = "\n\n".join(tool_sections_parts)
-
-                # Notion-specific guidance
-                notion_guidance = ""
-                if "notion" in mcp_tools:
-                    notion_guidance = (
-                        "## Built-in query tools vs Notion tools\n\n"
-                        "- **Prefer built-in query tools** (query_sql, query_vector, query_source) "
-                        "for loading large chunks of context from synced data. They are cheaper, "
-                        "faster, and more effective for anything that has had time to be synced.\n"
-                        "- **Use Notion tools** for transient, specific pages — especially ones "
-                        "you are actively creating or editing in this session, or anything that "
-                        "may have been updated very recently and not yet synced.\n"
-                        "- After creating a Notion page, use the URL from the create response "
-                        "to share links — do not construct Notion URLs manually."
-                    )
-
-                # Apply template substitutions
-                agent_name = getattr(agent, 'name', None) or getattr(agent, 'agent_id', 'Agent')
-                filled = template.replace("{agent_name}", agent_name)
-                filled = filled.replace("{platform}", state.platform or "chat")
-                filled = filled.replace("{sources}", sources_list)
-                filled = filled.replace("{tool_sections}", tool_sections)
-                filled = filled.replace("{notion_guidance}", notion_guidance)
-
-                parts.append(filled)
-            else:
-                # Fallback: minimal instructions if template file is missing
-                logger.warning(f"conversation_mode.md not found at {conv_prompt_path}")
-                parts.extend([
-                    "# Conversation Mode",
-                    "",
-                    f"You are in a {state.platform} conversation.",
-                    "Keep responses concise, warm, and natural.",
-                ])
-        else:
-            parts.extend([
-                "# Conversation Mode",
-                "",
-                f"You are in a {state.platform} conversation.",
-                "Keep responses concise, warm, and natural — like messaging a colleague.",
-                "Don't repeat information already covered. Build on what's been said.",
-            ])
-
-        # Inject DM-specific context
+        # Add platform-specific context
         ctx = state.context or {}
+        platform = state.platform or "chat"
+
+        base_prompt += f"\n\n## Conversation Location\n"
         if ctx.get("is_dm"):
             user_name = ctx.get("user_name", "the user")
-            parts.append("")
-            parts.append(f"## Conversation Location")
-            parts.append(f"You are in a direct message with {user_name}. This is a private 1-on-1 conversation.")
-            parts.append("Respond to every message — in DMs there is no need to decide whether to reply.")
+            base_prompt += (
+                f"You are running in {platform}. "
+                f"This is a direct message with {user_name} — a private 1-on-1 conversation. "
+                f"Respond to every message."
+            )
 
-        return "\n".join(parts)
+            # Inject recent completed conversation summaries for DM context
+            try:
+                past_summaries = self._load_recent_dm_summaries(
+                    conversation_partner=user_name,
+                    platform=platform,
+                    days=2,
+                )
+                if past_summaries:
+                    base_prompt += f"\n\n## Recent Conversations with {user_name}\n"
+                    for s in past_summaries:
+                        date_str = (s.get('completed_at') or s.get('created_at') or '')[:10]
+                        summary = s.get('summary', 'No summary')
+                        base_prompt += f"- {date_str}: {summary}\n"
+            except Exception as e:
+                logger.debug(f"Could not load DM summaries: {e}")
+        elif ctx.get("channel_name"):
+            channel_name = ctx["channel_name"]
+            base_prompt += (
+                f"You are running in {platform}, in channel #{channel_name}. "
+                f"You were @mentioned — respond helpfully and concisely."
+            )
+        else:
+            base_prompt += f"You are running in {platform}."
+
+        # Inject recent channel history if provided
+        recent_messages = ctx.get("recent_messages")
+        if recent_messages:
+            base_prompt += (
+                f"\n\n## Recent Channel History\n\n"
+                f"Here's what was said recently in this channel. You are here 📍\n\n"
+                f"{recent_messages}"
+            )
+
+        return base_prompt
+
+    def _load_recent_dm_summaries(
+        self,
+        conversation_partner: str,
+        platform: str = "slack",
+        days: int = 7,
+    ) -> List[Dict[str, Any]]:
+        """Load recent completed DM conversation summaries with a specific user.
+
+        Returns list of dicts with 'summary', 'completed_at', 'created_at' keys.
+        """
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT summary, completed_at, created_at
+                FROM conversations
+                WHERE conversation_partner = ?
+                AND platform = ?
+                AND is_active = 0
+                AND summary IS NOT NULL
+                AND created_at > ?
+                ORDER BY created_at DESC
+                LIMIT 10
+            """, (conversation_partner, platform, cutoff))
+            return [dict(row) for row in cursor.fetchall()]
 
     async def _load_conversation_context(self, agent) -> str:
         """Load preloaded context for conversation (lighter than full executor)."""
@@ -1003,6 +1013,9 @@ class ConversationManager:
             state.status = 'completed'
             state.completed_at = datetime.now(timezone.utc).isoformat()
             state.completion_reason = reason
+            # Clear notepad and source states so they don't leak into future conversations
+            state.context.pop('notepad_content', None)
+            state.context.pop('source_states', None)
             await self._save_state(state)
 
             logger.info(
@@ -1017,6 +1030,53 @@ class ConversationManager:
                 reason=reason
             )
     
+    async def mark_conversation_done(
+        self,
+        conversation_id: str,
+        summary: str,
+        reason: str = "agent_ended"
+    ) -> None:
+        """
+        Mark a conversation as done (is_active=False) with a summary.
+
+        Used for DM conversations where the agent signals completion.
+        Saves the conversation to KB for future recall via query_source.
+
+        Args:
+            conversation_id: Conversation identifier
+            summary: Agent-provided summary of the conversation
+            reason: Reason for ending
+        """
+        state = await self._load_state(conversation_id)
+        if not state:
+            return
+
+        state.is_active = False
+        state.status = 'completed'
+        state.completed_at = datetime.now(timezone.utc).isoformat()
+        state.completion_reason = reason
+        state.summary = summary
+        # Clear notepad and source states — fresh start for next conversation
+        state.context.pop('notepad_content', None)
+        state.context.pop('source_states', None)
+        await self._save_state(state)
+
+        logger.info(
+            f"Conversation done: {conversation_id[:30]}... | "
+            f"summary={summary[:60]} | turns={state.turn_count}"
+        )
+
+        # Save to KB for future recall
+        from promaia.messaging.slack_bot import _save_dm_to_history
+        await _save_dm_to_history(self, state, summary=summary)
+
+        # Fire completion callbacks
+        await self._fire_end_callbacks(
+            conversation_id=conversation_id,
+            transcript=state.get_transcript(),
+            reason=reason
+        )
+
     async def handle_batched_messages(
         self,
         conversation_id: str,
@@ -1048,10 +1108,15 @@ class ConversationManager:
             logger.warning(f"Conversation {conversation_id} not found for batched messages")
             return "Sorry, I couldn't find that conversation."
 
-        # If thread context provided, sync it into conversation state so
-        # the AI sees the full thread history (not just what's in the DB).
-        if thread_context:
-            state.messages = self._sync_thread_context(state.messages, thread_context)
+        # Seed thread context on first turn only — preserve existing messages
+        # (which include tool calls, results, and structured content).
+        # Previous approach (_sync_thread_context) replaced all messages with
+        # flat text from the API, wiping tool call history.
+        if thread_context and not state.messages:
+            state.messages = [
+                {'role': 'user', 'content': f"[Thread history]\n{thread_context}"},
+                {'role': 'assistant', 'content': "Got it, I have the thread context."},
+            ]
 
         # Update state
         now = datetime.now(timezone.utc).isoformat()
@@ -1073,7 +1138,7 @@ class ConversationManager:
             )
         except Exception as e:
             logger.error(f"Error generating batched response: {e}", exc_info=True)
-            response = "I'm sorry, I encountered an error generating a response. Please try again."
+            response = f"I'm sorry, I encountered an error generating a response ({type(e).__name__}: {e}). Please try again."
 
         # Save response to conversation (skip if agentic turn already stored history_messages)
         if not getattr(state, '_skip_response_append', False):
@@ -1193,10 +1258,11 @@ class ConversationManager:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
-            # First, try exact user match
+            # First, try exact user match (is_active=1 means conversation is ongoing)
             cursor.execute("""
                 SELECT * FROM conversations
                 WHERE platform = ? AND channel_id = ? AND user_id = ? AND status = 'active'
+                AND is_active = 1
                 ORDER BY created_at DESC
                 LIMIT 1
             """, (platform, channel_id, user_id))
@@ -1253,8 +1319,9 @@ class ConversationManager:
                 (id, agent_id, platform, channel_id, user_id, thread_id, status,
                  last_message_at, turn_count, max_turns, messages, context,
                  timeout_seconds, malicious_attempt_count, created_at, completed_at,
-                 completion_reason, orchestrator_task_id, cached_context, conversation_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 completion_reason, orchestrator_task_id, cached_context, conversation_type,
+                 is_active, summary, conversation_partner)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 state.conversation_id,
                 state.agent_id,
@@ -1276,6 +1343,9 @@ class ConversationManager:
                 state.orchestrator_task_id,
                 state.cached_context,
                 state.conversation_type,
+                1 if state.is_active else 0,
+                state.summary,
+                state.conversation_partner,
             ))
 
             conn.commit()
@@ -1320,4 +1390,7 @@ class ConversationManager:
             orchestrator_task_id=row.get('orchestrator_task_id'),
             cached_context=row.get('cached_context'),
             conversation_type=row.get('conversation_type', 'direct'),
+            is_active=bool(row.get('is_active', 1)),
+            summary=row.get('summary'),
+            conversation_partner=row.get('conversation_partner'),
         )

@@ -65,8 +65,8 @@ class DatabaseConfig:
             # For Slack, use data/md/slack/{workspace}/{nickname} structure
             default_md_dir = f"data/md/slack/{self.workspace}/{self.nickname}"
         else:
-            # For other sources (Notion), use data/md/notion/{workspace}/
-            default_md_dir = f"data/md/notion/{self.workspace}"
+            # For other sources (Notion), use data/md/notion/{workspace}/{nickname}/ per database
+            default_md_dir = f"data/md/notion/{self.workspace}/{self.nickname}"
 
         self.markdown_directory = config_data.get("markdown_directory", default_md_dir)
         
@@ -275,7 +275,7 @@ class DatabaseManager:
                 db_section = databases[db_key]
 
         if db_section is None:
-            logger.warning(f"save_database_field: database '{db_config.name}' not found on disk, falling back to full save")
+            logger.debug(f"save_database_field: database '{db_config.name}' not found on disk, falling back to full save")
             self.save_config()
             return
 

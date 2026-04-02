@@ -7,7 +7,6 @@ with MCP servers to extend Promaia's capabilities with external tools and data s
 
 from .client import McpClient
 from .tools import McpToolRegistry
-from .protocol import McpProtocolClient
 from .execution import McpToolExecutor
 
-__all__ = ['McpClient', 'McpToolRegistry', 'McpProtocolClient', 'McpToolExecutor'] 
+__all__ = ['McpClient', 'McpToolRegistry', 'McpToolExecutor'] 

@@ -51,14 +51,14 @@ async def configure_credential(
         if valid:
             c.print(f"  [green]OK[/green] {msg}")
             reconfigure = Prompt.ask(
-                "  Reconfigure?", choices=["y", "n"], default="n"
+                "  Re-authenticate?", choices=["y", "n"], default="n"
             ).strip().lower()
             if reconfigure not in ("y", "yes"):
                 return True
             c.print()
         else:
             c.print(f"  [yellow]Warning:[/yellow] {msg}")
-            c.print("  [dim]Existing credential invalid — reconfiguring...[/dim]\n")
+            c.print("  [dim]Existing credential invalid — re-authenticating...[/dim]\n")
 
     # Determine auth mode
     modes = integration.auth_modes
@@ -160,8 +160,15 @@ async def _configure_oauth(
         if actual_email:
             account = actual_email
 
-    # Let integration store tokens — keyed by account if provided
-    store_kwargs = dict(tokens)
+    # Let integration store tokens — keyed by account if provided.
+    # Remove workspace/workspace_name from OAuth response so they don't
+    # accidentally override the caller's intended storage path (e.g.
+    # Notion's token response includes workspace_name which would cause
+    # store_credential to write to the wrong path).
+    store_kwargs = {
+        k: v for k, v in tokens.items()
+        if k not in ("workspace", "workspace_name")
+    }
     if account:
         store_kwargs["account"] = account
     elif workspace:
@@ -268,8 +275,12 @@ async def _configure_user_oauth(
         if actual_email:
             account = actual_email
 
-    # Store tokens with user credentials for direct refresh
-    store_kwargs = dict(tokens)
+    # Store tokens with user credentials for direct refresh.
+    # Strip workspace/workspace_name from OAuth response (see _configure_oauth).
+    store_kwargs = {
+        k: v for k, v in tokens.items()
+        if k not in ("workspace", "workspace_name")
+    }
     store_kwargs["mode"] = "user_oauth"
     store_kwargs["client_id"] = client_id
     store_kwargs["client_secret"] = client_secret

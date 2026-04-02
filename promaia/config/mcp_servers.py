@@ -19,12 +19,14 @@ class McpServerConfig:
     """Configuration for an MCP server."""
     name: str
     description: str
-    command: List[str]  # Command to start the server
-    args: List[str] = None  # Additional arguments
+    command: List[str]  # Command to start the server (stdio only)
+    args: List[str] = None  # Additional arguments (stdio only)
     env: Dict[str, str] = None  # Environment variables
-    working_dir: str = None  # Working directory
+    working_dir: str = None  # Working directory (stdio only)
     timeout: int = 30  # Connection timeout in seconds
     enabled: bool = True
+    transport: str = "stdio"  # "stdio" or "streamable_http"
+    url: Optional[str] = None  # URL for streamable_http transport
 
     def __post_init__(self):
         """Initialize optional fields."""
@@ -101,7 +103,9 @@ class McpServerManager:
                     env=server_data.get('env', {}),
                     working_dir=server_data.get('working_dir'),
                     timeout=server_data.get('timeout', 30),
-                    enabled=server_data.get('enabled', True)
+                    enabled=server_data.get('enabled', True),
+                    transport=server_data.get('transport', 'stdio'),
+                    url=server_data.get('url'),
                 )
             
             logger.info(f"Loaded {len(self.servers)} MCP server configurations")
@@ -184,23 +188,72 @@ class McpServerManager:
             List of validation errors (empty if valid)
         """
         errors = []
-        
+
         if not config.name:
             errors.append("Server name is required")
-        
-        if not config.command:
-            errors.append("Server command is required")
-        
-        # Check if command exists
-        import shutil
-        if config.command and not shutil.which(config.command[0]):
-            errors.append(f"Command '{config.command[0]}' not found in PATH")
-        
-        # Validate working directory if specified
-        if config.working_dir and not os.path.isdir(config.working_dir):
-            errors.append(f"Working directory '{config.working_dir}' does not exist")
-        
+
+        if config.transport not in ("stdio", "streamable_http"):
+            errors.append(f"Unknown transport '{config.transport}' (expected 'stdio' or 'streamable_http')")
+
+        if config.transport == "streamable_http":
+            if not config.url:
+                errors.append("URL is required for streamable_http transport")
+        else:
+            if not config.command:
+                errors.append("Server command is required for stdio transport")
+
+            import shutil
+            if config.command and not shutil.which(config.command[0]):
+                errors.append(f"Command '{config.command[0]}' not found in PATH")
+
+            if config.working_dir and not os.path.isdir(config.working_dir):
+                errors.append(f"Working directory '{config.working_dir}' does not exist")
+
         return errors
+
+    def add_server(self, name: str, config_dict: dict) -> McpServerConfig:
+        """Add a new server from a config dict and persist to disk."""
+        server = McpServerConfig(
+            name=name,
+            description=config_dict.get('description', ''),
+            command=config_dict.get('command', []),
+            args=config_dict.get('args', []),
+            env=config_dict.get('env', {}),
+            working_dir=config_dict.get('working_dir'),
+            timeout=config_dict.get('timeout', 30),
+            enabled=config_dict.get('enabled', True),
+            transport=config_dict.get('transport', 'stdio'),
+            url=config_dict.get('url'),
+        )
+        self.servers[name] = server
+        self._save()
+        return server
+
+    def _save(self) -> None:
+        """Write current server configs back to disk."""
+        data = {"servers": {}}
+        for name, cfg in self.servers.items():
+            entry = {
+                "description": cfg.description,
+                "enabled": cfg.enabled,
+                "transport": cfg.transport,
+            }
+            if cfg.transport == "streamable_http":
+                entry["url"] = cfg.url
+            else:
+                entry["command"] = cfg.command
+                entry["args"] = cfg.args
+                if cfg.working_dir:
+                    entry["working_dir"] = cfg.working_dir
+            if cfg.env:
+                entry["env"] = cfg.env
+            if cfg.timeout != 30:
+                entry["timeout"] = cfg.timeout
+            data["servers"][name] = entry
+
+        with open(self.config_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        logger.info(f"Saved {len(self.servers)} MCP server configs to {self.config_path}")
 
 # Global MCP server manager instance
 _mcp_manager = None

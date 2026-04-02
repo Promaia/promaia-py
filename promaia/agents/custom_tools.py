@@ -305,7 +305,7 @@ Returns semantically similar pages from Promaia databases.""",
     return query_vector_impl
 
 
-def create_conversation_end_tool(conversation_manager, conversation_id: str):
+def create_conversation_end_tool(conversation_manager, conversation_id: str, is_dm: bool = False):
     """
     Create a tool that allows the AI to signal conversation end.
 
@@ -315,6 +315,7 @@ def create_conversation_end_tool(conversation_manager, conversation_id: str):
     Args:
         conversation_manager: Reference to the ConversationManager instance
         conversation_id: The conversation ID to end
+        is_dm: Whether this is a DM conversation (triggers summary + KB save)
 
     Returns:
         Tool function for ending conversations
@@ -330,23 +331,31 @@ Call this tool when the user clearly indicates they want to end the conversation
 - Natural end of conversation reached
 
 Only call this when you are confident the user intends to end the conversation.
-
-Example: After responding "Goodbye! It was great chatting with you!", call this tool
-to formally end the conversation.""",
+You MUST provide a summary of what was discussed — this is saved for future reference.""",
         input_schema={
             "reason": str,
+            "summary": str,
         }
     )
     async def end_conversation_impl(args: Dict[str, Any]) -> Dict[str, Any]:
         """End the current conversation gracefully."""
         reason = args.get('reason', 'ai_detected_goodbye')
+        summary = args.get('summary', '')
 
         try:
-            # Call conversation manager to end the conversation
-            await conversation_manager.end_conversation(
-                conversation_id,
-                reason=reason
-            )
+            if is_dm and summary:
+                # DM conversations: mark done with summary and save to KB
+                await conversation_manager.mark_conversation_done(
+                    conversation_id,
+                    summary=summary,
+                    reason=reason
+                )
+            else:
+                # Channel threads: end normally
+                await conversation_manager.end_conversation(
+                    conversation_id,
+                    reason=reason
+                )
 
             logger.info(f"🏁 AI called end_conversation tool for {conversation_id}: {reason}")
 

@@ -127,6 +127,107 @@ def select_agent(requested_agent: str | None, available_agents: list, default_ag
     return default_agent
 
 
+async def _save_dm_to_history(conv_manager, state, summary: str = None):
+    """Save a DM conversation to the unified content database for recall.
+
+    Converts the ConversationState messages into markdown and stores
+    in conversation_content table (same as terminal chat history).
+    Skips if incognito or empty.
+
+    Args:
+        conv_manager: ConversationManager instance
+        state: ConversationState to save
+        summary: Optional agent-provided summary (used as title if given)
+    """
+    if not state or not state.messages:
+        return
+    if state.context and state.context.get("incognito"):
+        logger.info(f"Skipping save for incognito conversation {state.conversation_id}")
+        return
+
+    try:
+        from promaia.storage.hybrid_storage import get_hybrid_registry
+
+        # Build markdown from messages
+        user_name = (state.context or {}).get("user_name", "user")
+        lines = [
+            f"# DM: {state.platform} with {user_name}",
+            f"Date: {(state.created_at or '')[:10]}",
+            f"Platform: {state.platform}",
+        ]
+        if summary:
+            lines.append(f"Summary: {summary}")
+        lines.append("")
+
+        for msg in state.messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                # Extract text from structured content blocks
+                text_parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                content = "\n".join(text_parts)
+            if isinstance(content, str) and content.strip():
+                speaker = user_name if role == "user" else "Maia"
+                lines.append(f"**{speaker}**: {content}")
+
+        markdown = "\n\n".join(lines)
+
+        # Use summary as title if provided, otherwise fall back to first message
+        if summary:
+            title = f"DM with {user_name}: {summary[:80]}"
+        else:
+            first_user_msg = next(
+                (m["content"] for m in state.messages
+                 if m.get("role") == "user" and isinstance(m.get("content"), str) and m["content"].strip()),
+                "DM conversation",
+            )
+            title = f"DM with {user_name}: {first_user_msg[:60]}"
+
+        # Get workspace from agent config
+        agent = conv_manager._get_cached_agent(state.agent_id)
+        workspace = agent.workspace if agent else "default"
+
+        # Save to unified storage
+        registry = get_hybrid_registry()
+
+        now = datetime.now(timezone.utc).isoformat()
+        # Write markdown file
+        from promaia.utils.env_writer import get_data_dir
+        md_dir = get_data_dir() / "data" / "md" / "conversation" / workspace / "convos"
+        md_dir.mkdir(parents=True, exist_ok=True)
+        md_path = md_dir / f"{state.conversation_id}.md"
+        md_path.write_text(markdown, encoding="utf-8")
+
+        content_data = {
+            "page_id": state.conversation_id,
+            "title": title,
+            "content": markdown,
+            "workspace": workspace,
+            "database_id": "convos",
+            "database_name": "convos",
+            "file_path": str(md_path),
+            "synced_time": now,
+            "created_time": state.created_at or now,
+            "last_edited_time": state.last_message_at or now,
+        }
+        metadata = {
+            "thread_id": state.conversation_id,
+            "message_count": len(state.messages),
+            "context_type": "dm",
+            "data_source": "conversation",
+            "content_type": "conversation",
+            "conversation_partner": user_name,
+            "platform": state.platform,
+            "summary": summary or "",
+        }
+
+        registry.add_conversation_content(content_data, metadata)
+        logger.info(f"Saved DM conversation {state.conversation_id} ({len(state.messages)} messages)")
+
+    except Exception as e:
+        logger.error(f"Failed to save DM conversation: {e}", exc_info=True)
+
+
 def create_slack_bot():
     """
     Create and configure Slack bot with conversation routing.
@@ -175,7 +276,7 @@ def create_slack_bot():
     # Load available agents
     from promaia.agents.agent_config import load_agents
     agents = load_agents()
-    available_agent_names = [a.agent_id or a.name for a in agents if a.agent_id or a.name]
+    available_agent_names = [a.name or a.agent_id for a in agents if a.name or a.agent_id]
 
     if not available_agent_names:
         logger.warning("No agents configured! Bot will have limited functionality.")
@@ -312,10 +413,25 @@ def create_slack_bot():
 
             logger.info(f"Message from {user_id} in {channel_id}: {text[:50]}...")
 
-            # 0. Handle /new command in DMs — reset conversation
+            # 0. Handle /new command in DMs — save + reset conversation
             if is_1on1_dm and text.strip().lower() in ('/new', '/reset', '/clear'):
+                # Save the current conversation before resetting
+                try:
+                    conv = await conv_manager.get_active_conversation(
+                        platform='slack', channel_id=channel_id, user_id=user_id
+                    )
+                    if conv and conv.messages:
+                        was_incognito = (conv.context or {}).get("incognito", False)
+                        await _save_dm_to_history(conv_manager, conv)
+                        if was_incognito:
+                            await say(text="🕶️ Incognito conversation ended — nothing was saved.\n💬 Starting fresh!")
+                        else:
+                            await say(text="💬 Conversation saved. Starting fresh!")
+                    else:
+                        await say(text="Starting fresh! What can I help with?")
+                except Exception:
+                    await say(text="Starting fresh! What can I help with?")
                 active_loops.pop(channel_id, None)
-                await say(text="Starting fresh! What can I help with?")
                 return
 
             # 1. Active tag-to-chat loop? Feed message directly.
@@ -349,31 +465,16 @@ def create_slack_bot():
                     logger.info(f"Woke dormant thread {thread_ts[:12]} with new message")
                     return
 
-            # 3. DMs: always use tag-to-chat for tool animation display
-            # TODO: Store DM messages to local SQLite for queryable history
-            #       (like synced channels but at message-time instead of daemon)
+            # 3. DMs: tag-to-chat with conversation persistence (no timeout)
             if is_1on1_dm and default_agent:
                 username = await _get_username(client, user_id)
 
-                # Check for existing DM conversation to resume
+                # Check for existing active DM conversation (is_active=1)
                 conversation = await conv_manager.get_active_conversation(
                     platform='slack',
                     channel_id=channel_id,
                     user_id=user_id
                 )
-
-                # 30-minute timeout: if last message was >30min ago, start fresh
-                DM_TIMEOUT_SECONDS = 1800
-                if conversation and conversation.last_message_at:
-                    try:
-                        from datetime import datetime as _dt
-                        last = _dt.fromisoformat(conversation.last_message_at.replace('Z', '+00:00'))
-                        gap = (datetime.now(timezone.utc) - last).total_seconds()
-                        if gap > DM_TIMEOUT_SECONDS:
-                            logger.info(f"DM conversation timed out ({int(gap)}s), starting fresh")
-                            conversation = None  # will create new below
-                    except Exception:
-                        pass
 
                 conv_id = conversation.conversation_id if conversation else f"slack_dm_{channel_id}_{int(datetime.now(timezone.utc).timestamp())}"
                 agent_id = conversation.agent_id if conversation else default_agent
@@ -393,10 +494,11 @@ def create_slack_bot():
                         last_message_at=now,
                         messages=[],
                         context={"is_dm": True, "user_name": username},
-                        timeout_seconds=DM_TIMEOUT_SECONDS,
                         max_turns=None,
                         created_at=now,
                         conversation_type='tag_to_chat',
+                        is_active=True,
+                        conversation_partner=username,
                     )
                     await conv_manager._save_state(dm_conversation)
 
@@ -554,6 +656,68 @@ def create_slack_bot():
             now = datetime.now(timezone.utc).isoformat()
             conversation_id = f"slack_t2c_{channel_id}_{int(datetime.now(timezone.utc).timestamp())}"
 
+            # Fetch channel context: name + recent messages from synced KB (7 days)
+            mention_context = {}
+            try:
+                channel_info = await client.conversations_info(channel=channel_id)
+                channel_name = channel_info.get("channel", {}).get("name", "")
+                if channel_name:
+                    mention_context["channel_name"] = channel_name
+
+                # Load channel messages from KB instead of live API
+                agent = conv_manager._get_cached_agent(agent_to_use)
+                agent_workspace = agent.workspace if agent else None
+                # Normalize empty string to None for database lookup
+                if not agent_workspace:
+                    agent_workspace = None
+
+                from promaia.config.databases import get_database_config
+                from promaia.storage.files import load_database_pages_with_filters
+
+                slack_db_config = get_database_config("slack", workspace=agent_workspace)
+                if slack_db_config and channel_name:
+                    import asyncio as _asyncio
+                    import json as _json
+                    pages = await _asyncio.to_thread(
+                        load_database_pages_with_filters,
+                        database_config=slack_db_config,
+                        days=2,
+                    )
+                    # Filter to this channel and format
+                    # pages is a list of dicts with 'content', 'metadata', etc.
+                    channel_lines = []
+                    for page in sorted(pages, key=lambda x: x.get('created_time', '')):
+                        page_content = page.get('content', '')
+                        page_meta = page.get('metadata', {})
+                        if isinstance(page_meta, str):
+                            try:
+                                page_meta = _json.loads(page_meta)
+                            except Exception:
+                                page_meta = {}
+                        props = page_meta.get('properties', {}) if isinstance(page_meta, dict) else {}
+                        page_channel = props.get('channel_name', '') if isinstance(props, dict) else ''
+                        if page_channel == channel_name and page_content.strip():
+                            uname = props.get('username', 'unknown') if isinstance(props, dict) else 'unknown'
+                            channel_lines.append(f"{uname}: {page_content.strip()[:500]}")
+                    if channel_lines:
+                        channel_history_text = "\n".join(channel_lines[-100:])
+                        mention_context["recent_messages"] = channel_history_text
+                        # Pre-load as a named source so it shows up in the agent's source shelf
+                        mention_context["source_states"] = {
+                            f"slack_#{channel_name}": {
+                                "content": channel_history_text,
+                                "on": True,
+                                "page_count": len(channel_lines),
+                                "source": "channel_context",
+                            }
+                        }
+                        logger.info(f"Loaded {len(channel_lines)} messages from KB for #{channel_name}")
+            except Exception as e:
+                logger.debug(f"Could not fetch channel context: {e}")
+
+            username = await _get_username(client, user_id)
+            mention_context["user_name"] = username
+
             conversation = ConversationState(
                 conversation_id=conversation_id,
                 agent_id=agent_to_use,
@@ -564,7 +728,7 @@ def create_slack_bot():
                 status='active',
                 last_message_at=now,
                 messages=[],
-                context={},
+                context=mention_context,
                 timeout_seconds=30 * 60,
                 max_turns=None,
                 created_at=now,
@@ -685,6 +849,53 @@ def create_slack_bot():
 
     AGENT_EMOJIS = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
     AGENT_EMOJI_UNICODE = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]
+    @app.command("/incognito")
+    async def handle_incognito_command(ack, command, respond):
+        """Toggle incognito mode for the current DM conversation."""
+        await ack()
+        try:
+            channel_id = command["channel_id"]
+            user_id = command["user_id"]
+
+            # Only works in DMs
+            if not channel_id.startswith("D"):
+                await respond("🕶️ Incognito only works in DMs — channel messages are synced separately.")
+                return
+
+            # Look for active or dormant conversations (dormant = idle but alive)
+            conv = await conv_manager.get_active_conversation(
+                platform="slack", channel_id=channel_id, user_id=user_id
+            )
+            if not conv:
+                # Check dormant conversations too
+                import sqlite3
+                try:
+                    with sqlite3.connect(conv_manager.db_path) as conn:
+                        conn.row_factory = sqlite3.Row
+                        row = conn.execute(
+                            "SELECT * FROM conversations WHERE platform='slack' AND channel_id=? AND user_id=? AND status IN ('active','dormant') ORDER BY created_at DESC LIMIT 1",
+                            (channel_id, user_id)
+                        ).fetchone()
+                        if row:
+                            conv = conv_manager._row_to_state(dict(row))
+                except Exception:
+                    pass
+            if conv:
+                is_incognito = (conv.context or {}).get("incognito", False)
+                if is_incognito:
+                    conv.context["incognito"] = False
+                    await conv_manager._save_state(conv)
+                    await respond("💬 Incognito off — this conversation will be saved.")
+                else:
+                    conv.context["incognito"] = True
+                    await conv_manager._save_state(conv)
+                    await respond("🕶️ Incognito — this conversation won't be saved. Resets next conversation.")
+            else:
+                await respond("No active conversation. Start chatting first, then use /incognito.")
+        except Exception as e:
+            logger.error(f"Error handling /incognito: {e}", exc_info=True)
+            await respond("Sorry, something went wrong.")
+
     # Track pending agent-pick messages: {message_ts: {emoji_name: agent_name}}
     _agent_pick_messages: Dict[str, Dict[str, str]] = {}
 

@@ -15,7 +15,7 @@ from promaia.storage.files import load_database_pages_with_filters
 
 import os
 import traceback
-import google.generativeai as genai
+from google import genai
 import asyncio
 import uuid
 import random
@@ -31,7 +31,7 @@ router = APIRouter()
 # Initialize AI Clients
 from promaia.ai.models import get_current_google_model
 gemini_model_name = get_current_google_model()
-gemini_client_initialized = False
+gemini_genai_client = None
 anthropix_client = None
 openai_client = None
 llama_base_url = None
@@ -39,8 +39,7 @@ llama_base_url = None
 # Initialize Gemini
 if os.getenv("GOOGLE_API_KEY"):
     try:
-        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-        gemini_client_initialized = True
+        gemini_genai_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
         debug_print(f"Gemini API configured. Model to be used: {gemini_model_name}")
     except Exception as e:
         debug_print(f"Error configuring Gemini API: {e}. Gemini features will be unavailable.")
@@ -139,48 +138,33 @@ async def get_initial_message():
 
     initial_message = "Welcome to KOii's journal! How can I help you today?"
 
-    if not gemini_client_initialized:
+    if not gemini_genai_client:
         debug_print("Gemini client not available (check GOOGLE_API_KEY and configuration).")
         return InitialMessageOutput(message=initial_message, conversation_id=conversation_id)  # Return default message as fallback
 
     try:
-        # Initialize the model with the system prompt
-        current_gemini_model = genai.GenerativeModel(
-            model_name=gemini_model_name,
-            system_instruction=system_prompt_str 
-        )
-        
-        # Load the instruction from the markdown file
         instruction = load_initial_message_prompt()
-        
-        # Add a subtle randomness injection to encourage variety
-        # This gives the AI a slightly different "mental state" each time
         conversation_starters = [
-            "with fresh curiosity",
-            "with genuine interest", 
-            "with thoughtful reflection",
-            "with warm engagement",
-            "with open wonder",
-            "with authentic connection",
-            "with mindful presence",
-            "with gentle inquiry"
+            "with fresh curiosity", "with genuine interest",
+            "with thoughtful reflection", "with warm engagement",
+            "with open wonder", "with authentic connection",
+            "with mindful presence", "with gentle inquiry"
         ]
-        
         random_starter = random.choice(conversation_starters)
         enhanced_instruction = f"{instruction} Approach this {random_starter}."
-        
-        debug_print(f"Attempting to generate initial message with Gemini using enhanced prompt. Starter: {random_starter}")
-        
+
+        debug_print(f"Attempting to generate initial message with Gemini. Starter: {random_starter}")
+
+        from google.genai import types as genai_types
         response = await asyncio.to_thread(
-            current_gemini_model.generate_content,
+            gemini_genai_client.models.generate_content,
+            model=gemini_model_name,
             contents=[{'role': 'user', 'parts': [enhanced_instruction]}],
-            generation_config={
-                "temperature": 1.0,  # Higher temperature for more creativity and variety
-                "top_p": 0.95,       # Nucleus sampling for diverse but coherent responses
-                "top_k": 40,         # Limit to top 40 tokens for good variety without randomness
-                "max_output_tokens": 150,  # Keep it concise
-                "candidate_count": 1,      # Generate one response
-            }
+            config=genai_types.GenerateContentConfig(
+                system_instruction=system_prompt_str,
+                temperature=1.0, top_p=0.95, top_k=40,
+                max_output_tokens=150,
+            ),
         )
         
         if response and response.text:
@@ -303,7 +287,7 @@ async def handle_chat_message(chat_input: ChatMessageInput):
 
     # Validate model availability
     model_clients = {
-        "gemini": gemini_client_initialized,
+        "gemini": gemini_genai_client,
         "anthropic": anthropix_client is not None,
         "openai": openai_client is not None,
         "llama": llama_base_url is not None
@@ -385,53 +369,41 @@ async def _handle_gemini(user_message: str, images: List[ImageData], message_his
     if not model_id:
         model_id = gemini_model_name
 
-    current_gemini_model = genai.GenerativeModel(
-        model_name=model_id,
-        system_instruction=system_prompt
-    )
-    
     # Build conversation history for Gemini
     gemini_messages = []
     for msg in message_history:
         role = 'user' if msg.role == 'user' else 'model'
-        
-        # Handle message content (text + images)
         if hasattr(msg, 'get_text_content'):
             text_content = msg.get_text_content()
             msg_images = msg.get_images()
         else:
-            # Backward compatibility
             text_content = str(msg.content)
             msg_images = []
-        
         parts = []
         if text_content:
             parts.append(text_content)
-        
-        # Add images to message parts
         for img in msg_images:
             parts.append(format_image_for_gemini(img.data, img.media_type))
-        
         gemini_messages.append({'role': role, 'parts': parts})
-    
-    # Add current user message with images
+
     current_parts = []
     if user_message:
         current_parts.append(user_message)
-    
     for img in images:
         current_parts.append(format_image_for_gemini(img.data, img.media_type))
-    
     gemini_messages.append({'role': 'user', 'parts': current_parts})
-    
+
     debug_print(f"Calling Gemini with {len(gemini_messages)} messages and {len(images)} images")
-    
+
+    from google.genai import types as genai_types
     response = await asyncio.to_thread(
-        current_gemini_model.generate_content,
+        gemini_genai_client.models.generate_content,
+        model=model_id,
         contents=gemini_messages,
-        generation_config={
-            "temperature": 0.7,
-        }
+        config=genai_types.GenerateContentConfig(
+            system_instruction=system_prompt,
+            temperature=0.7,
+        ),
     )
     
     ai_reply_content = response.text
@@ -700,7 +672,7 @@ async def _handle_llama(user_message: str, images: List[ImageData], message_hist
 async def get_available_models():
     """Get list of available AI models with their capabilities."""
     model_clients = {
-        "gemini": gemini_client_initialized,
+        "gemini": gemini_genai_client,
         "anthropic": anthropix_client is not None,
         "openai": openai_client is not None,
         "llama": llama_base_url is not None
@@ -771,7 +743,7 @@ async def get_available_models():
 
     # Determine default model (prefer Gemini Flash, then first available)
     default_model = None
-    if gemini_client_initialized:
+    if gemini_genai_client:
         default_model = "gemini-3-flash-preview"
     elif available_models:
         default_model = available_models[0]["model_id"]

@@ -3556,178 +3556,179 @@ async def handle_validate_registry(args):
         print(f"Error: {e}")
         raise
 
-async def handle_register_markdown_files(args):
-    """Handle 'maia database register-markdown-files' command."""
+async def handle_register_md(args):
+    """Handle 'maia database register-md' command.
+
+    Rebuilds the SQL registry and vector embeddings from existing local
+    markdown files. No external API calls — purely local filesystem scan.
+    Uses registry.add_content() to route each file to the correct
+    per-database table (matching the sync system's storage pattern).
+    """
     import glob
+    import re
     from datetime import datetime
     from promaia.storage.hybrid_storage import get_hybrid_registry
-    
+    from promaia.utils.env_writer import get_data_dir
+
     try:
         db_manager = get_database_manager()
         registry = get_hybrid_registry()
-        
+
+        # Initialize vector DB for embedding generation (unless skipped)
+        vector_db = None
+        skip_embeddings = getattr(args, 'skip_embeddings', False)
+        if not skip_embeddings:
+            try:
+                from promaia.storage.vector_db import VectorDBManager
+                vector_db = VectorDBManager()
+                print("Vector embeddings: enabled")
+            except Exception as e:
+                print(f"Warning: Could not initialize vector DB ({e}), skipping embeddings")
+                vector_db = None
+
         # Get databases to process
         databases_to_process = []
         for db_name in db_manager.list_databases():
             db_config = db_manager.get_database(db_name)
-            
-            # Filter by workspace and database if specified
             if args.workspace and db_config.workspace != args.workspace:
                 continue
             if args.database and db_config.nickname != args.database:
                 continue
             databases_to_process.append(db_config)
-        
+
         if not databases_to_process:
             print("No databases found matching criteria.")
             return
-        
+
         total_registered = 0
-        
+        total_embedded = 0
+        data_dir = str(get_data_dir())
+
         for db_config in databases_to_process:
             print(f"\nProcessing {db_config.get_qualified_name()}...")
-            
-            # Check if markdown directory exists
+
+            # Resolve markdown directory (relative to data dir)
             md_dir = db_config.markdown_directory
+            if md_dir and not os.path.isabs(md_dir):
+                md_dir = os.path.join(data_dir, md_dir)
             if not md_dir or not os.path.exists(md_dir):
-                print(f"  Warning: Markdown directory not found or not configured: {md_dir}")
+                print(f"  Skipped: directory not found ({db_config.markdown_directory})")
                 continue
-            
-            # Get existing registry entries for this database
-            existing_entries = registry.query_content(
-                workspace=db_config.workspace,
-                database_name=db_config.get_qualified_name()
-            )
-            existing_page_ids = {entry['page_id'] for entry in existing_entries if entry.get('page_id')}
-            
-            # Find markdown files recursively
+
+            # Find markdown files
             md_files = glob.glob(os.path.join(md_dir, "**/*.md"), recursive=True)
             print(f"  Found {len(md_files)} markdown files")
-            print(f"  Found {len(existing_entries)} existing registry entries")
-            
+
             registered_count = 0
-            
+            embedded_count = 0
+            skipped_count = 0
+
             for md_file in md_files:
                 try:
-                    import re  # Import at the beginning to avoid scope issues
                     filename = os.path.basename(md_file)
-                    
-                    # Extract page ID from filename - supports Notion UUIDs, Gmail threads, Discord messages, and conversation threads
-                    page_id_match = re.search(r'(thread_\d{8}_\d{6}|msg_[a-f0-9-]{16,}|[a-f0-9-]{16,}|[a-f0-9]{32})', filename, re.IGNORECASE)
+
+                    # Extract page ID from filename
+                    # Supports: Notion UUIDs, Gmail message IDs, Slack msg_ IDs, conversation threads
+                    page_id_match = re.search(
+                        r'(thread_\d{8}_\d{6}|msg_[\d.]+|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|[a-f0-9]{32})',
+                        filename, re.IGNORECASE
+                    )
                     if not page_id_match:
-                        # Fallback for Notion pages with format: Title last-part-of-uuid.md
-                        page_id_match = re.search(r'([a-f0-9]{32})\.md$', filename)
-                        if not page_id_match:
-                            logger.debug(f"Skipping {filename}: No page ID found in standard formats.")
-                            continue
-                    
-                    page_id = page_id_match.group(1)
-                    
-                    # Skip if already registered
-                    if page_id in existing_page_ids:
+                        skipped_count += 1
                         continue
-                    
+
+                    page_id = page_id_match.group(1)
+
                     # Extract title and date from filename
-                    title_match = re.match(r'(\d{4}-\d{2}-\d{2})\s+(.+?)\s+', filename)
+                    title_match = re.match(r'(\d{4}-\d{2}-\d{2})\s+(.+?)\s+[a-f0-9]', filename)
                     if title_match:
                         date_str = title_match.group(1)
                         title = title_match.group(2).strip()
                         created_time = f"{date_str}T00:00:00Z"
                     else:
                         title = re.sub(r'\s+[a-f0-9-]{16,}\.md$', '', filename, flags=re.IGNORECASE).strip()
+                        title = re.sub(r'\s+msg_[\d.]+\.md$', '', title, flags=re.IGNORECASE).strip()
                         file_mtime = datetime.fromtimestamp(os.path.getmtime(md_file))
                         created_time = file_mtime.isoformat() + "Z"
-                    
+
                     if args.dry_run:
-                        print(f"    Would register: {title} ({page_id})")
+                        print(f"    Would register: {title} ({page_id[:20]}...)")
                         registered_count += 1
-                    else:
-                        # Extract metadata based on content type
-                        metadata = {}
-                        
-                        # For Discord files, extract channel information
-                        if db_config.source_type == 'discord':
-                            # Extract channel from file path
-                            rel_path = os.path.relpath(md_file, get_project_root())
-                            path_parts = rel_path.split(os.sep)
-                            
-                            # Find channel name in path (usually the parent directory)
-                            channel_name = None
-                            if len(path_parts) >= 2:
-                                channel_name = path_parts[-2]  # Parent directory is usually channel
-                            
-                            # Read file content to extract Discord-specific metadata
+                        continue
+
+                    # Build content data for add_content routing
+                    # database_name must be the nickname (not qualified) for correct table routing
+                    content_data = {
+                        'page_id': page_id,
+                        'workspace': db_config.workspace,
+                        'database_id': db_config.database_id,
+                        'database_name': db_config.nickname,
+                        'file_path': os.path.relpath(md_file, data_dir),
+                        'title': title,
+                        'created_time': created_time,
+                        'last_edited_time': created_time,
+                        'synced_time': datetime.now().isoformat() + "Z",
+                        'content_type': db_config.source_type,
+                        'data_source': db_config.source_type,
+                        'metadata': {},
+                    }
+
+                    # Route to correct table via add_content
+                    success = registry.add_content(content_data)
+
+                    if success:
+                        registered_count += 1
+
+                        # Generate vector embedding
+                        if vector_db:
                             try:
                                 with open(md_file, 'r', encoding='utf-8') as f:
-                                    content = f.read()
-                                    
-                                # Extract channel from content if available
-                                channel_match = re.search(r'\*\*Channel:\*\*\s*(#[^*\n]+)', content)
-                                if channel_match:
-                                    channel_name = channel_match.group(1).strip()
-                                
-                                # Extract timestamp 
-                                timestamp_match = re.search(r'\*\*Timestamp:\*\*\s*([^\n]+)', content)
-                                if timestamp_match:
-                                    metadata['timestamp'] = timestamp_match.group(1).strip()
-                                
-                                # Extract author
-                                author_match = re.search(r'\*\*Author:\*\*\s*([^\n]+)', content)
-                                if author_match:
-                                    metadata['author'] = author_match.group(1).strip()
-                                    
+                                    file_content = f.read()
+                                if file_content.strip():
+                                    vector_db.add_content(page_id, file_content, {
+                                        'database_name': db_config.nickname,
+                                        'workspace': db_config.workspace,
+                                        'content_type': db_config.source_type,
+                                        'created_time': created_time,
+                                        'title': title,
+                                    })
+                                    embedded_count += 1
                             except Exception as e:
-                                print(f"Warning: Could not read Discord file {md_file}: {e}")
-                            
-                            if channel_name:
-                                metadata['channel_name'] = channel_name
-                                # Also set discord_channel_name for filter compatibility
-                                metadata['discord_channel_name'] = channel_name
-                                
-                        # Create content data for registration
-                        content_data = {
-                            'title': title,
-                            'created_time': created_time,
-                            'last_edited_time': created_time,
-                            'synced_time': datetime.now().isoformat() + "Z",
-                            'page_id': page_id,
-                            'source': 'markdown_file_registration',
-                            'workspace': db_config.workspace,
-                            'database_id': db_config.database_id,  # Add immutable database identifier
-                            'database_name': db_config.get_qualified_name(),
-                            'file_path': os.path.relpath(md_file, get_project_root()),
-                            'content_type': db_config.source_type,
-                            'metadata': metadata 
-                        }
-                        
-                        # Register in database using generic content table
-                        success = registry.add_generic_content(content_data)
-                        
-                        if success:
-                            # print(f"    Registered: {title} ({page_id})")
-                            registered_count += 1
-                        else:
-                            print(f"    Failed to register: {title} ({page_id})")
-                            
+                                logger.debug(f"Embedding failed for {page_id}: {e}")
+
                 except Exception as e:
-                    print(f"    Error processing {md_file}: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    print(f"    Error: {os.path.basename(md_file)}: {e}")
                     continue
-            
+
             action = "Would register" if args.dry_run else "Registered"
-            print(f"  {action} {registered_count} new files")
+            embed_note = f" ({embedded_count} embedded)" if embedded_count else ""
+            skip_note = f" ({skipped_count} skipped)" if skipped_count else ""
+            print(f"  {action} {registered_count} new files{embed_note}{skip_note}")
             total_registered += registered_count
-        
+            total_embedded += embedded_count
+
+        # Rebuild unified_content view to include all tables
+        if not args.dry_run and total_registered > 0:
+            try:
+                registry.rebuild_unified_content_view()
+                print("\nRebuilt unified content view.")
+            except Exception as e:
+                print(f"\nWarning: Could not rebuild view: {e}")
+
+        embed_total = f" ({total_embedded} vector embeddings)" if total_embedded else ""
         action = "Would register" if args.dry_run else "Registered"
-        print(f"\n{action} {total_registered} total files across all databases.")
-        
+        print(f"\n{action} {total_registered} total files.{embed_total}")
+
         if args.dry_run:
             print("\nRun without --dry-run to actually register the files.")
-        
+
     except Exception as e:
         print(f"Error: {e}")
         raise
+
+
+# Keep old name as alias
+handle_register_markdown_files = handle_register_md
 
 # Add argument parsers for database commands
 def add_database_commands(subparsers):
@@ -3896,8 +3897,10 @@ def add_database_commands_to_existing_parser(parent_parser, subparsers):
     validate_parser.set_defaults(func=handle_validate_registry)
 
     # Register markdown files command
-    register_parser = subparsers.add_parser('register-markdown-files', help='Register existing markdown files in the SQLite registry')
+    register_parser = subparsers.add_parser('register-md', aliases=['register-markdown-files'],
+        help='Rebuild SQL registry and vector embeddings from local markdown files (no API calls)')
     register_parser.add_argument('--workspace', help='Workspace to register files for (optional)')
     register_parser.add_argument('--database', help='Database nickname to register files for (optional)')
     register_parser.add_argument('--dry-run', action='store_true', help='Show what would be registered without making changes')
-    register_parser.set_defaults(func=handle_register_markdown_files)
+    register_parser.add_argument('--skip-embeddings', action='store_true', help='Skip vector embedding generation (SQL registry only)')
+    register_parser.set_defaults(func=handle_register_md)

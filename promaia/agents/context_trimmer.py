@@ -264,6 +264,25 @@ async def _summarize_old_turns(messages: List[Dict], budget_tokens: int) -> List
     if keep_from_idx <= 1:
         return messages
 
+    # Ensure we don't split inside a tool_use/tool_result pair.
+    # If the first "recent" message contains tool_result blocks, its matching
+    # tool_use is in the message before it — pull that into recent too.
+    while keep_from_idx > 0:
+        first_recent = messages[keep_from_idx] if keep_from_idx < len(messages) else None
+        if first_recent:
+            content = first_recent.get("content", "")
+            has_tool_result = False
+            if isinstance(content, list):
+                has_tool_result = any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in content
+                )
+            if has_tool_result and keep_from_idx > 0:
+                # Pull back to include the matching tool_use message
+                keep_from_idx -= 1
+                continue
+        break
+
     old_messages = messages[:keep_from_idx]
     recent_messages = messages[keep_from_idx:]
 

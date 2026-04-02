@@ -95,7 +95,7 @@ def _send_linux_notification(title: str, message: str) -> bool:
             return False
             
     except FileNotFoundError:
-        logger.warning("notify-send not found. Install libnotify to enable notifications.")
+        logger.debug("notify-send not found (optional, install libnotify to enable)")
         return False
     except Exception as e:
         logger.error(f"Error sending Linux notification: {e}")

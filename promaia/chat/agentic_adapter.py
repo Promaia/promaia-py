@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from promaia.agents.agentic_turn import (
     AgenticTurnResult,
     ToolExecutor,
-    _generate_plan,
+    _build_tool_suite_registry,
     agentic_turn,
     build_tool_definitions,
 )
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TerminalAgentShim:
     """Minimal agent object satisfying the interface that ToolExecutor,
-    build_tool_definitions, and _generate_plan read via getattr."""
+    build_tool_definitions read via getattr."""
 
     agent_id: str = "terminal-user"
     name: str = "Maia"
@@ -186,6 +186,7 @@ def build_agentic_system_prompt(
     agent_calendar_id: Optional[str] = None,
     agent_calendars: Optional[Dict[str, str]] = None,
     has_platform: bool = False,
+    mcp_tool_descriptions: Optional[List[Dict]] = None,
 ) -> str:
     """Append conversation_mode.md tool guidance to the base terminal prompt.
 
@@ -287,8 +288,8 @@ def build_agentic_system_prompt(
         tool_sections_parts.append(
             "## Google Sheets Tools (Read & Write)\n\n"
             "- **sheets_find**: Search Google Drive for spreadsheets by name\n"
-            "- **sheets_ingest**: One-time ingest of a sheet into context (CSV with inline formulas)\n"
-            "- **sheets_read_range**: Read a specific A1 range from a sheet\n"
+            "- **sheets_ingest**: Ingest a sheet into context (previews first ~10k tokens; use sheets_read_range for more)\n"
+            "- **sheets_read_range**: Read a specific A1 range — results auto-save as toggleable context sources\n"
             "- **sheets_update_cells**: Write values to one or more ranges\n"
             "- **sheets_append_rows**: Append rows after the last row of data\n"
             "- **sheets_insert_rows**: Insert rows at a specific position (shifts existing rows down)\n"
@@ -431,6 +432,8 @@ def build_agentic_system_prompt(
             "- **Use Notion tools** for transient, specific pages — especially ones "
             "you are actively creating or editing in this session, or anything that "
             "may have been updated very recently and not yet synced.\n"
+            "- For fetching a single specific page, prefer the Notion API "
+            "(notion_get_page) as synced data may be stale.\n"
             "- After creating a Notion page, use the URL from the create response "
             "to share links — do not construct Notion URLs manually."
         )
@@ -459,11 +462,14 @@ def build_agentic_system_prompt(
     filled = template.replace("{agent_name}", "Maia")
     filled = filled.replace("{platform}", "terminal")
     filled = filled.replace("{sources}", sources_list)
+    # Tool sections embedded in conversation_mode.md template — positioned before
+    # context sources so the agent sees available tools early in the prompt.
     filled = filled.replace("{tool_sections}", tool_sections)
     filled = filled.replace("{notion_guidance}", notion_guidance)
 
-    if workflow_section:
-        filled += "\n\n" + workflow_section
+    # Workflow/interview descriptions, MCP tool descriptions, and saved workflows
+    # are NOT injected into the prompt. They appear in the suite index (Think mode)
+    # and as loaded tool schemas (Act mode).
 
     return base_prompt + "\n\n" + filled
 
@@ -509,15 +515,51 @@ def make_terminal_activity_callback(
             print_text_fn("  ✂️  Context too large, trimming and retrying", style="dim yellow")
             return
 
-        # Context compact/restore
-        if tool_name == "compact_context":
-            if completed:
-                if (tool_input or {}).get("restore", False):
-                    print_text_fn("  🔊 Context restored", style="dim cyan")
-                else:
-                    notes = (tool_input or {}).get("notes", "")
-                    preview = notes[:80] + "..." if len(notes) > 80 else notes
-                    print_text_fn(f"  📝 Context compacted: {preview}", style="dim cyan")
+        # Context toggle
+        if tool_name == "context" and completed:
+            action = (tool_input or {}).get("action", "")
+            sources = (tool_input or {}).get("sources", []) or (tool_input or {}).get("shelves", [])
+            name = (tool_input or {}).get("name", "")
+            target = ", ".join(sources) if sources else name
+            if action in ("on", "all_on"):
+                print_text_fn(f"  📖 Context ON: {target or 'all'}", style="dim cyan")
+            elif action in ("off", "all_off"):
+                print_text_fn(f"  📕 Context OFF: {target or 'all'}", style="dim cyan")
+            elif action == "add":
+                print_text_fn(f"  📚 Context added: {name}", style="dim cyan")
+            elif action == "remove":
+                print_text_fn(f"  🗑️  Context removed: {target}", style="dim cyan")
+            return
+
+        # Think/Act mode switching
+        if tool_name == "act" and completed:
+            suites = (tool_input or {}).get("suites", [])
+            print_text_fn(f"  🔧 Act mode ({', '.join(suites)})", style="dim yellow")
+            return
+        if tool_name == "done" and completed:
+            print_text_fn("  📚 Think mode", style="dim cyan")
+            return
+
+        # Notepad update
+        if tool_name == "notepad" and completed:
+            action = (tool_input or {}).get("action", "")
+            labels = {"write": "updated", "append": "appended", "clear": "cleared", "read": "read"}
+            label = labels.get(action, action)
+            print_text_fn(f"  📝 Notes {label}", style="dim cyan")
+            return
+
+        # Memory
+        if tool_name == "memory" and completed:
+            action = (tool_input or {}).get("action", "")
+            name = (tool_input or {}).get("name", "")
+            if action == "save":
+                print_text_fn(f"  💾 Memory saved: {name}", style="dim cyan")
+            elif action == "recall":
+                print_text_fn(f"  🧠 Memory recalled: {name}", style="dim cyan")
+            elif action == "delete":
+                print_text_fn(f"  🗑️  Memory deleted: {name}", style="dim cyan")
+            elif action == "list":
+                print_text_fn("  🧠 Memory listed", style="dim cyan")
             return
 
         # Regular tool activity
@@ -583,6 +625,20 @@ def _summarize_tool_input(tool_name: str, tool_input: Dict) -> str:
         if rng:
             parts.append(rng)
         return f": {' '.join(parts)}" if parts else ""
+    elif tool_name == "context":
+        action = tool_input.get("action", "")
+        sources = tool_input.get("sources", []) or tool_input.get("shelves", [])
+        name = tool_input.get("name", "")
+        target = ", ".join(sources) if sources else name
+        return f": {action} {target}" if target else f": {action}"
+    elif tool_name == "act":
+        suites = tool_input.get("suites", [])
+        return f": {', '.join(suites)}" if suites else ""
+    elif tool_name == "done":
+        return ""
+    elif tool_name == "notepad":
+        action = tool_input.get("action", "")
+        return f": {action}"
     else:
         # Generic: show first key-value
         for k, v in tool_input.items():
@@ -600,6 +656,9 @@ async def run_agentic_turn(
     databases: List[str],
     print_text_fn: Callable[..., None],
     workflow_prompt: Optional[str] = None,
+    notepad_content: Optional[str] = None,
+    source_states: Optional[Dict[str, Dict]] = None,
+    on_tool_activity: Optional[Callable] = None,
 ) -> AgenticTurnResult:
     """Run an agentic turn using the full autonomous tool loop.
 
@@ -623,23 +682,82 @@ async def run_agentic_turn(
         agent_calendars=agent_calendars,
     )
 
-    # Build tool definitions
+    # Build tool definitions (legacy, used as fallback)
     tools = build_tool_definitions(shim, has_platform=False)
+
+    # Build suite registry for Think/Act mode
+    suite_registry = _build_tool_suite_registry(shim, has_platform=False)
 
     # Create tool executor
     executor = ToolExecutor(agent=shim, workspace=workspace)
+
+    # Restore notepad from previous turn
+    if notepad_content:
+        executor._notepad = notepad_content
+
+    # Restore context sources from previous turn (content + on/off state)
+    prev_sources = source_states or {}
+    if prev_sources:
+        for name, source_data in prev_sources.items():
+            # Only restore query-created sources (browser sources get rebuilt from context)
+            if source_data.get("source") != "browser":
+                executor._sources[name] = dict(source_data)
+                logger.info(f"Restored source '{name}': on={source_data.get('on')}, {len(source_data.get('content', ''))} chars")
+    else:
+        logger.info("No context source states to restore from previous turn")
+
+    # Connect external MCP servers and discover their tools
+    mcp_tool_defs = []
+    mcp_suites = {}
+    try:
+        await executor.connect_mcp_servers()
+        mcp_tool_defs = await executor.get_mcp_tool_definitions()
+        if mcp_tool_defs:
+            tools.extend(mcp_tool_defs)
+            logger.info(f"Added {len(mcp_tool_defs)} MCP tools from external servers")
+            # Group MCP tools into suites by server name (mcp__{server}__{tool})
+            from collections import defaultdict
+            mcp_groups = defaultdict(list)
+            for td in mcp_tool_defs:
+                parts = td["name"].split("__")
+                if len(parts) >= 3:
+                    server_name = parts[1]
+                    mcp_groups[server_name].append(td)
+            for server_name, server_tools in mcp_groups.items():
+                mcp_suites[server_name] = {
+                    "tools": server_tools,
+                    "description": f"{server_name} MCP tools",
+                    "count": len(server_tools),
+                }
+    except Exception as e:
+        logger.warning(f"MCP server connection failed (continuing without): {e}")
 
     # Enhance system prompt with conversation_mode.md guidance
     enhanced_prompt = build_agentic_system_prompt(
         system_prompt, workspace, mcp_tools, databases,
         agent_calendars=agent_calendars,
+        mcp_tool_descriptions=mcp_tool_defs if mcp_tool_defs else None,
     )
+
+    # Inject persistent notepad into system prompt
+    if executor._notepad:
+        enhanced_prompt += f"\n\n## Working Notes\n\n{executor._notepad}"
+
+    # Inject persistent memory index (always visible, like notepad)
+    try:
+        from promaia.agents.memory_store import load_memory_index
+        memory_index = load_memory_index(workspace)
+        if memory_index:
+            enhanced_prompt += f"\n\n## Memory\n\n{memory_index}"
+    except ImportError:
+        pass  # memory_store not yet available on this branch
 
     # Inject active workflow prompt if in an interview
     if workflow_prompt:
         enhanced_prompt = workflow_prompt + "\n\n" + enhanced_prompt
 
-    # Split prompt into base + context block for compact_context support
+    # Split prompt into base + context block → create context sources
+    # Each database becomes its own context source, OFF by default
     context_marker = "\n\n## Context ("
     context_data_block = ""
     if context_marker in enhanced_prompt:
@@ -648,41 +766,60 @@ async def run_agentic_turn(
         context_data_block = enhanced_prompt[split_idx:]
         enhanced_prompt = base_prompt_part
 
+        # Parse individual database sections into context sources
+        import re
+        db_pattern = re.compile(
+            r'### === (.+?) DATABASE \((\d+) entries\) ===\n',
+        )
+        matches = list(db_pattern.finditer(context_data_block))
+        for i, match in enumerate(matches):
+            db_name = match.group(1).lower()
+            page_count = int(match.group(2))
+            # Extract content from this match to the next (or end)
+            start = match.start()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(context_data_block)
+            source_content = context_data_block[start:end]
+
+            # Restore source state from previous turn, default ON for browser-loaded
+            prev_state = prev_sources.get(db_name, {}).get("on", True) if prev_sources else True
+
+            # Extract entry titles from formatted content
+            title_pattern = re.compile(r'File: `(.+?)`\)')
+            titles = [m.group(1) for m in title_pattern.finditer(source_content)]
+
+            executor._sources[db_name] = {
+                "content": source_content,
+                "on": prev_state,
+                "page_count": page_count,
+                "source": "browser",
+                "titles": titles,
+            }
+
+    # Library index is built dynamically inside the agentic loop each iteration
+    # (sources change during the loop as tools load/toggle context)
+
     # Build activity callback
-    activity_cb = make_terminal_activity_callback(print_text_fn)
-
-    # Check if planning is needed (extract latest user message)
-    user_message = ""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            user_message = msg.get("content", "")
-            break
-
-    plan = None
-    if user_message:
-        plan = await _generate_plan(
-            user_message=user_message,
-            agent=shim,
-            available_tools=[t["name"] for t in tools],
-        )
-
-    # Emit plan via callback if generated
-    if plan and activity_cb:
-        await activity_cb(
-            tool_name="__plan__",
-            tool_input={"steps": plan},
-        )
+    # Use external callback if provided (Slack/Discord), otherwise build terminal callback
+    activity_cb = on_tool_activity or make_terminal_activity_callback(print_text_fn)
 
     # Run the agentic loop
-    result = await agentic_turn(
-        system_prompt=enhanced_prompt,
-        messages=messages,
-        tools=tools,
-        tool_executor=executor,
-        max_iterations=40,
-        on_tool_activity=activity_cb,
-        plan=plan,
-        context_data_block=context_data_block,
-    )
+    try:
+        result = await agentic_turn(
+            system_prompt=enhanced_prompt,
+            messages=messages,
+            tools=tools,
+            tool_executor=executor,
+            max_iterations=40,
+            on_tool_activity=activity_cb,
+            context_data_block=context_data_block,
+            suite_registry=suite_registry,
+            mcp_suites=mcp_suites if mcp_suites else None,
+        )
+    finally:
+        await executor.disconnect_mcp_servers()
+
+    # Persist notepad and context source data for next turn
+    result.notepad_content = executor._notepad or None
+    result.source_states = dict(executor._sources) if executor._sources else None
 
     return result

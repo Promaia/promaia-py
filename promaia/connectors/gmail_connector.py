@@ -1550,6 +1550,8 @@ Subject: {subject}
         subject: str,
         body_text: str,
         body_html: Optional[str] = None,
+        cc: Optional[str] = None,
+        bcc: Optional[str] = None,
         thread_id: Optional[str] = None,
         in_reply_to: Optional[str] = None,
         references: Optional[str] = None,
@@ -1593,6 +1595,10 @@ Subject: {subject}
 
             message['to'] = to
             message['subject'] = subject
+            if cc:
+                message['cc'] = cc
+            if bcc:
+                message['bcc'] = bcc
 
             # Add threading headers for replies
             if in_reply_to:
@@ -1679,7 +1685,8 @@ Subject: {subject}
         message_id: str,
         subject: str,
         body_text: str,
-        body_html: Optional[str] = None
+        body_html: Optional[str] = None,
+        attachments: Optional[List[str]] = None
     ) -> bool:
         """
         Send a reply to an existing thread.
@@ -1764,7 +1771,8 @@ Subject: {subject}
                 body_html=body_html,
                 thread_id=thread_id,
                 in_reply_to=message_id_header,
-                references=references
+                references=references,
+                attachments=attachments,
             )
             
         except Exception as e:
@@ -1793,12 +1801,44 @@ Subject: {subject}
         thread_id: str = None,
         in_reply_to: str = None,
         references: str = None,
+        attachments: Optional[List[str]] = None,
     ) -> Optional[str]:
         """Create a Gmail draft. Returns draft ID."""
         try:
-            message = MIMEText(body, _charset='utf-8')
-            message.set_param('format', 'flowed')
-            message['Content-Type'] = 'text/plain; charset=utf-8; format=flowed'
+            import mimetypes
+            from email.mime.base import MIMEBase
+            from email.mime.multipart import MIMEMultipart
+            from email import encoders
+
+            if attachments:
+                # Build multipart message with attachments
+                message = MIMEMultipart('mixed')
+                text_part = MIMEText(body, _charset='utf-8')
+                text_part.set_param('format', 'flowed')
+                message.attach(text_part)
+
+                for file_path in attachments:
+                    path = Path(file_path) if not isinstance(file_path, Path) else file_path
+                    if not path.exists():
+                        self.logger.warning(f"Attachment not found: {file_path}")
+                        continue
+                    mime_type, _ = mimetypes.guess_type(str(path))
+                    mime_type = mime_type or 'application/octet-stream'
+                    main_type, sub_type = mime_type.split('/', 1)
+
+                    part = MIMEBase(main_type, sub_type)
+                    part.set_payload(path.read_bytes())
+                    encoders.encode_base64(part)
+                    part.add_header(
+                        'Content-Disposition', 'attachment',
+                        filename=path.name,
+                    )
+                    message.attach(part)
+            else:
+                message = MIMEText(body, _charset='utf-8')
+                message.set_param('format', 'flowed')
+                message['Content-Type'] = 'text/plain; charset=utf-8; format=flowed'
+
             message['to'] = to
             message['subject'] = subject
             if cc:
@@ -1825,7 +1865,8 @@ Subject: {subject}
             ).execute()
 
             draft_id = draft.get('id')
-            self.logger.info(f"Draft created: {draft_id}")
+            attach_note = f" with {len(attachments)} attachment(s)" if attachments else ""
+            self.logger.info(f"Draft created{attach_note}: {draft_id}")
             return draft_id
         except Exception as e:
             self.logger.error(f"Failed to create draft: {e}")

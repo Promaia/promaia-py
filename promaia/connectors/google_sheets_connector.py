@@ -17,6 +17,75 @@ from .base import BaseConnector, QueryFilter, DateRangeFilter, SyncResult
 
 logger = logging.getLogger(__name__)
 
+SHEETS_PREVIEW_TOKEN_LIMIT = 10_000
+
+
+def truncate_sheet_content(
+    content: str,
+    properties: dict,
+    title: str,
+    token_limit: int = SHEETS_PREVIEW_TOKEN_LIMIT,
+) -> str:
+    """Truncate sheet CSV content to fit within a token budget.
+
+    Returns content unchanged if already under the limit.  For large sheets,
+    truncates line-by-line and appends a footer describing the full sheet so
+    the agent knows how to fetch more via sheets_read_range.
+    """
+    from promaia.utils.ai import estimate_token_count
+
+    total_tokens = estimate_token_count(content)
+    if total_tokens <= token_limit:
+        logger.info(
+            "Sheet '%s' fits in budget (%d tokens <= %d limit)",
+            title, total_tokens, token_limit,
+        )
+        return content
+
+    row_counts = properties.get("row_counts", {})
+    sheet_names = properties.get("sheet_names", [])
+    total_rows = sum(row_counts.values()) if row_counts else content.count("\n") + 1
+
+    logger.info(
+        "Sheet '%s' exceeds budget (%d tokens > %d limit, %d rows) — truncating",
+        title, total_tokens, token_limit, total_rows,
+    )
+
+    # Truncate line-by-line, reserving room for the footer
+    footer_budget = 200  # tokens reserved for the footer text
+    target = token_limit - footer_budget
+
+    lines = content.split("\n")
+    kept: list[str] = []
+    running_tokens = 0
+    for line in lines:
+        line_tokens = estimate_token_count(line)
+        if running_tokens + line_tokens > target:
+            break
+        kept.append(line)
+        running_tokens += line_tokens
+
+    shown_rows = len(kept)
+    tabs_detail = ", ".join(
+        f"{name} ({row_counts.get(name, '?')} rows)" for name in sheet_names
+    ) if sheet_names else "1 tab"
+
+    logger.info(
+        "Sheet '%s' truncated: %d rows kept (~%d tokens), %d rows total",
+        title, shown_rows, running_tokens, total_rows,
+    )
+
+    footer = (
+        f"\n\n⚠️ SHEET PREVIEW ONLY — This is NOT the full sheet.\n"
+        f"Showing ~{shown_rows} of {total_rows} rows "
+        f"(~{running_tokens} of ~{total_tokens} tokens).\n"
+        f"Tabs: {tabs_detail}\n"
+        f"To see more data, use sheets_read_range with a specific A1 range "
+        f"(e.g. 'Sheet1!A50:Z100'). You can load ranges larger than this preview."
+    )
+
+    return "\n".join(kept) + footer
+
 
 class GoogleSheetsConnector(BaseConnector):
     """Google Sheets connector — CSV-per-sheet with inline formulas."""

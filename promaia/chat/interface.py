@@ -36,7 +36,7 @@ from promaia.storage.chat_history import ChatHistoryManager
 from promaia.storage.recents import RecentsManager
 from promaia.utils.query_parsing import parse_vs_queries_with_params
 
-import google.generativeai as genai
+from google import genai
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -154,10 +154,6 @@ def check_and_suggest_web_tools(user_input: str, context_state: dict, style: Sty
                   style="cyan")
         print_text(f"   URLs found: {', '.join(urls[:3])}", style="dim cyan")
 
-    # Suggest search if search keywords detected and no search capability
-    if has_search_keywords and 'search' not in mcp_servers and not has_agentic_web and not urls:
-        print_text("💡 Tip: I detected a search request. Enable web search with /mcp search to search the internet.",
-                  style="cyan")
 
 
 # --- API Client Initialization ---
@@ -249,15 +245,24 @@ if not openrouter_client and os.getenv("OPENROUTER_API_KEY"):
     )
 
 gemini_client = None
+_gemini_genai_client = None
+_gemini_model_name = None
 if os.getenv("GOOGLE_API_KEY"):
-    genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+    _gemini_genai_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
     from promaia.ai.models import get_current_google_model, GOOGLE_MODELS
-    # Use selected model ID if available, otherwise use default
     selected_model = os.getenv("SELECTED_MODEL_ID")
     if selected_model and "gemini" in selected_model.lower():
-        gemini_client = genai.GenerativeModel(selected_model)
+        _gemini_model_name = selected_model
     else:
-        gemini_client = genai.GenerativeModel(get_current_google_model())
+        _gemini_model_name = get_current_google_model()
+
+def _gemini_generate(prompt, model_name=None):
+    """Generate content using the new google-genai SDK."""
+    if not _gemini_genai_client:
+        raise RuntimeError("Gemini not configured")
+    model = model_name or _gemini_model_name
+    response = _gemini_genai_client.models.generate_content(model=model, contents=prompt)
+    return response
 
 current_api = get_api_preference()
 os.environ["API_TYPE"] = current_api
@@ -1306,7 +1311,7 @@ def build_system_prompt_with_mode(multi_source_data, mcp_tools_info, mode_system
         return create_system_prompt(multi_source_data, mcp_tools_info, include_query_tools, workspace)
 
 
-def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, non_interactive=False, initial_messages=None, current_thread_id=None, sql_query_content=None, sql_query_prompt=None, original_browse_command=None, browse_selections=None, browse_databases=None, mcp_servers=None, is_vector_search=False, initial_nl_prompt=None, initial_nl_content=None, initial_vs_prompt=None, initial_vs_content=None, mode=None, mode_config=None, draft_id=None, auto_respond_to_initial=False, top_k=None, threshold=None, vector_search_queries=None, initial_vs_per_query_cache=None):
+def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, non_interactive=False, initial_messages=None, current_thread_id=None, sql_query_content=None, sql_query_prompt=None, original_browse_command=None, browse_selections=None, browse_databases=None, mcp_servers=None, is_vector_search=False, initial_nl_prompt=None, initial_nl_content=None, initial_vs_prompt=None, initial_vs_content=None, mode=None, mode_config=None, draft_id=None, auto_respond_to_initial=False, top_k=None, threshold=None, vector_search_queries=None, initial_vs_per_query_cache=None, active_workflow=None, workflow_context=None):
     """
     Main chat function with simplified, unified logic.
 
@@ -1613,7 +1618,8 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
         'agentic_mode': True,  # Agentic loop mode (multi-tool autonomous execution) — on by default
         'agentic_tools': [],  # Detected MCP tools for agentic mode
         'agentic_databases': [],  # Databases available for agentic mode
-        'active_workflow': None,  # Active interview workflow name (e.g. "database_add")
+        'active_workflow': active_workflow,  # Active interview workflow name (e.g. "database_add")
+        'workflow_context': workflow_context,  # Template variables for workflow prompt (e.g. {"workspace": "koii"})
     }
     
     # Detect agentic tools and databases (agent mode is on by default for Anthropic/OpenRouter)
@@ -2048,7 +2054,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
         # Also don't launch browser if we're in a mode (e.g., draft mode)
         user_provided_workspace_only = bool(current_workspace and not sources and not filters and not sql_query_prompt)
 
-        if user_provided_workspace_only and not current_sources and not mode:
+        if user_provided_workspace_only and not current_sources and not mode and not context_state.get('active_workflow'):
             debug_print(f"Opening workspace browser for '{actual_workspace}'.")
             print_text(f"🔍 Launching unified browser for '{actual_workspace}'...", style="bold cyan")
 
@@ -5412,7 +5418,7 @@ def chat(sources=None, filters=None, workspace=None, resolved_workspace=None, no
     
     # Display previous conversation
     # Skip generic headers if mode is active (mode will display its own)
-    if initial_messages and not mode:
+    if initial_messages and not mode and not context_state.get('active_workflow'):
         print_text("--- Previous Conversation ---", style="bold yellow")
         for msg in initial_messages:
             role = msg.get('role', '')
@@ -5575,6 +5581,18 @@ The user will type `/send` to trigger the actual sending process.
                                 cm["images"] = msg["images"]
                             clean_messages.append(cm)
 
+                        # Inject active workflow prompt if pre-activated (e.g. from setup)
+                        _auto_workflow_prompt = None
+                        _auto_wf = context_state.get('active_workflow')
+                        if _auto_wf:
+                            try:
+                                from promaia.chat.workflows import get_workflow as _get_wf_auto
+                                _wf = _get_wf_auto(_auto_wf, context=context_state.get('workflow_context'))
+                                if _wf:
+                                    _auto_workflow_prompt = _wf["system_prompt_insert"]
+                            except Exception:
+                                pass
+
                         result = asyncio.run(run_agentic_turn(
                             system_prompt=current_system_prompt,
                             messages=clean_messages,
@@ -5582,7 +5600,14 @@ The user will type `/send` to trigger the actual sending process.
                             mcp_tools=context_state.get('agentic_tools', []),
                             databases=context_state.get('agentic_databases', []),
                             print_text_fn=print_text,
+                            workflow_prompt=_auto_workflow_prompt,
+                            notepad_content=context_state.get('notepad_content'),
+                            source_states=context_state.get('source_states'),
                         ))
+                        if result.notepad_content is not None:
+                            context_state['notepad_content'] = result.notepad_content
+                        if result.source_states is not None:
+                            context_state['source_states'] = result.source_states
 
                         response_text = result.response_text
                         total_tokens = result.input_tokens + result.output_tokens
@@ -5613,7 +5638,8 @@ The user will type `/send` to trigger the actual sending process.
                     except Exception as e:
                         logger.error(f"Agentic turn failed: {e}", exc_info=True)
                         print_text(f"\n⚠️  Agentic mode error ({type(e).__name__}): {e}", style="bold red")
-                        print_text("   Falling back to standard call\n", style="dim yellow")
+                        print_text("   Please try again.\n", style="dim yellow")
+                        response_content = {"text": "", "tokens": None, "_skip": True}
 
                 # Standard Anthropic call (or fallback from agentic failure)
                 if response_content is None:
@@ -5719,19 +5745,21 @@ The user will type `/send` to trigger the actual sending process.
                 response_text_with_tools = None
                 try:
                     if current_message_images:
-                        current_gemini_model, gemini_messages = _format_gemini_with_images(current_system_prompt, messages, current_message_images)
-                        response = current_gemini_model.generate_content(
+                        _gmodel, _gsys, gemini_messages = _format_gemini_with_images(current_system_prompt, messages, current_message_images)
+                        from google.genai import types as genai_types
+                        response = _gemini_genai_client.models.generate_content(
+                            model=_gmodel,
                             contents=gemini_messages,
-                            generation_config={
-                                "temperature": current_temperature,
-                            }
+                            config=genai_types.GenerateContentConfig(
+                                system_instruction=_gsys,
+                                temperature=current_temperature,
+                            ),
                         )
                     else:
-                        # Format message for Gemini
                         formatted_prompt = f"System: {current_system_prompt}\n\nConversation:\n"
                         for msg in messages:
                             formatted_prompt += f"{msg['role'].title()}: {msg['content']}\n"
-                        response = gemini_client.generate_content(formatted_prompt)
+                        response = _gemini_generate(formatted_prompt)
 
                     if response.text:
                         response_text = response.text
@@ -5851,7 +5879,7 @@ The user will type `/send` to trigger the actual sending process.
 
                 artifact_manager = context_state['artifact_manager']
 
-                if isinstance(response_content, dict):
+                if isinstance(response_content, dict) and not response_content.get("_skip"):
                     response_text = response_content['text']
                     token_data = response_content.get('tokens')
 
@@ -7823,8 +7851,7 @@ The user will type `/send` to trigger the actual sending process.
                             if document_files and not image_files:
                                 user_input = cleaned_message
                         else:
-                            print_text(f"📄 Detected {len(document_files)} document(s) but {current_api} doesn't support documents yet.", style="bold yellow")
-                            print_text("Document support is currently available with Gemini. Switch with '/model gemini'.", style="dim")
+                            logger.debug(f"Detected {len(document_files)} document(s), skipping (not supported by {current_api})")
 
                 except Exception as e:
                     print_text(f"Error processing detected files: {e}", style="bold red")
@@ -7848,120 +7875,6 @@ The user will type `/send` to trigger the actual sending process.
                     logger.error(f"Failed to auto-save messages after user input: {e}", exc_info=True)
             elif draft_id:
                 logger.warning(f"⚠️  Draft mode detected but mode object is None - cannot auto-save")
-
-            # Automatic email intent detection
-            if not draft_id and not context_state.get('enable_email_send', False):
-                try:
-                    from promaia.mail.intent_detector import EmailIntentDetector
-
-                    detector = EmailIntentDetector()
-                    intent = detector.detect_intent(user_input, messages[:-1])  # Pass conversation without current message
-
-                    # If high-confidence email intent detected, auto-enable email mode
-                    if intent.has_intent and intent.confidence >= 0.85:
-                        logger.info(f"📧 Email intent detected: {intent.intent_type} (confidence: {intent.confidence:.2f})")
-                        logger.info(f"   Reasoning: {intent.reasoning}")
-
-                        # Auto-load Gmail context if not already loaded
-                        current_sources = context_state.get('sources') or []
-                        has_gmail = any('gmail' in str(s).lower() for s in current_sources)
-
-                        if not has_gmail:
-                            print_text(f"\n📧 Email intent detected - loading Gmail context...", style="cyan")
-
-                            # Load Gmail sources (replicate /mail command logic exactly)
-                            try:
-                                from promaia.config.databases import get_database_manager
-                                from promaia.config.workspaces import get_workspace_manager
-
-                                db_manager = get_database_manager()
-                                workspace_manager = get_workspace_manager()
-
-                                # Determine which workspaces to load from
-                                workspaces_to_load = [workspace] if workspace else workspace_manager.list_workspaces()
-
-                                # Find all Gmail databases from selected workspaces
-                                gmail_sources = []
-                                mail_from_accounts = []
-
-                                for ws in workspaces_to_load:
-                                    gmail_dbs = [
-                                        db for db in db_manager.get_workspace_databases(ws)
-                                        if db.source_type == "gmail"
-                                    ]
-                                    for gmail_db in gmail_dbs:
-                                        # Add with workspace prefix and 7 days of history
-                                        if ws == 'default':
-                                            gmail_sources.append(f"{gmail_db.nickname}:7")
-                                        else:
-                                            gmail_sources.append(f"{ws}.{gmail_db.nickname}:7")
-
-                                        # Track account info for /send
-                                        mail_from_accounts.append({
-                                            'workspace': ws,
-                                            'email': gmail_db.database_id,
-                                            'display': f"{gmail_db.database_id} ({ws})" if ws != 'default' else gmail_db.database_id
-                                        })
-
-                                if gmail_sources:
-                                    # Store available accounts
-                                    context_state['mail_from_accounts'] = mail_from_accounts
-
-                                    # Add Gmail sources to current sources (don't replace)
-                                    current_sources = context_state.get('sources') or []
-                                    new_sources = list(set(current_sources + gmail_sources))  # Deduplicate
-                                    context_state['sources'] = new_sources
-
-                                    # Reload context with Gmail data
-                                    if reload_context():
-                                        print_text(f"✅ Gmail context loaded ({len(gmail_sources)} sources)", style="green")
-                                    else:
-                                        print_text("⚠️  Failed to reload context with Gmail data", style="yellow")
-                                else:
-                                    print_text("⚠️  No Gmail accounts configured", style="yellow")
-
-                            except Exception as e:
-                                logger.error(f"Failed to auto-load Gmail context: {e}", exc_info=True)
-                                print_text(f"⚠️  Could not load Gmail context: {e}", style="yellow")
-                        else:
-                            # Gmail already loaded (e.g., from browse), just setup accounts
-                            if not context_state.get('mail_from_accounts'):
-                                try:
-                                    from promaia.config.databases import get_database_manager
-                                    from promaia.config.workspaces import get_workspace_manager
-
-                                    db_manager = get_database_manager()
-                                    workspace_manager = get_workspace_manager()
-
-                                    # Determine which workspaces to check
-                                    workspaces_to_check = [workspace] if workspace else workspace_manager.list_workspaces()
-
-                                    # Find all Gmail databases
-                                    mail_from_accounts = []
-                                    for ws in workspaces_to_check:
-                                        gmail_dbs = [
-                                            db for db in db_manager.get_workspace_databases(ws)
-                                            if db.source_type == "gmail"
-                                        ]
-                                        for gmail_db in gmail_dbs:
-                                            mail_from_accounts.append({
-                                                'workspace': ws,
-                                                'email': gmail_db.database_id,
-                                                'display': f"{gmail_db.database_id} ({ws})" if ws != 'default' else gmail_db.database_id
-                                            })
-
-                                    context_state['mail_from_accounts'] = mail_from_accounts
-                                    logger.info(f"📧 Setup {len(mail_from_accounts)} mail accounts for sending")
-                                except Exception as e:
-                                    logger.error(f"Failed to setup mail accounts: {e}", exc_info=True)
-
-                        # Enable email send mode
-                        context_state['enable_email_send'] = True
-                        logger.info("✅ Email mode auto-enabled")
-
-                except Exception as e:
-                    logger.error(f"Error in email intent detection: {e}", exc_info=True)
-                    # Continue with regular chat if intent detection fails
 
             # Call the appropriate API
             response_content = None
@@ -8043,7 +7956,7 @@ The user will type `/send` when ready to send the email.
                         if _active_wf:
                             try:
                                 from promaia.chat.workflows import get_workflow
-                                wf = get_workflow(_active_wf)
+                                wf = get_workflow(_active_wf, context=context_state.get('workflow_context'))
                                 if wf:
                                     _workflow_prompt = wf["system_prompt_insert"]
                             except Exception:
@@ -8057,7 +7970,14 @@ The user will type `/send` when ready to send the email.
                             databases=context_state.get('agentic_databases', []),
                             print_text_fn=print_text,
                             workflow_prompt=_workflow_prompt,
+                            notepad_content=context_state.get('notepad_content'),
+                            source_states=context_state.get('source_states'),
                         ))
+                        # Persist notepad and source states across turns
+                        if result.notepad_content is not None:
+                            context_state['notepad_content'] = result.notepad_content
+                        if result.source_states is not None:
+                            context_state['source_states'] = result.source_states
 
                         # Handle signals in a loop (signals can chain: interview_start → show_selection)
                         from promaia.chat.workflows import get_workflow as _get_wf
@@ -8070,7 +7990,7 @@ The user will type `/send` when ready to send the email.
                                 wf_name = result.signal.get("workflow", "")
                                 context_state['active_workflow'] = wf_name
                                 logger.info(f"Interview started: {wf_name}")
-                                wf = _get_wf(wf_name)
+                                wf = _get_wf(wf_name, context=context_state.get('workflow_context'))
                                 _workflow_prompt = wf["system_prompt_insert"] if wf else None
                                 # Re-run with the interview prompt active
                                 result = asyncio.run(run_agentic_turn(
@@ -8081,7 +8001,13 @@ The user will type `/send` when ready to send the email.
                                     databases=context_state.get('agentic_databases', []),
                                     print_text_fn=print_text,
                                     workflow_prompt=_workflow_prompt,
+                                    notepad_content=context_state.get('notepad_content'),
+                                    source_states=context_state.get('source_states'),
                                 ))
+                                if result.notepad_content is not None:
+                                    context_state['notepad_content'] = result.notepad_content
+                                if result.source_states is not None:
+                                    context_state['source_states'] = result.source_states
                                 continue  # Check new result for signals
 
                             elif sig_type == "show_selection":
@@ -8180,7 +8106,8 @@ The user will type `/send` when ready to send the email.
                     except Exception as e:
                         logger.error(f"Agentic turn failed: {e}", exc_info=True)
                         print_text(f"\n⚠️  Agentic mode error ({type(e).__name__}): {e}", style="bold red")
-                        print_text("   Falling back to standard call\n", style="dim yellow")
+                        print_text("   Please try again.\n", style="dim yellow")
+                        response_content = {"text": "", "tokens": None, "_skip": True}
 
                 # Direct API calls (streaming removed for reliability)
                 if current_api == "anthropic" and anthropic_client and response_content is None:
@@ -8412,17 +8339,19 @@ The user will type `/send` when ready to send the email.
                                 return None
 
                             if current_message_images:
-                                current_gemini_model, gemini_messages = _format_gemini_with_images(updated_system_prompt, messages, current_message_images)
-                                regen_response = current_gemini_model.generate_content(
+                                _gmodel, _gsys, gemini_messages = _format_gemini_with_images(updated_system_prompt, messages, current_message_images)
+                                from google.genai import types as genai_types
+                                regen_response = _gemini_genai_client.models.generate_content(
+                                    model=_gmodel,
                                     contents=gemini_messages,
-                                    generation_config={"temperature": current_temperature}
+                                    config=genai_types.GenerateContentConfig(system_instruction=_gsys, temperature=current_temperature),
                                 )
                             else:
                                 formatted_prompt = f"System: {updated_system_prompt}\n\nConversation:\n"
                                 for msg in messages:
                                     if msg and isinstance(msg, dict):
                                         formatted_prompt += f"{msg.get('role', 'user').title()}: {msg.get('content', '')}\n"
-                                regen_response = gemini_client.generate_content(formatted_prompt)
+                                regen_response = _gemini_generate(formatted_prompt)
 
                             if regen_response.text:
                                 return regen_response.text
@@ -8434,20 +8363,19 @@ The user will type `/send` when ready to send the email.
                     response_text_with_tools = None
                     try:
                         if current_message_images:
-                            # Handle images with Gemini
-                            current_gemini_model, gemini_messages = _format_gemini_with_images(current_system_prompt, messages_for_api, current_message_images)
-                            response = current_gemini_model.generate_content(
+                            _gmodel, _gsys, gemini_messages = _format_gemini_with_images(current_system_prompt, messages_for_api, current_message_images)
+                            from google.genai import types as genai_types
+                            response = _gemini_genai_client.models.generate_content(
+                                model=_gmodel,
                                 contents=gemini_messages,
-                                generation_config={
-                                    "temperature": current_temperature,
-                                }
+                                config=genai_types.GenerateContentConfig(system_instruction=_gsys, temperature=current_temperature),
                             )
                         else:
                             # Regular text-only message
                             formatted_prompt = f"System: {current_system_prompt}\n\nConversation:\n"
                             for msg in messages_for_api:
                                 formatted_prompt += f"{msg['role'].title()}: {msg['content']}\n"
-                            response = gemini_client.generate_content(formatted_prompt)
+                            response = _gemini_generate(formatted_prompt)
                         if response.text:
                             response_text = response.text
 
@@ -8625,7 +8553,7 @@ The user will type `/send` when ready to send the email.
                     
                     artifact_manager = context_state['artifact_manager']
                     
-                    if isinstance(response_content, dict):
+                    if isinstance(response_content, dict) and not response_content.get("_skip"):
                         # AI response with token data
                         response_text = response_content['text']
                         token_data = response_content.get('tokens')
@@ -9185,7 +9113,7 @@ def _format_openai_with_images(system_prompt, messages_for_api, current_message_
 def _format_gemini_with_images(system_prompt, messages_for_api, current_message_images):
     """Format Gemini content with image support (base64 and File API)."""
     from promaia.utils.image_processing import format_image_for_gemini
-    import google.generativeai as genai
+    from google import genai
     from promaia.ai.models import get_current_google_model
     import os
 
@@ -9199,12 +9127,8 @@ def _format_gemini_with_images(system_prompt, messages_for_api, current_message_
     else:
         model_name = get_current_google_model()
 
-    current_gemini_model = genai.GenerativeModel(
-        model_name=model_name,
-        system_instruction=system_prompt
-    )
-
-    # Build conversation history
+    # Build conversation history — new SDK uses client.models.generate_content()
+    # We'll return (model_name, system_prompt, messages) and generate at the call site
     gemini_messages = []
     total_images = 0
     file_api_count = 0
@@ -9259,7 +9183,7 @@ def _format_gemini_with_images(system_prompt, messages_for_api, current_message_
 
     method_info = f" ({file_api_count} via File API)" if file_api_count > 0 else " (all base64)"
     debug_print(f"Calling Gemini with {len(gemini_messages)} messages and {total_images} total images{method_info} ({len(current_message_images)} current)")
-    return current_gemini_model, gemini_messages
+    return model_name, system_prompt, gemini_messages
 
 def _format_llama_with_images(system_prompt, messages_for_api, current_message_images):
     """Format Llama messages with image support (OpenAI-compatible format)."""

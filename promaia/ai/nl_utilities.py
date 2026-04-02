@@ -357,36 +357,6 @@ class ResultValidator:
         elif intended_databases and not normalized_results.intersection(normalized_intended):
             return False, f"Results don't match intended databases. Got {result_databases}, expected {intended_databases}"
         
-        # Check if date filtering worked
-        date_filter = intent.get('date_filter', {})
-        from datetime import datetime, timedelta
-        
-        # Check days_back (backward-only date filter)
-        if date_filter.get('days_back'):
-            cutoff = datetime.now() - timedelta(days=date_filter['days_back'])
-
-            # Sample check on first few results
-            # Use last_edited_time first (most date queries filter on edit time),
-            # then fall back to created_time
-            dates_ok = True
-            for result in results[:5]:
-                date_val = result.get('last_edited_time', '') or result.get('created_time', '')
-                if date_val:
-                    try:
-                        result_date = datetime.fromisoformat(date_val[:10])
-                        if result_date < cutoff:
-                            dates_ok = False
-                            break
-                    except:
-                        pass
-
-            if not dates_ok:
-                return False, f"Some results are older than {date_filter.get('days_back')} days (outside requested date range)."
-
-        # Check date range (start_date and/or end_date)
-        # Coerce to string — LLMs occasionally return dicts instead of date strings
-        start_date_str = date_filter.get('start_date')
-        end_date_str = date_filter.get('end_date')
         # Check for search terms in results (if applicable)
         # NOTE: This is a soft check - if we got results, the SQL likely worked correctly
         # IMPORTANT: Skip this for vector search! Vector search finds by semantic meaning,

@@ -1367,7 +1367,7 @@ async def handle_run_calendar_event(args):
         for agent in agents_with_calendars:
             calendar_mgr = get_calendar_manager(account=google_account_for_workspace(agent.workspace))
             upcoming = calendar_mgr.get_upcoming_agent_runs(
-                hours_ahead=24,
+                hours_ahead=168,  # 7 days
                 calendar_id=agent.calendar_id,
             )
 
@@ -1380,7 +1380,7 @@ async def handle_run_calendar_event(args):
                 all_events.append((start_time, event, agent))
 
         if not all_events:
-            console.print("❌ No upcoming calendar events found in the next 24 hours", style="yellow")
+            console.print("❌ No upcoming calendar events found in the next 7 days", style="yellow")
             console.print("\nTip: Create an event in your agent's Google Calendar", style="dim")
             return
 

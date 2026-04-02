@@ -36,6 +36,66 @@ from promaia.utils.env_writer import (
 console = Console()
 
 
+# ── Connector descriptions ────────────────────────────────────────────
+
+CONNECTOR_DESCRIPTIONS = {
+    "notion": "Select the databases you use most",
+    "google": "Select the sheets and folders you use often",
+    "slack": "Option 1 for where you'll interact with Promaia — select the channels you want Promaia to have access to",
+    "discord": "Option 2 for where you'll interact with Promaia — select the channels you want Promaia to have access to",
+    "ai": "Which AI model powers Promaia's brain — we recommend Anthropic or OpenRouter",
+}
+
+
+def _has_valid_credentials(integration_name: str) -> bool:
+    """Check if an integration already has valid credentials.
+
+    Checks both global and workspace-specific credential paths.
+    """
+    try:
+        from promaia.auth.registry import get_integration
+        from promaia.config.workspaces import get_workspace_manager
+        integration = get_integration(integration_name)
+        if not integration:
+            return False
+        # Check global/default credential
+        if integration.get_default_credential():
+            return True
+        # Check workspace-specific credentials
+        manager = get_workspace_manager()
+        workspace = manager.get_default_workspace()
+        if workspace and integration_name == "notion":
+            cred = integration.get_notion_credentials(workspace)
+            if cred:
+                return True
+        elif workspace and integration_name == "slack":
+            cred = integration.get_slack_credentials(workspace)
+            if cred and cred.get("bot_token"):
+                return True
+        elif workspace and integration_name == "google":
+            accounts = integration.list_authenticated_accounts()
+            if accounts:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _confirm_skip_auth(name: str) -> bool:
+    """Check if credentials exist and ask whether to reconfigure.
+
+    Returns True if auth should be skipped (already configured + user says no to reconfigure).
+    """
+    if _has_valid_credentials(name):
+        console.print(f"  [green]✓[/green] {name.title()} already connected")
+        try:
+            answer = input("  Re-authenticate? [y/N]: ").strip().lower()
+            return answer not in ("y", "yes")
+        except (KeyboardInterrupt, EOFError):
+            return True
+    return False
+
+
 # ── Docker detection ─────────────────────────────────────────────────
 
 
@@ -80,9 +140,16 @@ def ensure_config_file() -> bool:
 def handle_setup(args):
     """Entry point for `maia setup`. Sync wrapper around async flow."""
     try:
-        asyncio.run(_run_setup(args))
+        result = asyncio.run(_run_setup(args))
     except KeyboardInterrupt:
         console.print("\n[yellow]Setup interrupted.[/yellow]")
+        return
+
+    # Launch chat for agent creation outside the async context
+    # (chat() uses asyncio.run() internally, can't nest)
+    if isinstance(result, dict) and result.get("launch_chat"):
+        from promaia.chat.interface import chat
+        chat(**result["chat_kwargs"])
 
 
 async def _run_setup(args):
@@ -96,8 +163,8 @@ async def _run_setup(args):
     # Handle single-service setup: maia setup slack, maia setup notion, etc.
     service = getattr(args, "service", None)
     if service:
-        await _run_single_service_setup(service)
-        return
+        result = await _run_single_service_setup(service)
+        return result  # May contain launch_chat signal for agent setup
 
     _print_banner()
 
@@ -107,6 +174,17 @@ async def _run_setup(args):
 
     from promaia.auth.registry import get_ai_integrations, get_integration
     from promaia.auth.flow import configure_credential
+    from promaia.cli.setup_widgets import SetupProgress
+
+    # Progress footer
+    progress = SetupProgress(console=console)
+    progress.set_description("Workspace", "Name your Promaia workspace")
+    progress.set_description("AI", CONNECTOR_DESCRIPTIONS["ai"])
+    progress.set_description("Notion", CONNECTOR_DESCRIPTIONS["notion"])
+    progress.set_description("Google", CONNECTOR_DESCRIPTIONS["google"])
+    progress.set_description("Slack", CONNECTOR_DESCRIPTIONS["slack"])
+    progress.set_description("Sync", "Syncing your data sources")
+    progress.set_description("Agent", "Create your first agent")
 
     # Step 1: Ensure config file exists
     if ensure_config_file():
@@ -118,59 +196,157 @@ async def _run_setup(args):
         )
 
     # Step 2: Name your workspace
-    console.print()
-    console.print("[bold]Name your Promaia workspace[/bold]\n")
+    progress.render()
     workspace_slug = _setup_workspace(console)
+    progress.advance()
 
     # Step 3: AI provider
-    console.print()
-    integrations = get_ai_integrations()
-    selected = await _select_provider(integrations)
-    if selected:
-        await _safe_step(configure_credential(selected, console), "AI provider")
+    progress.render()
+    try:
+        skip_ai = input("  Connect an AI provider? [Y/n]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        skip_ai = "n"
+    if skip_ai not in ("n", "no"):
+        integrations = get_ai_integrations()
+        selected = await _select_provider(integrations)
+        if selected:
+            await _safe_step(configure_credential(selected, console), "AI provider")
+    else:
+        selected = None
+    progress.advance()
 
     # Step 4: Connect Notion
-    console.print()
-    notion = get_integration("notion")
-    notion_success = await _safe_step(configure_credential(notion, console), "Notion")
+    progress.render()
+    notion_success = False
+    try:
+        skip_notion = input("  Connect Notion? [Y/n]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        skip_notion = "n"
+    if skip_notion not in ("n", "no"):
+        if _confirm_skip_auth("notion"):
+            notion_success = True
+        else:
+            notion = get_integration("notion")
+            notion_success = await _safe_step(configure_credential(notion, console), "Notion")
+            if notion_success and workspace_slug:
+                _copy_notion_creds_to_workspace(notion, workspace_slug)
 
-    # Copy Notion credentials to workspace if needed
-    if notion_success and workspace_slug:
-        _copy_notion_creds_to_workspace(notion, workspace_slug)
+        if workspace_slug:
+            console.print()
+            console.print("[bold]Select Notion databases to sync[/bold]\n")
+            await _safe_step(
+                _browse_notion_databases(workspace_slug, console),
+                "database selection"
+            )
+        progress.advance()
+    else:
+        progress.skip()
 
-    # Step 5: Select Notion databases
-    if workspace_slug:
+    # Step 5: Connect Google
+    progress.render()
+    try:
+        skip_google = input("  Connect Google? [Y/n]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        skip_google = "n"
+    if skip_google not in ("n", "no"):
+        if not _confirm_skip_auth("google"):
+            google = get_integration("google")
+            await _safe_step(configure_credential(google, console), "Google")
+        # Browse Drive for sheets and folders
         console.print()
-        console.print("[bold]Select Notion databases to sync[/bold]\n")
+        console.print(f"[bold]{CONNECTOR_DESCRIPTIONS['google']}[/bold]\n")
+        await _safe_step(_browse_google_drive(workspace_slug, console), "Drive browser")
+
+        # Gmail setup — add email as sync source
         await _safe_step(
-            _browse_notion_databases(workspace_slug, console),
-            "database selection"
+            _setup_gmail_sync(workspace_slug, console),
+            "Gmail sync"
         )
+        progress.advance()
+    else:
+        progress.skip()
 
-    # Step 6: Connect Google
-    console.print()
-    google = get_integration("google")
-    await _safe_step(configure_credential(google, console), "Google")
+    # Step 6: Connect Slack
+    progress.render()
+    slack_success = False
+    try:
+        skip_slack = input("  Connect Slack? [Y/n]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        skip_slack = "n"
+    if skip_slack not in ("n", "no"):
+        if not _confirm_skip_auth("slack"):
+            slack_success = await _safe_step(
+                _setup_slack(workspace_slug, console),
+                "Slack"
+            )
+        else:
+            slack_success = True
+        progress.advance()
+    else:
+        progress.skip()
 
-    # Step 7: Connect Slack
-    console.print()
-    slack_success = await _safe_step(
-        _setup_slack(workspace_slug, console),
-        "Slack"
-    )
-
-    # Step 8: Initial sync
+    # Step 7: Initial sync
+    progress.render()
+    workspace_dbs = []
     if workspace_slug:
         from promaia.config.databases import get_database_manager
         db_manager = get_database_manager()
         workspace_dbs = db_manager.get_workspace_databases(workspace_slug)
         if workspace_dbs:
-            console.print()
-            console.print("[bold]Syncing your data[/bold]\n")
             console.print(f"  [dim]Syncing {len(workspace_dbs)} source(s)...[/dim]")
             await _safe_step(_run_initial_sync(workspace_slug), "initial sync")
+    progress.advance()
 
-    # Step 9: Next steps
+    # Step 9: Create first agent
+    if selected:  # Only offer if an AI provider was configured
+        console.print()
+        try:
+            create_first = input("Would you like to create your first agent? (Y/n): ").strip().lower()
+            if create_first in ("", "y", "yes"):
+                # Gather context about what was just connected
+                connected = []
+                if notion_success:
+                    connected.append("Notion")
+                connected.append("Google (Gmail, Calendar, Sheets)")
+                if slack_success:
+                    connected.append("Slack")
+
+                db_names = [
+                    getattr(db, 'nickname', getattr(db, 'name', str(db)))
+                    for db in workspace_dbs
+                ]
+
+                from datetime import datetime as _dt
+                local_tz = _dt.now().astimezone().tzname() or "UTC"
+
+                onboarding_context = {
+                    "workspace": workspace_slug or "default",
+                    "integrations": ", ".join(connected),
+                    "databases": ", ".join(db_names) if db_names else "None yet",
+                    "timezone": local_tz,
+                }
+
+                console.print("\n[bold]Let's set up your first agent![/bold]\n")
+
+                # Return signal to launch chat after async context exits
+                # (chat() uses asyncio.run() internally, can't nest)
+                return {
+                    "launch_chat": True,
+                    "chat_kwargs": {
+                        "workspace": workspace_slug,
+                        "initial_messages": [{
+                            "role": "user",
+                            "content": "I just finished setup. Help me create my first agent.",
+                        }],
+                        "auto_respond_to_initial": True,
+                        "active_workflow": "onboarding_agent",
+                        "workflow_context": onboarding_context,
+                    },
+                }
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n  [dim]Skipped — you can create agents anytime with: maia chat[/dim]")
+
+    # Step 10: Next steps
     console.print()
     from_installer = os.environ.get("PROMAIA_FROM_INSTALLER") == "1"
     maia_installed = os.environ.get("PROMAIA_MAIA_INSTALLED") == "1"
@@ -208,26 +384,374 @@ async def _run_single_service_setup(service):
     service = service.lower().strip()
 
     if service == "slack":
-        await _setup_slack(workspace, console)
+        if not _confirm_skip_auth("slack"):
+            await _setup_slack(workspace, console)
+        else:
+            # Already authed — jump to channel selection
+            try:
+                slack = get_integration("slack")
+                cred = slack.get_default_credential()
+                if cred:
+                    await _browse_slack_channels(workspace, cred, console)
+            except Exception:
+                pass
     elif service == "notion":
-        notion = get_integration("notion")
-        await configure_credential(notion, console)
-        _copy_notion_creds_to_workspace(notion, workspace)
+        if not _confirm_skip_auth("notion"):
+            notion = get_integration("notion")
+            await configure_credential(notion, console)
+            _copy_notion_creds_to_workspace(notion, workspace)
         console.print()
-        console.print("[bold]Select Notion databases to sync[/bold]\n")
+        console.print(f"[bold]{CONNECTOR_DESCRIPTIONS['notion']}[/bold]\n")
         await _browse_notion_databases(workspace, console)
     elif service == "google":
-        google = get_integration("google")
-        await configure_credential(google, console)
+        if not _confirm_skip_auth("google"):
+            google = get_integration("google")
+            await configure_credential(google, console)
+        console.print()
+        console.print(f"[bold]{CONNECTOR_DESCRIPTIONS['google']}[/bold]\n")
+        await _browse_google_drive(workspace, console)
+        await _setup_gmail_sync(workspace, console)
+    elif service == "gmail":
+        if not _confirm_skip_auth("google"):
+            google = get_integration("google")
+            await configure_credential(google, console)
+        await _setup_gmail_sync(workspace, console)
     elif service in ("llm", "ai", "openrouter", "anthropic"):
         from promaia.auth.registry import get_ai_integrations
         integrations = get_ai_integrations()
         selected = await _select_provider(integrations)
         if selected:
             await configure_credential(selected, console)
+    elif service == "agent":
+        # Gather context for the onboarding agent workflow
+        from promaia.config.databases import get_database_manager
+        db_manager = get_database_manager()
+        workspace_dbs = db_manager.get_workspace_databases(workspace)
+        db_names = [
+            getattr(db, 'nickname', getattr(db, 'name', str(db)))
+            for db in workspace_dbs
+        ]
+
+        # Detect connected integrations
+        connected = []
+        try:
+            notion = get_integration("notion")
+            if notion.get_default_credential():
+                connected.append("Notion")
+        except Exception:
+            pass
+        connected.append("Google (Gmail, Calendar, Sheets)")
+        try:
+            slack = get_integration("slack")
+            if slack.get_default_credential():
+                connected.append("Slack")
+        except Exception:
+            pass
+
+        from datetime import datetime
+        local_tz = datetime.now().astimezone().tzname() or "UTC"
+
+        onboarding_context = {
+            "workspace": workspace,
+            "integrations": ", ".join(connected) if connected else "None yet",
+            "databases": ", ".join(db_names) if db_names else "None yet",
+            "timezone": local_tz,
+        }
+
+        console.print("[bold]Let's set up an agent![/bold]\n")
+
+        return {
+            "launch_chat": True,
+            "chat_kwargs": {
+                "workspace": workspace,
+                "initial_messages": [{
+                    "role": "user",
+                    "content": "Help me create an agent.",
+                }],
+                "auto_respond_to_initial": True,
+                "active_workflow": "onboarding_agent",
+                "workflow_context": onboarding_context,
+            },
+        }
+    elif service == "mcp":
+        await _setup_mcp_server(console)
     else:
         console.print(f"[yellow]Unknown service: {service}[/yellow]")
-        console.print("[dim]Available: slack, notion, google, llm[/dim]")
+        console.print("[dim]Available: slack, notion, google, gmail, llm, agent, mcp[/dim]")
+
+
+async def _setup_mcp_server(c):
+    """Interactive wizard to add an MCP server."""
+    import json as _json
+    from rich.prompt import Prompt, Confirm
+    from rich.panel import Panel
+    from promaia.agents.mcp_loader import _find_mcp_servers_json
+    from promaia.config.mcp_servers import McpServerManager, McpServerConfig
+    from promaia.agents.agent_config import load_agents, save_agent
+
+    c.print(Panel("[bold]MCP Server Setup[/bold]\n\n"
+                   "Paste a URL for a remote server, or a Claude Desktop JSON config block.\n"
+                   "End multi-line JSON with a blank line.",
+                   style="cyan", padding=(1, 2)))
+
+    # --- Step 1: Read input ---
+    raw = _read_mcp_multiline_input()
+    if not raw.strip():
+        c.print("[dim]Nothing entered, skipping.[/dim]")
+        return
+
+    # --- Step 2: Parse ---
+    suggested_name, transport, parsed = _parse_mcp_input(raw)
+    if parsed is None:
+        c.print("[red]Could not parse input.[/red] Expected a URL (https://...) or JSON config block.")
+        return
+
+    c.print(f"  Detected transport: [bold]{transport}[/bold]")
+
+    # --- Step 3: Server name ---
+    default_name = suggested_name or "my-server"
+    name = Prompt.ask("  Server name", default=default_name).strip()
+
+    # --- Step 4: Description ---
+    description = Prompt.ask("  Description (optional)", default="").strip()
+    parsed["description"] = description
+    parsed["transport"] = transport
+    parsed["enabled"] = True
+
+    # --- Step 5: Resolve env var placeholders ---
+    if parsed.get("env"):
+        parsed["env"] = _prompt_mcp_env_vars(parsed["env"], c)
+
+    # --- Step 6: Validate ---
+    config = McpServerConfig(
+        name=name,
+        description=parsed.get("description", ""),
+        command=parsed.get("command", []),
+        args=parsed.get("args", []),
+        env=parsed.get("env", {}),
+        working_dir=parsed.get("working_dir"),
+        timeout=parsed.get("timeout", 30),
+        enabled=True,
+        transport=transport,
+        url=parsed.get("url"),
+    )
+    config_path = _find_mcp_servers_json()
+    if not config_path:
+        from promaia.utils.env_writer import get_data_dir
+        config_path = get_data_dir() / "mcp_servers.json"
+    mgr = McpServerManager(str(config_path))
+    errors = mgr.validate_server_config(config)
+    if errors:
+        for e in errors:
+            c.print(f"  [yellow]Warning:[/yellow] {e}")
+        if not Confirm.ask("  Save anyway?", default=False):
+            return
+
+    # --- Step 7: Test connection ---
+    if Confirm.ask("  Test connection?", default=True):
+        await _safe_step(_test_mcp_connection(config, c), "connection test")
+
+    # --- Step 8: Save server ---
+    mgr.add_server(name, parsed)
+    c.print(f"\n  [green]Saved[/green] [bold]{name}[/bold] to mcp_servers.json")
+
+    # --- Step 9: Assign to agents ---
+    agents = load_agents()
+    if agents:
+        # Always assign to Maia (default agent)
+        maia_agent = None
+        other_agents = []
+        for agent in agents:
+            if agent.name.lower() == "maia":
+                maia_agent = agent
+            else:
+                other_agents.append(agent)
+
+        if maia_agent:
+            if name not in maia_agent.mcp_tools:
+                maia_agent.mcp_tools.append(name)
+                save_agent(maia_agent)
+            c.print(f"  [green]OK[/green] Added to [bold]Maia[/bold] (default agent)")
+
+        # Let user pick other agents
+        if other_agents:
+            from promaia.cli.setup_widgets import unified_source_selector
+            c.print("\n[bold]Which other agents should have access?[/bold]")
+            items = [
+                {"id": a.name, "label": a.name, "group": ""}
+                for a in other_agents
+            ]
+            selected = await unified_source_selector(
+                title=f"Assign '{name}' to agents",
+                items=items,
+            )
+            for sel in selected:
+                agent = next((a for a in other_agents if a.name == sel["id"]), None)
+                if agent and name not in agent.mcp_tools:
+                    agent.mcp_tools.append(name)
+                    save_agent(agent)
+                    c.print(f"  [green]OK[/green] Added to [bold]{agent.name}[/bold]")
+
+    c.print("\n[green]Done![/green] Run [bold]maia services restart all[/bold] to pick up the new server.\n")
+
+
+def _read_mcp_multiline_input() -> str:
+    """Read input until braces balance (JSON) or a single-line URL is detected."""
+    lines = []
+    brace_depth = 0
+    while True:
+        try:
+            line = input()
+        except (KeyboardInterrupt, EOFError):
+            break
+        lines.append(line)
+        brace_depth += line.count("{") - line.count("}")
+        # Single-line URL
+        if len(lines) == 1 and line.strip().startswith("http"):
+            break
+        # JSON looks complete
+        if brace_depth <= 0 and any("{" in l for l in lines):
+            break
+        # Blank line after content
+        if not line.strip() and len(lines) > 1:
+            break
+    return "\n".join(lines)
+
+
+def _parse_mcp_input(raw: str):
+    """Parse user input into (suggested_name, transport, config_dict) or (None, None, None).
+
+    Accepts:
+    - A URL (https://...)
+    - Claude Desktop format: {"mcpServers": {"name": {...}}}
+    - Single named server: {"name": {"command": ..., ...}}
+    - Bare config: {"command": "npx", "args": [...]}
+    """
+    import json as _json
+    from urllib.parse import urlparse
+
+    raw = raw.strip()
+
+    # URL detection
+    if raw.startswith("http://") or raw.startswith("https://"):
+        parsed_url = urlparse(raw)
+        hostname_parts = (parsed_url.hostname or "server").split(".")
+        suggested = hostname_parts[-2] if len(hostname_parts) >= 2 else hostname_parts[0]
+        return (suggested, "streamable_http", {"url": raw, "env": {}})
+
+    # JSON detection
+    try:
+        data = _json.loads(raw)
+    except _json.JSONDecodeError:
+        return (None, None, None)
+
+    if not isinstance(data, dict):
+        return (None, None, None)
+
+    # Claude Desktop format: {"mcpServers": {"name": {...}}}
+    if "mcpServers" in data:
+        servers = data["mcpServers"]
+        if not servers:
+            return (None, None, None)
+        name = next(iter(servers))
+        cfg = servers[name]
+        transport = "streamable_http" if "url" in cfg else cfg.get("transport", "stdio")
+        return (name, transport, _normalize_claude_desktop_config(cfg))
+
+    # Single named server: {"name": {"command": ..., ...}} or {"name": {"url": ...}}
+    if len(data) == 1:
+        key, val = next(iter(data.items()))
+        if isinstance(val, dict) and ("command" in val or "url" in val):
+            transport = "streamable_http" if "url" in val else val.get("transport", "stdio")
+            return (key, transport, _normalize_claude_desktop_config(val))
+
+    # Bare config: {"command": "npx", "args": [...]}
+    if "command" in data or "url" in data:
+        suggested = _suggest_mcp_name_from_config(data)
+        transport = "streamable_http" if "url" in data else "stdio"
+        return (suggested, transport, _normalize_claude_desktop_config(data))
+
+    return (None, None, None)
+
+
+def _normalize_claude_desktop_config(cfg: dict) -> dict:
+    """Convert Claude Desktop server config to promaia format.
+
+    Claude Desktop uses "command": "npx" (string) + "args": ["-y", "@pkg"]
+    Promaia uses "command": ["npx", "-y", "@pkg"] + "args": []
+    """
+    result = dict(cfg)
+    if isinstance(result.get("command"), str):
+        cmd_str = result["command"]
+        args = result.get("args", [])
+        result["command"] = [cmd_str] + list(args)
+        result["args"] = []
+    return result
+
+
+def _suggest_mcp_name_from_config(cfg: dict):
+    """Extract a suggested server name from command or URL."""
+    from urllib.parse import urlparse
+
+    cmd = cfg.get("command", [])
+    if isinstance(cmd, str):
+        cmd = [cmd] + cfg.get("args", [])
+    # Find npx package name
+    for part in cmd:
+        if "/" in part and not part.startswith("-"):
+            name = part.split("/")[-1]
+            # Strip common prefixes like "server-"
+            if name.startswith("server-"):
+                name = name[7:]
+            return name
+    if cfg.get("url"):
+        h = urlparse(cfg["url"]).hostname or ""
+        parts = h.split(".")
+        return parts[-2] if len(parts) >= 2 else parts[0]
+    return None
+
+
+def _prompt_mcp_env_vars(env: dict, c) -> dict:
+    """Prompt user for any ${PLACEHOLDER} values in env dict."""
+    import re
+    from rich.prompt import Prompt
+
+    resolved = {}
+    for key, value in env.items():
+        placeholders = re.findall(r'\$\{([^}]+)\}', str(value))
+        # Skip PROMAIA_AUTO placeholders — those resolve at runtime
+        if '{PROMAIA_AUTO:' in str(value):
+            resolved[key] = value
+            continue
+        if placeholders:
+            c.print(f"  [yellow]{key}[/yellow] needs: {', '.join(placeholders)}")
+            actual = Prompt.ask(f"    Value for {key}").strip()
+            resolved[key] = actual if actual else value
+        else:
+            resolved[key] = value
+    return resolved
+
+
+async def _test_mcp_connection(config, c):
+    """Attempt to connect to an MCP server and list its tools."""
+    from promaia.mcp.client import McpClient
+
+    c.print("  [dim]Connecting...[/dim]")
+    client = McpClient()
+    success = await client.connect_to_server(config)
+    if success:
+        caps = client.server_capabilities.get(config.name)
+        tool_count = len(caps.tools) if caps and caps.tools else 0
+        c.print(f"  [green]OK[/green] Connected — found {tool_count} tool(s)")
+        if caps and caps.tools:
+            for t in caps.tools[:5]:
+                desc = (t.description or "")[:60]
+                c.print(f"    - {t.name}: {desc}")
+            if tool_count > 5:
+                c.print(f"    ... and {tool_count - 5} more")
+        await client.disconnect_all()
+    else:
+        c.print("  [red]FAIL[/red] Could not connect to server")
 
 
 async def _safe_step(coro, name="step"):
@@ -286,6 +810,72 @@ def _copy_notion_creds_to_workspace(notion_integration, workspace):
         _shutil.copy2(global_token, ws_token)
 
 
+async def _setup_gmail_sync(workspace, c=None):
+    """Offer to add Gmail as a sync source after Google OAuth."""
+    from promaia.auth.registry import get_integration
+    from promaia.config.databases import get_database_manager
+
+    c = c or console
+
+    google = get_integration("google")
+
+    # Try per-account credentials first, then fall back to fetching
+    # email from the token via Google's API (refreshes if expired)
+    accounts = google.list_authenticated_accounts()
+    if accounts:
+        email = accounts[0]
+    else:
+        creds = google.get_google_credentials()
+        if not creds or not creds.token:
+            return
+        # Use Gmail API to get the authenticated email address
+        # (tokeninfo doesn't include email without openid scope)
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+                    headers={"Authorization": f"Bearer {creds.token}"},
+                )
+                if resp.status_code == 200:
+                    email = resp.json().get("emailAddress")
+                else:
+                    email = None
+        except Exception:
+            email = None
+        if not email:
+            c.print("  [dim]Could not determine Gmail address — skipping[/dim]")
+            return
+
+    # Check if Gmail is already configured
+    db_manager = get_database_manager()
+    existing_gmail = any(
+        db.source_type == "gmail"
+        for db in db_manager.get_workspace_databases(workspace)
+    )
+    if existing_gmail:
+        c.print("  [green]OK[/green] Gmail sync already configured")
+        return
+    try:
+        answer = input(f"\n  Enable Gmail sync for {email}? [Y/n]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        answer = "n"
+    if answer in ("n", "no"):
+        return
+
+    config = {
+        "source_type": "gmail",
+        "database_id": email,
+        "description": f"Gmail for {email}",
+        "workspace": workspace,
+        "sync_enabled": True,
+        "default_days": 7,
+        "save_markdown": True,
+    }
+    db_manager.add_database("gmail", config, workspace)
+    c.print(f"  [green]OK[/green] Added Gmail sync for {email}")
+
+
 async def _setup_slack(workspace, c=None):
     """Set up Slack: create bot via manifest redirect, collect tokens, select channels."""
     import httpx
@@ -315,7 +905,15 @@ async def _setup_slack(workspace, c=None):
             c.print("  [dim]Reconfiguring...[/dim]\n")
 
     c.print("[bold]Connect Slack[/bold]\n")
-    c.print("  Create your Slack bot:")
+    c.print(f"  [dim]{CONNECTOR_DESCRIPTIONS['slack']}[/dim]\n")
+    c.print("  To connect Slack, you'll create a bot app:\n")
+    c.print("    1. Click the link below (or scan the QR code)")
+    c.print("    2. Pick your Slack workspace when prompted")
+    c.print("    3. Click \"Create\" to install the bot")
+    c.print("    4. Go to \"OAuth & Permissions\" → copy the Bot Token (starts with xoxb-)")
+    c.print("    5. Go to \"Basic Information\" → scroll to \"App-Level Tokens\"")
+    c.print("       → create one with [bold]connections:write[/bold] scope → copy it (starts with xapp-)")
+    c.print("    6. Paste both tokens below\n")
     c.print("  Visit: [link=https://oauth.promaia.workers.dev/slack]https://oauth.promaia.workers.dev/slack[/link]\n")
 
     # QR code
@@ -325,7 +923,7 @@ async def _setup_slack(workspace, c=None):
     except Exception:
         pass
 
-    c.print("  [dim]After creating the bot, copy the two tokens below.[/dim]\n")
+    c.print()
 
     # Collect tokens
     bot_token = Prompt.ask("  Bot Token (xoxb-...)").strip()
@@ -607,16 +1205,26 @@ async def _browse_notion_databases(workspace, c=None):
             "Content-Type": "application/json",
         }
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                "https://api.notion.com/v1/search",
-                headers=headers,
-                json={"filter": {"value": "database", "property": "object"}},
-            )
-            if resp.status_code != 200:
-                c.print(f"  [yellow]Could not search Notion databases (HTTP {resp.status_code})[/yellow]")
-                return
-
-            results = resp.json().get("results", [])
+            # Paginate through all databases (Notion returns max 100 per page)
+            results = []
+            start_cursor = None
+            while True:
+                body = {"filter": {"value": "database", "property": "object"}, "page_size": 100}
+                if start_cursor:
+                    body["start_cursor"] = start_cursor
+                resp = await client.post(
+                    "https://api.notion.com/v1/search",
+                    headers=headers,
+                    json=body,
+                )
+                if resp.status_code != 200:
+                    c.print(f"  [yellow]Could not search Notion databases (HTTP {resp.status_code})[/yellow]")
+                    return
+                data = resp.json()
+                results.extend(data.get("results", []))
+                if not data.get("has_more") or not data.get("next_cursor"):
+                    break
+                start_cursor = data["next_cursor"]
             if not results:
                 c.print("  [dim]No databases found. Share databases with your Notion integration to see them here.[/dim]")
                 return
@@ -638,99 +1246,131 @@ async def _browse_notion_databases(workspace, c=None):
         c.print(f"  [yellow]Could not connect to Notion: {e}[/yellow]")
         return
 
-    # Start with top-level databases only
-    all_databases = list(top_level)
-
     # Check which are already added
     db_manager = get_database_manager()
     existing_ids = set()
     for db_config in db_manager.get_workspace_databases(workspace):
         existing_ids.add(db_config.database_id)
 
-    # Filter and select from top-level first
-    new_databases = [(db_id, title, group) for db_id, title, group in all_databases if db_id not in existing_ids]
-    already_added = len(all_databases) - len(new_databases)
+    # Build items for unified selector (top-level only initially)
+    from promaia.cli.setup_widgets import unified_source_selector
 
+    items = []
+    for db_id, title, group in top_level:
+        if db_id in existing_ids:
+            continue
+        items.append({
+            "id": db_id,
+            "label": title,
+            "group": group,
+            "icon": "📓",
+            "name": title,
+        })
+    items.sort(key=lambda x: x["label"].lower())
+
+    already_added = len(top_level) - len(items)
     if already_added > 0:
         c.print(f"  [dim]{already_added} database(s) already configured[/dim]")
 
-    if not new_databases and nested_count == 0:
+    if not items and nested_count == 0:
         c.print("  [green]OK[/green] All available databases are already configured")
         return
 
-    all_selected = []
-
-    if new_databases:
-        new_databases.sort(key=lambda x: x[1].lower())
-        if nested_count > 0:
-            c.print(f"  [dim]Showing {len(new_databases)} top-level databases ({nested_count} more in sub-pages)[/dim]")
-
-        selected = await _multi_select_flat(new_databases, c)
-        if selected:
-            all_selected.extend(selected)
-
-    # Offer to load nested databases
-    if nested_count > 0:
-        from rich.prompt import Prompt
-        show_more = Prompt.ask(
-            f"\n  Show {nested_count} more databases from sub-pages?",
-            choices=["y", "n"], default="n"
-        ).strip().lower()
-
-        if show_more == "y":
-            c.print("  [dim]Loading nested databases...[/dim]")
-            try:
-                async with httpx.AsyncClient(timeout=60.0) as client2:
-                    parent_names = {}
-                    parent_page_ids = set()
-                    for _db, _db_id, _title, p in nested_raw:
-                        if p.get("type") == "page_id":
-                            parent_page_ids.add(p["page_id"])
-
-                    for pid in parent_page_ids:
-                        try:
-                            pr = await client2.get(f"https://api.notion.com/v1/pages/{pid}", headers=headers)
-                            if pr.status_code == 200:
-                                for _pname, pval in pr.json().get("properties", {}).items():
-                                    if pval.get("type") == "title":
-                                        parts = pval.get("title", [])
-                                        parent_names[pid] = "".join(t.get("plain_text", "") for t in parts).strip() or ""
-                                        break
-                        except Exception:
-                            pass
-
-                nested_databases = []
-                for _db, db_id, title, p in nested_raw:
-                    if db_id in existing_ids:
-                        continue
+    # Load more callback: loads nested databases on demand
+    async def _load_nested():
+        c.print("  [dim]Loading nested databases...[/dim]")
+        new_items = []
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client2:
+                parent_names = {}
+                parent_page_ids = set()
+                for _db, _db_id, _title, p in nested_raw:
                     if p.get("type") == "page_id":
-                        group = parent_names.get(p["page_id"], "(other)")
-                    else:
-                        group = "(other)"
-                    nested_databases.append((db_id, title, group))
+                        parent_page_ids.add(p["page_id"])
 
-                if nested_databases:
-                    nested_databases.sort(key=lambda x: (x[2].lower(), x[1].lower()))
-                    selected2 = await _multi_select_flat(nested_databases, c)
-                    if selected2:
-                        all_selected.extend(selected2)
+                for pid in parent_page_ids:
+                    try:
+                        pr = await client2.get(f"https://api.notion.com/v1/pages/{pid}", headers=headers)
+                        if pr.status_code == 200:
+                            for _pname, pval in pr.json().get("properties", {}).items():
+                                if pval.get("type") == "title":
+                                    parts = pval.get("title", [])
+                                    parent_names[pid] = "".join(t.get("plain_text", "") for t in parts).strip() or ""
+                                    break
+                    except Exception:
+                        pass
+
+            for _db, db_id, title, p in nested_raw:
+                if db_id in existing_ids:
+                    continue
+                if p.get("type") == "page_id":
+                    group = parent_names.get(p["page_id"], "(other)")
                 else:
-                    c.print("  [dim]All nested databases already configured[/dim]")
-            except Exception as e:
-                c.print(f"  [yellow]Could not load nested databases: {e}[/yellow]")
+                    group = "(other)"
+                new_items.append({
+                    "id": db_id,
+                    "label": title,
+                    "group": group,
+                    "icon": "📓",
+                    "name": title,
+                })
+            new_items.sort(key=lambda x: (x["group"].lower(), x["label"].lower()))
+        except Exception as e:
+            c.print(f"  [yellow]Could not load nested databases: {e}[/yellow]")
+        return new_items
 
-    if not all_selected:
+    # Paste link callback: resolve Notion database URL
+    async def _resolve_notion_link(url):
+        import re as _re
+        # Extract 32-char hex ID from Notion URL
+        m = _re.search(r'([a-f0-9]{32})', url.replace("-", ""))
+        if not m:
+            return None
+        raw_hex = m.group(1)
+        db_id = f"{raw_hex[:8]}-{raw_hex[8:12]}-{raw_hex[12:16]}-{raw_hex[16:20]}-{raw_hex[20:]}"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client3:
+                resp = await client3.get(
+                    f"https://api.notion.com/v1/databases/{db_id}",
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    title = "".join(t.get("plain_text", "") for t in data.get("title", [])).strip() or "Untitled"
+                    return {
+                        "id": db_id,
+                        "label": title,
+                        "group": "",
+                        "icon": "📓",
+                        "name": title,
+                    }
+        except Exception:
+            pass
+        return None
+
+    load_more_cb = _load_nested if nested_count > 0 else None
+    load_more_label = f"Load {nested_count} more from sub-pages"
+
+    selected = await unified_source_selector(
+        title="Notion — Select Databases",
+        items=items,
+        load_more_callback=load_more_cb,
+        load_more_label=load_more_label,
+        paste_link_callback=_resolve_notion_link,
+    )
+
+    if not selected:
         c.print("  [dim]No databases selected[/dim]")
         return
 
     # Add selected databases
     added = 0
-    for db_id, title, _group in all_selected:
-        name = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_") or "untitled"
+    for item in selected:
+        name = re.sub(r"[^a-z0-9]+", "_", item["name"].lower()).strip("_") or "untitled"
         config = {
             "source_type": "notion",
-            "database_id": db_id,
-            "description": title,
+            "database_id": item["id"],
+            "description": item["name"],
             "workspace": workspace,
             "sync_enabled": True,
             "include_properties": True,
@@ -741,6 +1381,177 @@ async def _browse_notion_databases(workspace, c=None):
             added += 1
 
     c.print(f"  [green]OK[/green] Added {added} database(s) to workspace [bold]{workspace}[/bold]")
+
+
+async def _browse_google_drive(workspace, c=None):
+    """Browse Google Sheets and let user select which to sync."""
+    import re
+    from promaia.auth.registry import get_integration
+    from promaia.config.databases import get_database_manager
+    from promaia.cli.setup_widgets import unified_source_selector
+
+    c = c or console
+
+    google = get_integration("google")
+    creds = google.get_google_credentials()
+    if not creds:
+        for acct in google.list_authenticated_accounts():
+            creds = google.get_google_credentials(acct)
+            if creds:
+                break
+    if not creds:
+        c.print("  [dim]No Google credentials found — skipping[/dim]")
+        return
+
+    accounts = google.list_authenticated_accounts()
+    google_account = accounts[0] if accounts else ""
+
+    try:
+        from googleapiclient.discovery import build
+        drive_service = build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        c.print(f"  [yellow]Could not connect to Google Drive: {e}[/yellow]")
+        return
+
+    SHEET_MIME = "application/vnd.google-apps.spreadsheet"
+
+    c.print("  [dim]Loading spreadsheets...[/dim]")
+
+    db_manager = get_database_manager()
+    existing_ids = set()
+    for db_config in db_manager.get_workspace_databases(workspace):
+        existing_ids.add(db_config.database_id)
+
+    # Fetch recent/accessible spreadsheets
+    try:
+        results = drive_service.files().list(
+            q=f"mimeType='{SHEET_MIME}' and trashed = false",
+            pageSize=50,
+            fields="nextPageToken, files(id, name, modifiedTime, starred)",
+            orderBy="modifiedTime desc",
+        ).execute()
+        files = results.get("files", [])
+        next_page_token = results.get("nextPageToken")
+    except Exception as e:
+        c.print(f"  [yellow]Could not list spreadsheets: {e}[/yellow]")
+        return
+
+    if not files:
+        c.print("  [dim]No spreadsheets found in your Google Drive[/dim]")
+        return
+
+    # Build items for unified selector
+    items = []
+    for f in files:
+        fid = f["id"]
+        if fid in existing_ids:
+            continue
+        star = "⭐ " if f.get("starred") else ""
+        meta = f.get("modifiedTime", "")[:10] if f.get("modifiedTime") else ""
+        items.append({
+            "id": fid,
+            "label": f"{star}{f['name']}",
+            "group": "",
+            "icon": "📊",
+            "meta": meta,
+            "name": f["name"],
+        })
+
+    already_added = len(files) - len(items)
+    if already_added > 0:
+        c.print(f"  [dim]{already_added} sheet(s) already configured[/dim]")
+
+    if not items and not next_page_token:
+        c.print("  [green]OK[/green] All spreadsheets are already configured")
+        return
+
+    # Load more callback for pagination
+    async def _load_more_sheets():
+        nonlocal next_page_token
+        if not next_page_token:
+            return []
+        try:
+            more = drive_service.files().list(
+                q=f"mimeType='{SHEET_MIME}' and trashed = false",
+                pageSize=50,
+                fields="nextPageToken, files(id, name, modifiedTime, starred)",
+                orderBy="modifiedTime desc",
+                pageToken=next_page_token,
+            ).execute()
+            next_page_token = more.get("nextPageToken")
+            new_items = []
+            for f in more.get("files", []):
+                if f["id"] in existing_ids:
+                    continue
+                star = "⭐ " if f.get("starred") else ""
+                meta = f.get("modifiedTime", "")[:10] if f.get("modifiedTime") else ""
+                new_items.append({
+                    "id": f["id"],
+                    "label": f"{star}{f['name']}",
+                    "group": "",
+                    "icon": "📊",
+                    "meta": meta,
+                    "name": f["name"],
+                })
+            return new_items
+        except Exception:
+            return []
+
+    # Paste link callback
+    async def _resolve_sheets_link(url):
+        import re as _re
+        m = _re.search(r'/spreadsheets/d/([a-zA-Z0-9_-]+)', url)
+        if not m:
+            m = _re.search(r'/d/([a-zA-Z0-9_-]+)', url)
+        if not m:
+            return None
+        file_id = m.group(1)
+        try:
+            meta = drive_service.files().get(
+                fileId=file_id, fields="id, name, mimeType"
+            ).execute()
+            if meta.get("mimeType") != SHEET_MIME:
+                return None  # Not a spreadsheet
+            return {
+                "id": meta["id"],
+                "label": meta["name"],
+                "group": "",
+                "icon": "📊",
+                "name": meta["name"],
+            }
+        except Exception:
+            return None
+
+    load_more_cb = _load_more_sheets if next_page_token else None
+
+    selected = await unified_source_selector(
+        title="Google Sheets — Select Spreadsheets",
+        items=items,
+        load_more_callback=load_more_cb,
+        load_more_label="Load more spreadsheets",
+        paste_link_callback=_resolve_sheets_link,
+    )
+
+    if not selected:
+        c.print("  [dim]No spreadsheets selected[/dim]")
+        return
+
+    added = 0
+    for item in selected:
+        name = re.sub(r"[^a-z0-9]+", "_", item["name"].lower()).strip("_") or "untitled"
+        config = {
+            "source_type": "google_sheets",
+            "database_id": item["id"],
+            "google_account": google_account,
+            "description": item["name"],
+            "workspace": workspace,
+            "sync_enabled": True,
+            "default_days": 7,
+        }
+        if db_manager.add_database(name, config, workspace):
+            added += 1
+
+    c.print(f"  [green]OK[/green] Added {added} spreadsheet(s) to workspace [bold]{workspace}[/bold]")
 
 
 async def _multi_select_flat(databases, c):

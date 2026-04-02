@@ -26,9 +26,9 @@ class ConversationConnector(BaseConnector):
         self.conversation_source = config.get("database_id", "convos")
         self.workspace = config.get("workspace", "default")
 
-        # Path to the chat history file
+        # Path to the chat history file (matches ChatHistoryManager)
         from promaia.utils.env_writer import get_data_dir
-        default_history = str(get_data_dir() / ".maia_chat_history.json")
+        default_history = str(get_data_dir() / "chat_history.json")
         self.history_file = config.get("history_file", default_history)
 
         self._connected = False

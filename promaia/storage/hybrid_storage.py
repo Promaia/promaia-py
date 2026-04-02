@@ -30,14 +30,25 @@ class HybridContentRegistry:
         self._migrate_add_select_options_table()
         self._migrate_add_relations_table()
     
+    def _connect(self):
+        """Create a SQLite connection with proper settings for concurrent access."""
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        conn.execute("PRAGMA busy_timeout = 5000")
+        return conn
+
     def init_database(self):
         """Initialize the hybrid database with separate tables for each content type."""
         # Ensure directory exists
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
-            
+
+            # Enable WAL mode + busy timeout for concurrent access from multiple services
+            cursor.execute("PRAGMA journal_mode = WAL")
+            cursor.execute("PRAGMA busy_timeout = 5000")
+            cursor.execute("PRAGMA synchronous = NORMAL")
+
             # Create Gmail-specific table with optimized schema for individual messages
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS gmail_content (
@@ -201,6 +212,7 @@ class HybridContentRegistry:
                     -- File metadata
                     file_size INTEGER,
                     checksum TEXT,
+                    workspaces_used TEXT,
 
                     UNIQUE(page_id),
                     UNIQUE(thread_id)
@@ -299,7 +311,7 @@ class HybridContentRegistry:
     def _migrate_add_cc_recipients(self):
         """Migration: Add cc_recipients column to gmail_content table if it doesn't exist."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Check if cc_recipients column exists
@@ -321,7 +333,7 @@ class HybridContentRegistry:
     def _migrate_add_attachments(self):
         """Migration: Add attachments column to gmail_content table if it doesn't exist."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Check if attachments column exists
@@ -343,7 +355,7 @@ class HybridContentRegistry:
     def _migrate_add_property_ids(self):
         """Migration: Add property_id column to notion_property_schema table."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Check if property_id column exists
@@ -365,7 +377,7 @@ class HybridContentRegistry:
     def _migrate_add_select_options_table(self):
         """Migration: Create notion_select_options table for tracking select/multi-select/status options."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Check if table exists
@@ -420,7 +432,7 @@ class HybridContentRegistry:
     def _migrate_add_relations_table(self):
         """Migration: Create notion_relations table for tracking relation properties."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Check if table exists
@@ -526,7 +538,7 @@ class HybridContentRegistry:
         and creates a unified view that includes them along with legacy tables.
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Find all workspace-specific Notion tables
@@ -718,7 +730,7 @@ class HybridContentRegistry:
     def add_gmail_content(self, content_data: Dict[str, Any]) -> bool:
         """Add Gmail content with optimized schema."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 # Extract Gmail-specific fields from metadata
@@ -774,7 +786,7 @@ class HybridContentRegistry:
     def add_conversation_content(self, content_data: Dict[str, Any]) -> bool:
         """Add conversation content with optimized schema."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Extract conversation-specific fields from metadata
@@ -830,7 +842,7 @@ class HybridContentRegistry:
             return []
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
 
@@ -875,7 +887,7 @@ class HybridContentRegistry:
     def get_existing_message_ids_for_thread(self, thread_id: str, workspace: str = None) -> set:
         """Get existing message IDs for a thread to avoid duplicates."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 query = "SELECT message_id FROM gmail_content WHERE thread_id = ?"
@@ -897,7 +909,7 @@ class HybridContentRegistry:
     def update_latest_message_flags(self, thread_id: str, latest_message_id: str, workspace: str = None):
         """Update is_latest_in_thread flags for a thread."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 # First, set all messages in thread to not latest
@@ -947,7 +959,7 @@ class HybridContentRegistry:
             True if successful or already exists, False otherwise
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Create table with base schema (similar to notion_journal)
@@ -997,7 +1009,7 @@ class HybridContentRegistry:
             # Ensure table exists before attempting insert
             self._ensure_notion_table_exists(table_name)
 
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Extract metadata and properties
@@ -1060,7 +1072,7 @@ class HybridContentRegistry:
     def add_generic_content(self, content_data: Dict[str, Any]) -> bool:
         """Add generic content for unknown/new content types."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 # Ensure last_edited_time is initialized to created_time if missing
@@ -1098,7 +1110,7 @@ class HybridContentRegistry:
     def _cleanup_stale_notion_entries(self, table_name: str, page_id: str):
         """Remove stale entries from misrouted notion tables (e.g., Slack data that was incorrectly stored in notion_* tables)."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
                 if cursor.fetchone():
@@ -1131,7 +1143,7 @@ class HybridContentRegistry:
             # Ensure table exists
             self._ensure_notion_table_exists(table_name)
 
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Check if page exists
@@ -1225,7 +1237,7 @@ class HybridContentRegistry:
 
             # Initialize vector DB
             from promaia.storage.vector_db import VectorDBManager
-            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path', 'chroma_db'))
+            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path'))
 
             # Get property schema
             property_schema = self.get_property_schema(database_id)
@@ -1235,7 +1247,7 @@ class HybridContentRegistry:
             EMBEDDABLE_TYPES = {'title', 'text', 'rich_text', 'relation'}
 
             # Query properties from SQLite
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
 
@@ -1390,7 +1402,7 @@ class HybridContentRegistry:
             
             # Initialize vector DB
             from promaia.storage.vector_db import VectorDBManager
-            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path', 'chroma_db'))
+            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path'))
             
             # Prepare metadata
             metadata = {
@@ -1421,7 +1433,7 @@ class HybridContentRegistry:
 
                 # Query properties if we have a known table
                 if table_name and database_id:
-                    with sqlite3.connect(self.db_path) as conn:
+                    with self._connect() as conn:
                         conn.row_factory = sqlite3.Row
                         cursor = conn.cursor()
 
@@ -1598,7 +1610,7 @@ class HybridContentRegistry:
                      content_type: str = None, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """Query content using the unified view."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 # Build WHERE clause
@@ -1662,7 +1674,7 @@ class HybridContentRegistry:
     def get_content_statistics(self) -> Dict[str, Any]:
         """Get statistics about content in each table."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 stats = {}
@@ -1837,7 +1849,7 @@ class HybridContentRegistry:
 
             else:
                 # Unknown type, try to serialize as JSON
-                logger.warning(f"Unknown property type: {prop_type}")
+                logger.debug(f"Unknown property type: {prop_type}")
                 return json.dumps(property_data)
 
         except Exception as e:
@@ -1951,7 +1963,7 @@ class HybridContentRegistry:
 
             titles = []
             not_found = []
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 for page_id in page_ids:
@@ -1980,7 +1992,7 @@ class HybridContentRegistry:
         """Retrieve a single content entry by its file path."""
         query = "SELECT * FROM unified_content WHERE file_path = ?"
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute(query, (file_path,))
@@ -1994,7 +2006,7 @@ class HybridContentRegistry:
         """Deletes all entries from the generic_content table for a specific database."""
         query = "DELETE FROM generic_content WHERE database_name = ?"
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(query, (database_name,))
                 conn.commit()
@@ -2018,7 +2030,7 @@ class HybridContentRegistry:
             True if successful, False otherwise
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     INSERT OR REPLACE INTO notion_page_chunks (
@@ -2059,7 +2071,7 @@ class HybridContentRegistry:
             List of chunk metadata dicts, ordered by chunk_index
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("""
@@ -2084,7 +2096,7 @@ class HybridContentRegistry:
             Dict with page metadata or None if not found
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("""
@@ -2123,7 +2135,7 @@ class HybridContentRegistry:
             True if successful, False otherwise
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM notion_page_chunks WHERE page_id = ?", (page_id,))
                 conn.commit()
@@ -2151,7 +2163,7 @@ class HybridContentRegistry:
             True if successful, False otherwise
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Get page info before deletion to know which tables to clean up
@@ -2293,7 +2305,7 @@ class HybridContentRegistry:
             List of property definitions
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("""
@@ -2327,7 +2339,7 @@ class HybridContentRegistry:
         try:
             now = datetime.utcnow().isoformat()
 
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Get current schema from database
@@ -2473,7 +2485,7 @@ class HybridContentRegistry:
 
                         if vector_config.get('enabled') and vector_config.get('property_embeddings', {}).get('enabled'):
                             from promaia.storage.vector_db import VectorDBManager
-                            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path', 'chroma_db'))
+                            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path'))
 
                             EMBEDDABLE_TYPES = {'title', 'text', 'rich_text', 'relation'}
 
@@ -2500,7 +2512,7 @@ class HybridContentRegistry:
 
                         if vector_config.get('enabled') and vector_config.get('property_embeddings', {}).get('enabled'):
                             from promaia.storage.vector_db import VectorDBManager
-                            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path', 'chroma_db'))
+                            vector_db = VectorDBManager(chroma_path=vector_config.get('chroma_path'))
 
                             EMBEDDABLE_TYPES = {'title', 'text', 'rich_text', 'relation'}
 
@@ -2570,7 +2582,7 @@ class HybridContentRegistry:
             True if successful, False otherwise
         """
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Add new columns
@@ -2583,7 +2595,7 @@ class HybridContentRegistry:
                     columns = {row[1] for row in cursor.fetchall()}
 
                     if column_name in columns:
-                        logger.warning(f"Column '{column_name}' already exists in {table_name}, skipping")
+                        logger.debug(f"Column '{column_name}' already exists in {table_name}, skipping")
                         continue
 
                     # Add the column
@@ -2691,7 +2703,7 @@ class HybridContentRegistry:
                     self._ensure_notion_table_exists(table_name)
 
                 # Check for missing columns (properties in schema but not in table)
-                with sqlite3.connect(self.db_path) as conn:
+                with self._connect() as conn:
                     cursor = conn.cursor()
 
                     # Get current table columns

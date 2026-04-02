@@ -31,6 +31,10 @@ class AgenticTurnResult:
     # These can be appended to conversation history so future turns
     # have access to prior tool calls and results.
     history_messages: List[Dict[str, Any]] = field(default_factory=list)
+    # Persistent notepad content (survives across turns)
+    notepad_content: Optional[str] = None
+    # Context source states (on/off, survives across turns)
+    source_states: Optional[Dict[str, Dict]] = None  # kept as source_states for interface.py compat
 
 
 # ── Tool definitions (Anthropic native format) ──────────────────────────
@@ -167,7 +171,19 @@ GMAIL_TOOL_DEFINITIONS = [
                 },
                 "cc": {
                     "type": "string",
-                    "description": "CC recipients (optional)"
+                    "description": "CC recipients (comma-separated, optional)"
+                },
+                "bcc": {
+                    "type": "string",
+                    "description": "BCC recipients (comma-separated, optional)"
+                },
+                "attachment_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "List of workspace file paths to attach "
+                        "(from drive_download_file or list_workspace_files)"
+                    )
                 }
             },
             "required": ["to", "subject", "body"]
@@ -175,13 +191,22 @@ GMAIL_TOOL_DEFINITIONS = [
     },
     {
         "name": "create_email_draft",
-        "description": "Create an email draft (not sent).",
+        "description": "Create an email draft (not sent). Supports file attachments from the workspace.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "to": {"type": "string", "description": "Recipient email"},
                 "subject": {"type": "string", "description": "Email subject"},
-                "body": {"type": "string", "description": "Email body"}
+                "body": {"type": "string", "description": "Email body"},
+                "cc": {"type": "string", "description": "CC recipients (optional)"},
+                "attachment_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "List of workspace file paths to attach "
+                        "(from drive_download_file or list_workspace_files)"
+                    )
+                }
             },
             "required": ["to", "subject", "body"]
         }
@@ -189,7 +214,7 @@ GMAIL_TOOL_DEFINITIONS = [
     {
         "name": "reply_to_email",
         "description": (
-            "Reply to an email thread. "
+            "Reply to an email thread. Supports file attachments from the workspace. "
             "Use query_sql to find the thread_id and message_id first."
         ),
         "input_schema": {
@@ -197,7 +222,15 @@ GMAIL_TOOL_DEFINITIONS = [
             "properties": {
                 "thread_id": {"type": "string", "description": "Gmail thread ID"},
                 "message_id": {"type": "string", "description": "Original message ID"},
-                "body": {"type": "string", "description": "Reply body text"}
+                "body": {"type": "string", "description": "Reply body text"},
+                "attachment_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "List of workspace file paths to attach "
+                        "(from drive_download_file or list_workspace_files)"
+                    )
+                }
             },
             "required": ["thread_id", "message_id", "body"]
         }
@@ -243,6 +276,120 @@ GMAIL_READ_TOOL_DEFINITIONS = [
                 }
             },
             "required": ["thread_id"]
+        }
+    },
+    {
+        "name": "mark_email_read",
+        "description": "Mark one or more emails as read.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gmail message IDs to mark as read"
+                }
+            },
+            "required": ["message_ids"]
+        }
+    },
+    {
+        "name": "mark_email_unread",
+        "description": "Mark one or more emails as unread.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gmail message IDs to mark as unread"
+                }
+            },
+            "required": ["message_ids"]
+        }
+    },
+    {
+        "name": "label_email",
+        "description": "Add or remove labels on emails. Use list_labels to see available labels.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gmail message IDs"
+                },
+                "add_labels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Label names or IDs to add"
+                },
+                "remove_labels": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Label names or IDs to remove"
+                }
+            },
+            "required": ["message_ids"]
+        }
+    },
+    {
+        "name": "list_labels",
+        "description": "List all Gmail labels (inbox, sent, custom labels, etc.)",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "archive_email",
+        "description": "Archive emails (remove from inbox but keep in All Mail).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gmail message IDs to archive"
+                }
+            },
+            "required": ["message_ids"]
+        }
+    },
+    {
+        "name": "trash_email",
+        "description": "Move emails to trash.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Gmail message IDs to trash"
+                }
+            },
+            "required": ["message_ids"]
+        }
+    },
+    {
+        "name": "forward_email",
+        "description": "Forward an email to another recipient.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "Gmail message ID to forward"},
+                "to": {"type": "string", "description": "Recipient email address"},
+                "body": {"type": "string", "description": "Optional message to prepend (default: empty)"}
+            },
+            "required": ["message_id", "to"]
+        }
+    },
+    {
+        "name": "delete_draft",
+        "description": "Delete an email draft by ID.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "draft_id": {"type": "string", "description": "Gmail draft ID"}
+            },
+            "required": ["draft_id"]
         }
     },
 ]
@@ -315,6 +462,46 @@ MESSAGING_TOOL_DEFINITIONS = [
                 }
             },
             "required": ["user", "message"]
+        }
+    },
+    {
+        "name": "end_conversation",
+        "description": (
+            "End the current conversation gracefully. Use when the user says goodbye, "
+            "thanks you, or the conversation has naturally concluded. "
+            "You MUST provide a summary of what was discussed — this is saved for future reference."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "emoji": {
+                    "type": "string",
+                    "description": "Optional emoji shortcode to react with (e.g. 'wave', 'thumbsup')"
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "1-2 sentence summary of what was discussed in this conversation"
+                }
+            },
+            "required": ["summary"]
+        }
+    },
+    {
+        "name": "leave_conversation",
+        "description": (
+            "Leave a conversation you're no longer needed in. Use when the user "
+            "explicitly asks you to leave, or when humans are talking to each other "
+            "and don't need your input."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "Optional farewell message (e.g. 'See you later!')"
+                }
+            },
+            "required": []
         }
     },
 ]
@@ -639,6 +826,37 @@ CALENDAR_READ_TOOL_DEFINITIONS = [
     },
 ]
 
+CALENDAR_MANAGEMENT_TOOL_DEFINITIONS = [
+    {
+        "name": "list_calendars",
+        "description": "List all calendars the user has access to (owned, subscribed, agent calendars).",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "create_calendar",
+        "description": "Create a new calendar.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Calendar name"},
+                "description": {"type": "string", "description": "Calendar description (optional)"},
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "delete_calendar",
+        "description": "Delete a calendar by ID. Cannot delete the user's primary calendar.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "calendar_id": {"type": "string", "description": "Calendar ID to delete"}
+            },
+            "required": ["calendar_id"]
+        }
+    },
+]
+
 WEB_SEARCH_TOOL_DEFINITIONS = [{
     "name": "web_search",
     "description": (
@@ -873,8 +1091,9 @@ GOOGLE_SHEETS_TOOL_DEFINITIONS = [
         "description": (
             "Read a specific cell range from a Google Sheet. Returns both "
             "formulas and display values in inline format: {=FORMULA} value. "
-            "Use for on-demand reads, verifying edits, or checking formula correctness. "
-            "For bulk reads of entire synced sheets, prefer query_sql instead."
+            "Results are auto-saved as a toggleable context source — use the "
+            "context tool to turn them on/off. You can load ranges larger than "
+            "the default sheet preview if needed."
         ),
         "input_schema": {
             "type": "object",
@@ -1062,7 +1281,9 @@ GOOGLE_SHEETS_TOOL_DEFINITIONS = [
         "description": (
             "One-time ingest of a Google Sheet into context. Fetches all tabs "
             "and formats them as CSV with inline formulas (same format as synced "
-            "sheets). The data is cached locally so subsequent sheets tools can "
+            "sheets). Large sheets are previewed (~first 10k tokens) — use "
+            "sheets_read_range to access specific ranges beyond the preview. "
+            "The data is cached locally so subsequent sheets tools can "
             "resolve the sheet by name. Only ingest once per sheet per "
             "conversation — if you already ingested it or it's in synced "
             "sources, skip this step."
@@ -1185,42 +1406,165 @@ GOOGLE_SHEETS_FORMAT_TOOL_DEFINITIONS = [
     },
 ]
 
-COMPACT_CONTEXT_TOOL_DEFINITION = {
-    "name": "compact_context",
+NOTEPAD_TOOL_DEFINITION = {
+    "name": "notepad",
     "description": (
-        "Replace the full loaded context with task-specific notes (contract phase), "
-        "or restore the original context block (expand phase). Use after reading "
-        "through loaded data — write down only what matters for the work you're "
-        "about to do. Query tools (query_sql, query_vector, query_source) still "
-        "work in compact mode — they hit the database directly. Restore when the "
-        "task shifts and your notes don't cover it. Context auto-resets each new "
-        "user message."
+        "Your persistent reference notes — facts, context, preferences, and extracted data. "
+        "Always visible in your prompt under 'Working Notes'. Notes survive across turns. "
+        "NOT for task plans — use act(instructions=[...]) to pass step-by-step instructions to Act mode."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "notes": {
+            "action": {
                 "type": "string",
+                "enum": ["write", "append", "clear"],
                 "description": (
-                    "Task-relevant notes that replace the full context block. "
-                    "Write down what you need for the work you're about to do — "
-                    "names, dates, key facts, thread IDs, etc. Not a generic "
-                    "summary — mission-driven notes."
-                ),
+                    "write: replace all notes with new content. "
+                    "append: add to existing notes. "
+                    "clear: erase all notes."
+                )
             },
-            "restore": {
-                "type": "boolean",
-                "description": (
-                    "Set to true to restore the original full context block "
-                    "(expand phase). Ignores notes when true."
-                ),
-                "default": False,
+            "content": {
+                "type": "string",
+                "description": "Note content (required for write/append)"
             },
         },
-        "required": []
+        "required": ["action"]
     }
 }
 
+MEMORY_TOOL_DEFINITION = {
+    "name": "memory",
+    "description": (
+        "Persistent memory across conversations. Save what you learn about the user, "
+        "their preferences, corrections, and projects. Unlike notepad (this conversation "
+        "only), memories persist forever across all sessions."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["save", "recall", "list", "delete"],
+                "description": (
+                    "save: create or update a memory. "
+                    "recall: load full content of a memory by name. "
+                    "list: show all memory entries. "
+                    "delete: remove a memory."
+                ),
+            },
+            "name": {
+                "type": "string",
+                "description": "Memory name (for save/recall/delete). Use descriptive names like 'user_communication_style' or 'project_mitchell_equity'.",
+            },
+            "content": {
+                "type": "string",
+                "description": "Memory content (for save action).",
+            },
+            "type": {
+                "type": "string",
+                "enum": ["user", "feedback", "project", "reference"],
+                "description": (
+                    "user: who the user is, preferences, role. "
+                    "feedback: corrections and confirmed approaches. "
+                    "project: ongoing work, goals, decisions. "
+                    "reference: where to find things in external systems."
+                ),
+            },
+        },
+        "required": ["action"],
+    },
+}
+
+CONTEXT_TOOL_DEFINITION = {
+    "name": "context",
+    "description": (
+        "Manage your loaded context. Each context source (query results, browser data) "
+        "can be toggled ON (visible in your prompt) or OFF (hidden but stored). "
+        "Your context index is always visible showing all sources and their state."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["on", "off", "all_on", "all_off", "add", "remove"],
+                "description": (
+                    "on: turn specific sources on (content visible). "
+                    "off: turn specific sources off (content hidden). "
+                    "all_on: turn ALL sources on. "
+                    "all_off: turn ALL sources off. "
+                    "add: create a new context source with content. "
+                    "remove: delete a context source entirely."
+                )
+            },
+            "sources": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Source names to toggle (for on/off/remove actions)"
+            },
+            "name": {
+                "type": "string",
+                "description": "Name for a new context source (for add action)"
+            },
+            "content": {
+                "type": "string",
+                "description": "Content for a new context source (for add action)"
+            },
+        },
+        "required": ["action"]
+    }
+}
+
+ACT_TOOL_DEFINITION = {
+    "name": "act",
+    "description": (
+        "Enter Act mode to execute actions. You MUST provide step-by-step instructions "
+        "for what to do. Instructions stay visible and you mark each step done as you go. "
+        "Your notes come with you but context sources are hidden. Call done() when finished."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "suites": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Tool suites to load (e.g. ['notion', 'google']). Check suite index for available suites."
+            },
+            "instructions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Step-by-step instructions for what to do in Act mode. Each string is one step."
+            }
+        },
+        "required": ["suites", "instructions"]
+    }
+}
+
+MARK_STEP_DONE_TOOL_DEFINITION = {
+    "name": "mark_step_done",
+    "description": (
+        "Mark an instruction step as completed. Call this after finishing each step. "
+        "Steps are 1-indexed."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "step": {
+                "type": "integer",
+                "description": "Step number to mark as done (1-indexed)"
+            }
+        },
+        "required": ["step"]
+    }
+}
+
+DONE_TOOL_DEFINITION = {
+    "name": "done",
+    "description": "Exit Act mode and return to Think mode. Context and search tools become available again.",
+    "input_schema": {"type": "object", "properties": {}, "required": []}
+}
 
 TASK_QUEUE_TOOL_DEFINITIONS = [
     {
@@ -1238,6 +1582,94 @@ TASK_QUEUE_TOOL_DEFINITIONS = [
                 },
             },
             "required": ["task"]
+        }
+    },
+]
+
+
+# ── Google Drive tools ──────────────────────────────────────────────────
+
+GOOGLE_DRIVE_TOOL_DEFINITIONS = [
+    {
+        "name": "drive_search_files",
+        "description": (
+            "Search Google Drive for files by name or query. "
+            "Pass a plain filename to search by name, or use Drive query syntax "
+            "(e.g. \"mimeType='application/pdf'\" or \"'FOLDER_ID' in parents\"). "
+            "Returns file IDs, names, types, sizes, and modification dates."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Search query. Plain text searches by name. "
+                        "For advanced queries use Drive syntax: "
+                        "\"name contains 'invoice'\", \"mimeType='application/pdf'\", "
+                        "\"'FOLDER_ID' in parents\"."
+                    )
+                },
+                "folder_id": {
+                    "type": "string",
+                    "description": (
+                        "Restrict search to a specific folder by ID. "
+                        "If provided, adds \"'folder_id' in parents\" to the query."
+                    )
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum results to return (default 10)"
+                },
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "drive_download_file",
+        "description": (
+            "Download a file from Google Drive to the local workspace. "
+            "Use the file ID from drive_search_files. Google-native files "
+            "(Docs, Sheets, Slides) are exported to the specified format. "
+            "Returns the local workspace path for use with attachment_paths."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "Google Drive file ID from drive_search_files"
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Override the filename in the workspace (optional, defaults to Drive filename)"
+                },
+                "export_format": {
+                    "type": "string",
+                    "description": (
+                        "Export format for Google-native files: pdf, docx, xlsx, csv, pptx, txt. "
+                        "Ignored for non-native files. Default: pdf."
+                    )
+                },
+            },
+            "required": ["file_id"]
+        }
+    },
+    {
+        "name": "drive_list_folder",
+        "description": (
+            "List all files and subfolders in a Google Drive folder. "
+            "Use to browse Drive directory structure."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "folder_id": {
+                    "type": "string",
+                    "description": "Google Drive folder ID. Use 'root' for the top-level Drive."
+                },
+            },
+            "required": ["folder_id"]
         }
     },
 ]
@@ -1501,6 +1933,151 @@ RENAME_DATABASE_TOOL_DEFINITION = {
     }
 }
 
+WORKSPACE_FILES_TOOL_DEFINITION = {
+    "name": "list_workspace_files",
+    "description": (
+        "List files in the local workspace (sandbox). Files here may have been "
+        "downloaded from Google Drive, generated by MCP tools, or written by the agent. "
+        "These files can be attached to emails via attachment_paths."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+}
+
+WORKFLOW_TOOL_DEFINITIONS = [
+    {
+        "name": "create_workflow",
+        "description": (
+            "Save a repeatable workflow. Provide steps generalized from a task "
+            "the user performed, or from a description of what the workflow should do. "
+            "Show the workflow definition to the user as an artifact before calling this. "
+            "Always confirm with the user first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Short workflow name (e.g., 'glacier-part-reorder')"
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Short topic description (under 50 chars). Say WHAT it's about, "
+                        "not HOW it works. E.g., 'Glacier part spec email' or "
+                        "'Morning/evening routine walkthrough'. The steps contain the details."
+                    ),
+                },
+                "steps": {
+                    "type": "array",
+                    "description": "Ordered list of workflow steps",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "description": {"type": "string", "description": "What this step does"},
+                            "tool": {"type": "string", "description": "Tool to call (optional — some steps are manual)"},
+                            "params_template": {"type": "object", "description": "Fixed/default parameters for the tool"},
+                            "variable_params": {
+                                "type": "array", "items": {"type": "string"},
+                                "description": "Parameter names that change per run (filled from context)"
+                            },
+                            "notes": {"type": "string", "description": "Guidance for the agent on handling this step"}
+                        },
+                        "required": ["description"]
+                    }
+                },
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace scope (omit for global)"
+                },
+                "example_run": {
+                    "type": "object",
+                    "description": "Optional example run from the task just performed",
+                    "properties": {
+                        "tool_calls": {
+                            "type": "array",
+                            "description": "Tool calls made during the run: [{tool, params, result_summary}]"
+                        },
+                        "outcome": {
+                            "type": "string",
+                            "description": "Run outcome: success, partial, or failed"
+                        },
+                        "notes": {
+                            "type": "string",
+                            "description": "Observations about this run"
+                        }
+                    }
+                }
+            },
+            "required": ["name", "description", "steps"]
+        }
+    },
+    {
+        "name": "list_saved_workflows",
+        "description": "List all saved workflows with their names and descriptions.",
+        "input_schema": {"type": "object", "properties": {}, "required": []}
+    },
+    {
+        "name": "get_workflow_details",
+        "description": (
+            "Load a saved workflow's full definition including steps and example runs. "
+            "Use this before executing a workflow to get the complete instructions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Workflow name"}
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "update_workflow",
+        "description": (
+            "Update an existing workflow. Can change description, steps, "
+            "or add a new example run from a just-completed execution."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Workflow name to update"},
+                "description": {"type": "string", "description": "New description (optional)"},
+                "steps": {
+                    "type": "array",
+                    "description": "New steps array (optional — replaces all steps)"
+                },
+                "add_example_run": {
+                    "type": "object",
+                    "description": "New example run to append",
+                    "properties": {
+                        "tool_calls": {"type": "array"},
+                        "outcome": {"type": "string"},
+                        "notes": {"type": "string"}
+                    }
+                }
+            },
+            "required": ["name"]
+        }
+    },
+    {
+        "name": "delete_workflow",
+        "description": (
+            "Delete a saved workflow and all its example runs. "
+            "This is destructive — always confirm with the user first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Workflow name to delete"}
+            },
+            "required": ["name"]
+        }
+    },
+]
+
 AGENT_TOOL_DEFINITIONS = [
     {
         "name": "list_agents",
@@ -1603,6 +2180,58 @@ AGENT_TOOL_DEFINITIONS = [
             "required": ["name"]
         }
     },
+    {
+        "name": "create_agent",
+        "description": (
+            "Create a new scheduled agent. Provide a name and optionally "
+            "databases, mcp_tools, description, prompt, schedule, and messaging config. "
+            "Workspace defaults to current. Always confirm with the user first."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Agent display name"},
+                "workspace": {
+                    "type": "string",
+                    "description": "Workspace (defaults to current)"
+                },
+                "databases": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Sources with day limits (e.g. ['journal:7', 'gmail:all'])"
+                },
+                "mcp_tools": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Tools to enable (e.g. ['gmail', 'calendar', 'notion'])"
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "System prompt / instructions for the agent"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Brief description of what this agent does"
+                },
+                "interval_minutes": {
+                    "type": "integer",
+                    "description": "Run interval in minutes (e.g. 60 for hourly)"
+                },
+                "max_iterations": {
+                    "type": "integer",
+                    "description": "Max iterations per run (default 40)"
+                },
+                "messaging_platform": {
+                    "type": "string",
+                    "enum": ["slack", "discord"],
+                    "description": "Messaging platform for notifications"
+                },
+                "messaging_channel_id": {
+                    "type": "string",
+                    "description": "Channel ID for messaging notifications"
+                },
+            },
+            "required": ["name"]
+        }
+    },
 ]
 
 CHANNEL_TOOL_DEFINITIONS = [
@@ -1665,41 +2294,53 @@ CHANNEL_TOOL_DEFINITIONS = [
     },
 ]
 
-INTERVIEW_TOOL_DEFINITIONS = [
-    {
-        "name": "start_interview",
-        "description": (
-            "Start a guided interview workflow to walk the user through a "
-            "configuration process. Use when the user wants to set up or "
-            "configure something (add a database, create a workspace, etc.). "
-            "This activates a specialized mode with step-by-step guidance."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "workflow": {
-                    "type": "string",
-                    "description": "The workflow to start",
-                    "enum": ["database_add", "edit_channels"],
+def _build_interview_tool_definitions():
+    """Build interview tool definitions with dynamic workflow enum."""
+    try:
+        from promaia.chat.workflows import list_workflows
+        workflows = list_workflows()
+        workflow_names = [wf["name"] for wf in workflows]
+    except Exception:
+        workflow_names = []
+    if not workflow_names:
+        workflow_names = ["database_add", "edit_channels"]
+
+    return [
+        {
+            "name": "start_interview",
+            "description": (
+                "Start a guided interview workflow to walk the user through a "
+                "configuration process. Use when the user wants to set up or "
+                "configure something (add a database, create an agent, edit "
+                "an agent, etc.). This activates a specialized mode with "
+                "step-by-step guidance."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "workflow": {
+                        "type": "string",
+                        "description": "The workflow to start",
+                        "enum": workflow_names,
+                    },
                 },
-            },
-            "required": ["workflow"]
-        }
-    },
-    {
-        "name": "complete_interview",
-        "description": (
-            "Signal that the current interview workflow is complete. "
-            "Call this when all required steps have been finished and "
-            "the user's configuration task is done."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    },
-]
+                "required": ["workflow"]
+            }
+        },
+        {
+            "name": "complete_interview",
+            "description": (
+                "Signal that the current interview workflow is complete. "
+                "Call this when all required steps have been finished and "
+                "the user's configuration task is done."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+    ]
 
 
 def _resolve_spreadsheet_id(identifier: str, workspace: str) -> str:
@@ -1821,10 +2462,12 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     if "calendar" in mcp_tools:
         tools.extend(CALENDAR_TOOL_DEFINITIONS)
         tools.extend(CALENDAR_READ_TOOL_DEFINITIONS)
+        tools.extend(CALENDAR_MANAGEMENT_TOOL_DEFINITIONS)
         if getattr(agent, 'calendar_id', None):
             tools.append(SCHEDULE_SELF_TOOL_DEFINITION)
-        if getattr(agent, 'agent_calendars', None):
-            tools.append(SCHEDULE_AGENT_EVENT_TOOL_DEFINITION)
+        # Always include schedule_agent_event — calendar may be created mid-session
+        # by create_agent. The executor returns a clear error if no calendars exist.
+        tools.append(SCHEDULE_AGENT_EVENT_TOOL_DEFINITION)
     if "notion" in mcp_tools:
         tools.extend(NOTION_TOOL_DEFINITIONS)
         tools.extend(NOTION_BLOCK_TOOL_DEFINITIONS)
@@ -1834,12 +2477,17 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     if "google_sheets" in mcp_tools:
         tools.extend(GOOGLE_SHEETS_TOOL_DEFINITIONS)
         tools.extend(GOOGLE_SHEETS_FORMAT_TOOL_DEFINITIONS)
+    if "google_drive" in mcp_tools or "google_sheets" in mcp_tools:
+        tools.extend(GOOGLE_DRIVE_TOOL_DEFINITIONS)
 
     # Task queue is always available
     tools.extend(TASK_QUEUE_TOOL_DEFINITIONS)
 
-    # Context compact — always available
-    tools.append(COMPACT_CONTEXT_TOOL_DEFINITION)
+    # Notepad — always available (persistent notes across turns)
+    tools.append(NOTEPAD_TOOL_DEFINITION)
+
+    # Context — always available (context source management)
+    tools.append(CONTEXT_TOOL_DEFINITION)
 
     # Config tools — always available
     tools.extend(CONFIG_TOOL_DEFINITIONS)
@@ -1851,7 +2499,7 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     tools.extend(CHANNEL_TOOL_DEFINITIONS)
 
     # Interview tools — always available
-    tools.extend(INTERVIEW_TOOL_DEFINITIONS)
+    tools.extend(_build_interview_tool_definitions())
 
     # UI tools — always available
     tools.append(SHOW_SELECTION_TOOL_DEFINITION)
@@ -1861,7 +2509,179 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     tools.append(LIST_DATABASES_TOOL_DEFINITION)
     tools.append(RENAME_DATABASE_TOOL_DEFINITION)
 
+    # Workspace files (sandbox) — always available
+    tools.append(WORKSPACE_FILES_TOOL_DEFINITION)
+
+    # Saved workflows — always available
+    tools.extend(WORKFLOW_TOOL_DEFINITIONS)
+
     return tools
+
+
+# ── Tool suites (Think/Act mode) ─────────────────────────────────────────
+
+def _build_tool_suite_registry(agent, has_platform: bool = False) -> Dict[str, Dict]:
+    """Build the registry of available tool suites based on agent config.
+
+    Returns: {suite_name: {"tools": [...], "description": "...", "count": N}}
+    """
+    mcp_tools = getattr(agent, 'mcp_tools', []) or []
+    registry = {}
+
+    # Notion
+    if "notion" in mcp_tools:
+        tools = list(NOTION_TOOL_DEFINITIONS) + list(NOTION_BLOCK_TOOL_DEFINITIONS)
+        registry["notion"] = {
+            "tools": tools,
+            "description": "search, create/update pages, read/update blocks, comments",
+            "count": len(tools),
+        }
+
+    # Gmail
+    if "gmail" in mcp_tools:
+        tools = list(GMAIL_TOOL_DEFINITIONS) + list(GMAIL_READ_TOOL_DEFINITIONS)
+        registry["gmail"] = {
+            "tools": tools,
+            "description": "send, draft, reply, forward, search, threads, labels, archive, trash",
+            "count": len(tools),
+        }
+
+    # Calendar
+    if "calendar" in mcp_tools:
+        tools = list(CALENDAR_TOOL_DEFINITIONS) + list(CALENDAR_READ_TOOL_DEFINITIONS) + list(CALENDAR_MANAGEMENT_TOOL_DEFINITIONS)
+        tools.append(SCHEDULE_AGENT_EVENT_TOOL_DEFINITION)
+        if getattr(agent, 'calendar_id', None):
+            tools.append(SCHEDULE_SELF_TOOL_DEFINITION)
+        registry["calendar"] = {
+            "tools": tools,
+            "description": "events, scheduling, calendar management (list/create/delete calendars)",
+            "count": len(tools),
+        }
+
+    # Google Sheets
+    if "google_sheets" in mcp_tools:
+        tools = list(GOOGLE_SHEETS_TOOL_DEFINITIONS) + list(GOOGLE_SHEETS_FORMAT_TOOL_DEFINITIONS)
+        registry["sheets"] = {
+            "tools": tools,
+            "description": "read, update, append, create, format, find, ingest",
+            "count": len(tools),
+        }
+
+    # Google Drive
+    if "google_drive" in mcp_tools or "google_sheets" in mcp_tools:
+        tools = list(GOOGLE_DRIVE_TOOL_DEFINITIONS)
+        registry["drive"] = {
+            "tools": tools,
+            "description": "search, download, list folders",
+            "count": len(tools),
+        }
+
+    # Google (combined)
+    google_tools = []
+    for suite_name in ("gmail", "calendar", "sheets", "drive"):
+        if suite_name in registry:
+            google_tools.extend(registry[suite_name]["tools"])
+    if google_tools:
+        registry["google"] = {
+            "tools": google_tools,
+            "description": "all gmail + calendar + sheets + drive",
+            "count": len(google_tools),
+        }
+
+    # Web
+    if "web_search" in mcp_tools:
+        tools = list(WEB_SEARCH_TOOL_DEFINITIONS) + list(WEB_FETCH_TOOL_DEFINITIONS)
+        registry["web"] = {
+            "tools": tools,
+            "description": "search and fetch web pages",
+            "count": len(tools),
+        }
+
+    # Messaging (platform-dependent)
+    if has_platform:
+        tools = list(MESSAGING_TOOL_DEFINITIONS)
+        registry["messaging"] = {
+            "tools": tools,
+            "description": "send messages, start conversations",
+            "count": len(tools),
+        }
+
+    # Admin (always available)
+    admin_tools = (
+        list(CONFIG_TOOL_DEFINITIONS)
+        + list(AGENT_TOOL_DEFINITIONS)
+        + list(CHANNEL_TOOL_DEFINITIONS)
+        + list(WORKFLOW_TOOL_DEFINITIONS)
+        + list(_build_interview_tool_definitions())
+        + [SHOW_SELECTION_TOOL_DEFINITION]
+        + [SYNC_DATABASE_TOOL_DEFINITION, LIST_DATABASES_TOOL_DEFINITION, RENAME_DATABASE_TOOL_DEFINITION]
+        + [WORKSPACE_FILES_TOOL_DEFINITION]
+        + list(TASK_QUEUE_TOOL_DEFINITIONS)
+    )
+    registry["admin"] = {
+        "tools": admin_tools,
+        "description": "config, agents, channels, workflows, interviews, sync",
+        "count": len(admin_tools),
+    }
+
+    return registry
+
+
+def _build_suite_index(suite_registry: Dict, mcp_suites: Dict = None, workspace: str = "") -> str:
+    """Build the suite index text for Think mode system prompt."""
+    lines = [
+        "## Tool Suites\n",
+        "Use `act(suites=[...], instructions=[...])` to enter Act mode with step-by-step instructions.",
+        "Take notes first — context is hidden while acting. Instructions stay visible.\n",
+    ]
+    for name, info in suite_registry.items():
+        lines.append(f"- **{name}** ({info['count']} tools) — {info['description']}")
+    if mcp_suites:
+        for name, info in mcp_suites.items():
+            lines.append(f"- **{name}** ({info['count']} tools) — {info['description']}")
+
+    # Saved workflows (user-created automation recipes)
+    try:
+        from promaia.tools.workflow_store import list_workflows_for_prompt
+        wf_summaries = list_workflows_for_prompt(workspace) if workspace else []
+        if wf_summaries:
+            lines.append("")
+            lines.append("## Saved Workflows\n")
+            lines.append("If the user's request matches a saved workflow, **always load and follow it**.")
+            lines.append("Do NOT improvise from the description — the workflow has specific steps you must follow.")
+            lines.append("Call `get_workflow_details(name=\"...\")` to load the steps, then follow them.\n")
+            for wf in wf_summaries:
+                # Truncate description to avoid giving enough info to improvise
+                desc = wf['description']
+                if len(desc) > 60:
+                    desc = desc[:57] + "..."
+                lines.append(f"- **{wf['name']}**: {desc} *(load for details)*")
+    except Exception:
+        pass
+
+    # Interview workflows (guided configuration flows)
+    try:
+        from promaia.chat.workflows import list_workflows
+        interviews = list_workflows()
+        if interviews:
+            lines.append("")
+            lines.append("## Configuration Interviews\n")
+            lines.append("Use `start_interview(workflow=\"name\")` to begin.\n")
+            for wf in interviews:
+                lines.append(f"- **{wf['name']}**: {wf['description']}")
+    except Exception:
+        pass
+
+    return "\n".join(lines)
+
+
+def _get_suite_tools(suite_name: str, suite_registry: Dict, mcp_suites: Dict = None) -> List[Dict]:
+    """Get tool definitions for a suite by name."""
+    if suite_name in suite_registry:
+        return list(suite_registry[suite_name]["tools"])
+    if mcp_suites and suite_name in mcp_suites:
+        return list(mcp_suites[suite_name]["tools"])
+    return []
 
 
 # ── Tool executor ────────────────────────────────────────────────────────
@@ -1883,6 +2703,17 @@ class ToolExecutor:
         self._notion_client = None
         self._sheets_service = None
         self._drive_service = None
+        # Ephemeral sandbox for file operations
+        from promaia.tools.sandbox import Sandbox
+        self._sandbox = Sandbox()
+        # Persistent notepad (survives across turns within a conversation)
+        self._notepad = ""
+        # Context sources: name → {"content": str, "on": bool, "page_count": int, "source": str}
+        self._sources = {}
+        self._sources_muted = False
+        # External MCP server connections
+        self._mcp_client = None        # McpClient instance
+        self._mcp_tool_map = {}        # namespaced_name → (server_name, original_name)
 
     async def execute(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         """Execute a tool and return a plain text result."""
@@ -1901,6 +2732,13 @@ class ToolExecutor:
                 return await self._send_message(tool_input)
             elif tool_name == "start_conversation":
                 return await self._start_conversation(tool_input)
+            elif tool_name == "end_conversation":
+                emoji = tool_input.get("emoji", "")
+                summary = tool_input.get("summary", "")
+                return f"__END_CONVERSATION__:{emoji}:{summary}"
+            elif tool_name == "leave_conversation":
+                message = tool_input.get("message", "")
+                return f"__LEAVE_CONVERSATION__:{message}"
             # Gmail tools
             elif tool_name == "send_email":
                 return await self._send_email(tool_input)
@@ -1913,6 +2751,22 @@ class ToolExecutor:
                 return await self._search_emails(tool_input)
             elif tool_name == "get_email_thread":
                 return await self._get_email_thread(tool_input)
+            elif tool_name == "mark_email_read":
+                return await self._mark_email_read(tool_input)
+            elif tool_name == "mark_email_unread":
+                return await self._mark_email_unread(tool_input)
+            elif tool_name == "label_email":
+                return await self._label_email(tool_input)
+            elif tool_name == "list_labels":
+                return await self._list_labels(tool_input)
+            elif tool_name == "archive_email":
+                return await self._archive_email(tool_input)
+            elif tool_name == "trash_email":
+                return await self._trash_email(tool_input)
+            elif tool_name == "forward_email":
+                return await self._forward_email(tool_input)
+            elif tool_name == "delete_draft":
+                return await self._delete_draft(tool_input)
             # Calendar tools
             elif tool_name == "schedule_self":
                 return await self._schedule_self(tool_input)
@@ -1929,6 +2783,13 @@ class ToolExecutor:
                 return await self._list_calendar_events(tool_input)
             elif tool_name == "get_calendar_event":
                 return await self._get_calendar_event(tool_input)
+            # Calendar management
+            elif tool_name == "list_calendars":
+                return await self._list_calendars(tool_input)
+            elif tool_name == "create_calendar":
+                return await self._create_calendar(tool_input)
+            elif tool_name == "delete_calendar":
+                return await self._delete_calendar(tool_input)
             # Web search & fetch
             elif tool_name == "web_search":
                 return await self._web_search(tool_input)
@@ -1937,20 +2798,37 @@ class ToolExecutor:
             # Google Sheets tools
             elif tool_name.startswith("sheets_"):
                 return await self._execute_sheets_tool(tool_name, tool_input)
+            # Google Drive tools
+            elif tool_name.startswith("drive_"):
+                return await self._execute_drive_tool(tool_name, tool_input)
             # Notion tools
             elif tool_name.startswith("notion_"):
                 return await self._execute_notion_tool(tool_name, tool_input)
             # Task queue
             elif tool_name == "task_queue_add":
                 return await self._task_queue_add(tool_input)
-            # Context compact (sentinel — handled by the agentic loop)
-            elif tool_name == "compact_context":
-                if tool_input.get("restore", False):
-                    return "__CONTEXT_RESTORE__"
-                notes = tool_input.get("notes", "")
-                if not notes:
-                    return "Error: provide either 'notes' to compact or 'restore: true' to expand."
-                return f"__CONTEXT_COMPACT__:{notes}"
+            # Notepad (persistent notes across turns)
+            elif tool_name == "notepad":
+                return self._notepad_action(tool_input)
+            # Memory (persistent across conversations)
+            elif tool_name == "memory":
+                return self._memory_action(tool_input)
+            # Context management
+            elif tool_name == "context":
+                return self._context_action(tool_input)
+            # Think/Act mode switching (sentinels — handled by the agentic loop)
+            elif tool_name == "act":
+                suites = tool_input.get("suites", [])
+                if not suites:
+                    return "Error: provide at least one suite name."
+                instructions = tool_input.get("instructions", [])
+                import json as _json_act
+                return f"__ACT__:{','.join(suites)}|{_json_act.dumps(instructions)}"
+            elif tool_name == "mark_step_done":
+                step = tool_input.get("step", 0)
+                return f"__MARK_STEP__:{step}"
+            elif tool_name == "done":
+                return "__DONE__"
             # Config tools
             elif tool_name == "list_source_types":
                 return await self._list_source_types()
@@ -1983,6 +2861,8 @@ class ToolExecutor:
                 return await self._remove_agent(tool_input)
             elif tool_name == "run_agent":
                 return await self._run_agent(tool_input)
+            elif tool_name == "create_agent":
+                return await self._create_agent(tool_input)
             # Channel tools
             elif tool_name == "list_channels":
                 return await self._list_channels(tool_input)
@@ -2007,6 +2887,23 @@ class ToolExecutor:
                 return await self._list_databases(tool_input)
             elif tool_name == "rename_database":
                 return await self._rename_database(tool_input)
+            # Workspace files (sandbox)
+            elif tool_name == "list_workspace_files":
+                return await self._list_workspace_files()
+            # Workflow tools
+            elif tool_name == "create_workflow":
+                return await self._create_workflow(tool_input)
+            elif tool_name == "list_saved_workflows":
+                return await self._list_saved_workflows()
+            elif tool_name == "get_workflow_details":
+                return await self._get_workflow_details(tool_input)
+            elif tool_name == "update_workflow":
+                return await self._update_workflow(tool_input)
+            elif tool_name == "delete_workflow":
+                return await self._delete_workflow(tool_input)
+            # External MCP tools
+            elif tool_name.startswith("mcp__") and self._mcp_client:
+                return await self._execute_mcp_tool(tool_name, tool_input)
             else:
                 return f"Unknown tool: {tool_name}"
         except Exception as e:
@@ -2045,11 +2942,19 @@ class ToolExecutor:
         total_pages = sum(len(pages) for pages in loaded_content.values() if pages)
         formatted = format_context_data(loaded_content)
 
-        parts = [f"Found {total_pages} results"]
+        # Store as context source so results persist across turns
+        source_name = f"sql_{query[:30].strip().replace(' ', '_').lower()}"
+        self._sources[source_name] = {
+            "content": formatted,
+            "on": True,
+            "page_count": total_pages,
+            "source": "query_sql",
+            "titles": self._extract_titles(loaded_content),
+        }
+
+        parts = [f"Found {total_pages} results → source '{source_name}' [ON]"]
         if metadata and metadata.get('generated_query'):
             parts.append(f"SQL: {metadata['generated_query']}")
-        parts.append("")
-        parts.append(formatted)
         return "\n".join(parts)
 
     async def _query_vector(self, tool_input: Dict) -> str:
@@ -2078,7 +2983,17 @@ class ToolExecutor:
 
         total_pages = sum(len(pages) for pages in loaded_content.values() if pages)
         formatted = format_context_data(loaded_content)
-        return f"Found {total_pages} semantically similar results\n\n{formatted}"
+
+        # Store as context source so results persist across turns
+        source_name = f"search_{query[:30].strip().replace(' ', '_').lower()}"
+        self._sources[source_name] = {
+            "content": formatted,
+            "on": True,
+            "page_count": total_pages,
+            "source": "query_vector",
+            "titles": self._extract_titles(loaded_content),
+        }
+        return f"Found {total_pages} semantically similar results → source '{source_name}' [ON]"
 
     async def _query_source(self, tool_input: Dict) -> str:
         from promaia.config.databases import get_database_config
@@ -2105,7 +3020,17 @@ class ToolExecutor:
 
         time_range = f"last {days} days" if days else "all time"
         formatted = format_context_data({database: pages})
-        return f"Loaded {len(pages)} pages from '{database}' ({time_range})\n\n{formatted}"
+
+        # Store as context source instead of returning full content
+        source_name = database.split(".")[-1] if "." in database else database
+        self._sources[source_name] = {
+            "content": formatted,
+            "on": True,  # ON immediately so agent can read it
+            "page_count": len(pages),
+            "source": "query_source",
+            "titles": self._extract_titles({database: pages}),
+        }
+        return f"Loaded {len(pages)} pages from '{database}' ({time_range}) → source '{source_name}' [ON]"
 
     async def _write_journal(self, tool_input: Dict) -> str:
         from promaia.agents.notion_journal import write_journal_entry
@@ -2115,9 +3040,18 @@ class ToolExecutor:
             return "Error: missing 'content' parameter"
 
         note_type = tool_input.get("note_type", "Note")
+        agent_id = self.agent.agent_id
+
+        # For terminal chat (no real agent), find the workspace journal database
+        # and write directly instead of looking up a non-existent agent config
+        if agent_id == "terminal-user":
+            try:
+                return await self._write_journal_to_workspace(content, note_type)
+            except Exception as e:
+                return f"Error writing to workspace journal: {e}"
 
         await write_journal_entry(
-            agent_id=self.agent.agent_id,
+            agent_id=agent_id,
             workspace=self.workspace,
             entry_type=note_type,
             content=content,
@@ -2125,6 +3059,56 @@ class ToolExecutor:
         )
 
         return f"Wrote {note_type} to journal successfully."
+
+    async def _write_journal_to_workspace(self, content: str, note_type: str) -> str:
+        """Write a journal entry to the workspace's journal database directly."""
+        from promaia.config.databases import get_database_manager
+        from promaia.connectors.notion_connector import get_client
+        from promaia.agents.notion_journal import _derive_title
+
+        # Find the workspace journal database
+        db_manager = get_database_manager()
+        journal_db = None
+        for db in db_manager.get_workspace_databases(self.workspace):
+            if db.nickname == "journal" and db.source_type == "notion":
+                journal_db = db
+                break
+
+        if not journal_db:
+            return "Error: no journal database found for this workspace."
+
+        client = get_client(self.workspace)
+        title = _derive_title(content)
+
+        from datetime import datetime
+        now = datetime.now()
+
+        properties = {
+            "Name": {"title": [{"text": {"content": title}}]},
+            "Date": {"date": {"start": now.strftime("%Y-%m-%d")}},
+        }
+
+        # Build content blocks (Notion limit: ~2000 chars per block)
+        children = []
+        chunk_size = 1900
+        for i in range(0, len(content), chunk_size):
+            chunk = content[i:i + chunk_size]
+            children.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"text": {"content": chunk}}]
+                }
+            })
+
+        response = await client.pages.create(
+            parent={"database_id": journal_db.database_id},
+            properties=properties,
+            children=children
+        )
+
+        page_id = response.get("id") if isinstance(response, dict) else getattr(response, "id", None)
+        return f"Wrote {note_type} to journal: {title} (page: {page_id})"
 
     # ── Messaging tools ───────────────────────────────────────────────────
 
@@ -2327,16 +3311,26 @@ class ToolExecutor:
         if self._gmail_connector is not None:
             return
         from promaia.connectors.gmail_connector import GmailConnector
-        from promaia.config.databases import get_database_config
+        from promaia.config.databases import get_database_config, get_database_manager
 
+        # Try explicit names first, then search for any gmail source in workspace
         gmail_db = (
             get_database_config(f"{self.workspace}.gmail")
             or get_database_config("gmail")
         )
         if not gmail_db:
+            db_manager = get_database_manager()
+            for db in db_manager.get_workspace_databases(self.workspace):
+                if getattr(db, 'source_type', None) == 'gmail':
+                    gmail_db = db
+                    break
+        if not gmail_db:
             raise RuntimeError(f"No Gmail configured for workspace {self.workspace}")
 
-        email = gmail_db.get("database_id")
+        if isinstance(gmail_db, dict):
+            email = gmail_db.get("database_id")
+        else:
+            email = getattr(gmail_db, 'database_id', None)
         config = {"database_id": email, "workspace": self.workspace}
         self._gmail_connector = GmailConnector(config)
         if not await self._gmail_connector.connect(allow_interactive=False):
@@ -2344,31 +3338,65 @@ class ToolExecutor:
             raise RuntimeError(f"Failed to connect to Gmail: {email}")
         logger.info(f"Gmail connected: {email}")
 
+    def _resolve_attachment_paths(self, tool_input: Dict) -> list[str] | None:
+        """Resolve workspace-relative attachment paths to absolute paths."""
+        paths = tool_input.get("attachment_paths")
+        if not paths:
+            return None
+        resolved = []
+        for rel_path in paths:
+            abs_path = self._sandbox.resolve(rel_path)
+            if not abs_path.exists():
+                raise FileNotFoundError(f"Workspace file not found: {rel_path}")
+            resolved.append(str(abs_path))
+        return resolved
+
     async def _send_email(self, tool_input: Dict) -> str:
         await self._ensure_gmail()
+        try:
+            attachments = self._resolve_attachment_paths(tool_input)
+        except (FileNotFoundError, ValueError) as e:
+            return f"Error: {e}"
+
         success = await self._gmail_connector.send_email(
             to=tool_input["to"],
             subject=tool_input["subject"],
             body_text=tool_input["body"],
             cc=tool_input.get("cc"),
+            bcc=tool_input.get("bcc"),
+            attachments=attachments,
         )
+        attach_note = f" with {len(attachments)} attachment(s)" if attachments else ""
         if success:
-            return f"Email sent to {tool_input['to']}: {tool_input['subject']}"
+            return f"Email sent to {tool_input['to']}: {tool_input['subject']}{attach_note}"
         return "Failed to send email."
 
     async def _create_email_draft(self, tool_input: Dict) -> str:
         await self._ensure_gmail()
+        try:
+            attachments = self._resolve_attachment_paths(tool_input)
+        except (FileNotFoundError, ValueError) as e:
+            return f"Error: {e}"
+
         draft_id = await self._gmail_connector._create_draft(
             to=tool_input["to"],
             subject=tool_input["subject"],
             body=tool_input["body"],
+            cc=tool_input.get("cc"),
+            attachments=attachments,
         )
+        attach_note = f" with {len(attachments)} attachment(s)" if attachments else ""
         if draft_id:
-            return f"Draft created (ID: {draft_id})"
+            return f"Draft created{attach_note} (ID: {draft_id})"
         return "Failed to create draft."
 
     async def _reply_to_email(self, tool_input: Dict) -> str:
         await self._ensure_gmail()
+        try:
+            attachments = self._resolve_attachment_paths(tool_input)
+        except (FileNotFoundError, ValueError) as e:
+            return f"Error: {e}"
+
         original = await self._gmail_connector._get_message(tool_input["message_id"])
         if not original:
             return "Original message not found."
@@ -2385,9 +3413,11 @@ class ToolExecutor:
             message_id=tool_input["message_id"],
             subject=subject,
             body_text=tool_input["body"],
+            attachments=attachments,
         )
+        attach_note = f" with {len(attachments)} attachment(s)" if attachments else ""
         if success:
-            return f"Reply sent (thread: {tool_input['thread_id']})"
+            return f"Reply sent{attach_note} (thread: {tool_input['thread_id']})"
         return "Failed to send reply."
 
     # ── Gmail read tools ─────────────────────────────────────────────────
@@ -2466,6 +3496,175 @@ class ToolExecutor:
             return "\n".join(parts)
         except Exception as e:
             return f"Error fetching thread: {e}"
+
+    async def _mark_email_read(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        ids = tool_input.get("message_ids", [])
+        if not ids:
+            return "Error: missing 'message_ids'"
+        try:
+            for mid in ids:
+                self._gmail_connector.service.users().messages().modify(
+                    userId='me', id=mid,
+                    body={"removeLabelIds": ["UNREAD"]}
+                ).execute()
+            return f"Marked {len(ids)} email(s) as read."
+        except Exception as e:
+            return f"Error: {e}"
+
+    async def _mark_email_unread(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        ids = tool_input.get("message_ids", [])
+        if not ids:
+            return "Error: missing 'message_ids'"
+        try:
+            for mid in ids:
+                self._gmail_connector.service.users().messages().modify(
+                    userId='me', id=mid,
+                    body={"addLabelIds": ["UNREAD"]}
+                ).execute()
+            return f"Marked {len(ids)} email(s) as unread."
+        except Exception as e:
+            return f"Error: {e}"
+
+    async def _label_email(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        ids = tool_input.get("message_ids", [])
+        add = tool_input.get("add_labels", [])
+        remove = tool_input.get("remove_labels", [])
+        if not ids:
+            return "Error: missing 'message_ids'"
+        if not add and not remove:
+            return "Error: provide 'add_labels' and/or 'remove_labels'"
+        try:
+            # Resolve label names to IDs
+            labels_resp = self._gmail_connector.service.users().labels().list(userId='me').execute()
+            all_labels = {l['name'].lower(): l['id'] for l in labels_resp.get('labels', [])}
+            all_labels.update({l['id'].lower(): l['id'] for l in labels_resp.get('labels', [])})
+
+            add_ids = [all_labels.get(l.lower(), l) for l in add]
+            remove_ids = [all_labels.get(l.lower(), l) for l in remove]
+
+            body = {}
+            if add_ids:
+                body["addLabelIds"] = add_ids
+            if remove_ids:
+                body["removeLabelIds"] = remove_ids
+
+            for mid in ids:
+                self._gmail_connector.service.users().messages().modify(
+                    userId='me', id=mid, body=body
+                ).execute()
+            parts = []
+            if add:
+                parts.append(f"added {', '.join(add)}")
+            if remove:
+                parts.append(f"removed {', '.join(remove)}")
+            return f"Labels updated on {len(ids)} email(s): {'; '.join(parts)}."
+        except Exception as e:
+            return f"Error: {e}"
+
+    async def _list_labels(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        try:
+            resp = self._gmail_connector.service.users().labels().list(userId='me').execute()
+            labels = resp.get('labels', [])
+            system = [l for l in labels if l.get('type') == 'system']
+            user = [l for l in labels if l.get('type') == 'user']
+            lines = [f"Gmail labels ({len(labels)} total):\n"]
+            if user:
+                lines.append("Custom labels:")
+                for l in sorted(user, key=lambda x: x['name']):
+                    lines.append(f"  - {l['name']} (id: {l['id']})")
+            if system:
+                lines.append("\nSystem labels:")
+                for l in sorted(system, key=lambda x: x['name']):
+                    lines.append(f"  - {l['name']} (id: {l['id']})")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error: {e}"
+
+    async def _archive_email(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        ids = tool_input.get("message_ids", [])
+        if not ids:
+            return "Error: missing 'message_ids'"
+        try:
+            for mid in ids:
+                self._gmail_connector.service.users().messages().modify(
+                    userId='me', id=mid,
+                    body={"removeLabelIds": ["INBOX"]}
+                ).execute()
+            return f"Archived {len(ids)} email(s)."
+        except Exception as e:
+            return f"Error: {e}"
+
+    async def _trash_email(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        ids = tool_input.get("message_ids", [])
+        if not ids:
+            return "Error: missing 'message_ids'"
+        try:
+            for mid in ids:
+                self._gmail_connector.service.users().messages().trash(
+                    userId='me', id=mid
+                ).execute()
+            return f"Trashed {len(ids)} email(s)."
+        except Exception as e:
+            return f"Error: {e}"
+
+    async def _forward_email(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        message_id = tool_input.get("message_id", "")
+        to = tool_input.get("to", "")
+        prepend_body = tool_input.get("body", "")
+        if not message_id or not to:
+            return "Error: 'message_id' and 'to' are required"
+        try:
+            # Get original message
+            msg = self._gmail_connector.service.users().messages().get(
+                userId='me', id=message_id, format='full'
+            ).execute()
+            headers = {
+                h['name'].lower(): h['value']
+                for h in msg.get('payload', {}).get('headers', [])
+            }
+            original_body = self._gmail_connector._extract_message_body(msg)
+            subject = headers.get('subject', '')
+            if not subject.lower().startswith('fwd:'):
+                subject = f"Fwd: {subject}"
+
+            fwd_body = ""
+            if prepend_body:
+                fwd_body = f"{prepend_body}\n\n"
+            fwd_body += (
+                f"---------- Forwarded message ----------\n"
+                f"From: {headers.get('from', '?')}\n"
+                f"Date: {headers.get('date', '?')}\n"
+                f"Subject: {headers.get('subject', '')}\n\n"
+                f"{original_body}"
+            )
+
+            return await self._send_email({
+                "to": to,
+                "subject": subject,
+                "body": fwd_body,
+            })
+        except Exception as e:
+            return f"Error forwarding: {e}"
+
+    async def _delete_draft(self, tool_input: Dict) -> str:
+        await self._ensure_gmail()
+        draft_id = tool_input.get("draft_id", "")
+        if not draft_id:
+            return "Error: missing 'draft_id'"
+        try:
+            self._gmail_connector.service.users().drafts().delete(
+                userId='me', id=draft_id
+            ).execute()
+            return f"Draft {draft_id} deleted."
+        except Exception as e:
+            return f"Error: {e}"
 
     # ── Calendar tools ───────────────────────────────────────────────────
 
@@ -2707,6 +3906,60 @@ class ToolExecutor:
         except Exception as e:
             return f"Error getting calendar event: {e}"
 
+    # ── Calendar management tools ────────────────────────────────────────
+
+    async def _list_calendars(self, tool_input: Dict) -> str:
+        await self._ensure_calendar()
+        try:
+            resp = await asyncio.to_thread(
+                self._calendar_service.calendarList().list().execute
+            )
+            calendars = resp.get("items", [])
+            lines = [f"Calendars ({len(calendars)}):\n"]
+            for cal in calendars:
+                primary = " (primary)" if cal.get("primary") else ""
+                access = cal.get("accessRole", "")
+                lines.append(
+                    f"- **{cal.get('summary', '(untitled)')}**{primary}\n"
+                    f"  ID: {cal['id']}\n"
+                    f"  Access: {access}"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error listing calendars: {e}"
+
+    async def _create_calendar(self, tool_input: Dict) -> str:
+        await self._ensure_calendar()
+        name = tool_input.get("name", "").strip()
+        if not name:
+            return "Error: calendar name is required."
+        description = tool_input.get("description", "")
+        try:
+            body = {"summary": name}
+            if description:
+                body["description"] = description
+            cal = await asyncio.to_thread(
+                self._calendar_service.calendars().insert(body=body).execute
+            )
+            return f"Calendar created: **{cal['summary']}** (ID: {cal['id']})"
+        except Exception as e:
+            return f"Error creating calendar: {e}"
+
+    async def _delete_calendar(self, tool_input: Dict) -> str:
+        await self._ensure_calendar()
+        calendar_id = tool_input.get("calendar_id", "").strip()
+        if not calendar_id:
+            return "Error: calendar_id is required."
+        if calendar_id == "primary":
+            return "Cannot delete the primary calendar."
+        try:
+            await asyncio.to_thread(
+                self._calendar_service.calendars().delete(calendarId=calendar_id).execute
+            )
+            return f"Calendar deleted: {calendar_id}"
+        except Exception as e:
+            return f"Error deleting calendar: {e}"
+
     # ── Google Sheets tools ─────────────────────────────────────────────
 
     async def _ensure_sheets(self):
@@ -2806,7 +4059,17 @@ class ToolExecutor:
                 else:
                     cells.append(d_val)
             writer.writerow(cells)
-        return f"Range {range_str} ({max_rows} rows, starting row {start_row}):\n\n{out.getvalue()}"
+        result = f"Range {range_str} ({max_rows} rows, starting row {start_row}):\n\n{out.getvalue()}"
+
+        # Auto-save as toggleable context source
+        # TODO: may want to add opt-in pin feature in future version
+        source_name = f"sheet_{range_str.replace('!', '_').replace(':', '-')}"
+        self._sources[source_name] = {
+            "content": result,
+            "on": True,
+            "source": "sheets_read_range",
+        }
+        return f"Range loaded → source '{source_name}' [ON]\n\n{result}"
 
     @staticmethod
     def _coerce_values(values):
@@ -3407,7 +4670,210 @@ class ToolExecutor:
             f"{total_rows} total rows)\n"
             f"ID: {spreadsheet_id}\nURL: {ss_url}\n\n"
         )
+        from promaia.connectors.google_sheets_connector import truncate_sheet_content
+        ingest_properties = {"sheet_names": sheet_names, "row_counts": row_counts}
+        content = truncate_sheet_content(content, ingest_properties, title)
         return header + content
+
+    # ── Google Drive tools ───────────────────────────────────────────────
+
+    async def _ensure_drive(self):
+        """Lazy-initialize Google Drive service (reuses Sheets init if available)."""
+        if self._drive_service is not None:
+            return
+        # If Sheets is already initialized, Drive comes with it
+        if self._sheets_service is not None:
+            return
+        from googleapiclient.discovery import build
+        creds = self._get_google_creds()
+        self._drive_service = await asyncio.to_thread(
+            build, 'drive', 'v3', credentials=creds
+        )
+        logger.info("Google Drive authenticated")
+
+    async def _execute_drive_tool(self, tool_name: str, tool_input: Dict) -> str:
+        """Route and execute Google Drive tool calls."""
+        await self._ensure_drive()
+
+        if tool_name == "drive_search_files":
+            return await self._drive_search_files(tool_input)
+        elif tool_name == "drive_download_file":
+            return await self._drive_download_file(tool_input)
+        elif tool_name == "drive_list_folder":
+            return await self._drive_list_folder(tool_input)
+        else:
+            return f"Unknown Drive tool: {tool_name}"
+
+    async def _drive_search_files(self, tool_input: Dict) -> str:
+        query = tool_input.get("query", "").strip()
+        folder_id = tool_input.get("folder_id", "").strip()
+        max_results = tool_input.get("max_results", 10)
+
+        if not query and not folder_id:
+            return "Error: query or folder_id is required."
+
+        # Build Drive query
+        q_parts = []
+        if query:
+            # If it looks like raw Drive syntax, use as-is
+            if "'" in query or "=" in query:
+                q_parts.append(query)
+            else:
+                q_parts.append(f"name contains '{query}'")
+        if folder_id:
+            q_parts.append(f"'{folder_id}' in parents")
+        q_parts.append("trashed = false")
+        drive_query = " and ".join(q_parts)
+
+        try:
+            results = await asyncio.to_thread(
+                self._drive_service.files().list(
+                    q=drive_query,
+                    pageSize=max_results,
+                    fields="files(id, name, mimeType, size, modifiedTime, parents)",
+                    orderBy="modifiedTime desc",
+                ).execute
+            )
+
+            files = results.get("files", [])
+            if not files:
+                return f"No files found for query: {query or folder_id}"
+
+            lines = [f"Found {len(files)} file(s):\n"]
+            for f in files:
+                is_native = f["mimeType"].startswith("application/vnd.google-apps.")
+                size = f.get("size")
+                size_str = f"{int(size) / 1024:.1f} KB" if size else "Google native"
+                lines.append(
+                    f"  - **{f['name']}**\n"
+                    f"    ID: {f['id']}\n"
+                    f"    Type: {f['mimeType']}\n"
+                    f"    Size: {size_str}\n"
+                    f"    Modified: {f.get('modifiedTime', 'unknown')}"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error searching Drive: {e}"
+
+    async def _drive_download_file(self, tool_input: Dict) -> str:
+        file_id = tool_input.get("file_id", "").strip()
+        if not file_id:
+            return "Error: file_id is required."
+
+        filename = tool_input.get("filename", "").strip() or None
+        export_format = tool_input.get("export_format", "pdf").strip()
+
+        # Google-native MIME → export MIME mapping
+        export_mime_map = {
+            "application/vnd.google-apps.document": {
+                "pdf": "application/pdf",
+                "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "txt": "text/plain",
+            },
+            "application/vnd.google-apps.spreadsheet": {
+                "pdf": "application/pdf",
+                "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "csv": "text/csv",
+            },
+            "application/vnd.google-apps.presentation": {
+                "pdf": "application/pdf",
+                "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            },
+        }
+        export_extensions = {
+            "pdf": ".pdf", "docx": ".docx", "xlsx": ".xlsx",
+            "csv": ".csv", "pptx": ".pptx", "txt": ".txt",
+        }
+
+        try:
+            import io
+            from googleapiclient.http import MediaIoBaseDownload
+            from pathlib import Path
+
+            # Get file metadata
+            meta = await asyncio.to_thread(
+                self._drive_service.files().get(
+                    fileId=file_id, fields="name, mimeType"
+                ).execute
+            )
+
+            native_mime = meta["mimeType"]
+            is_native = native_mime in export_mime_map
+
+            if is_native:
+                export_mime = export_mime_map[native_mime].get(export_format, "application/pdf")
+                request = self._drive_service.files().export_media(
+                    fileId=file_id, mimeType=export_mime
+                )
+                ext = export_extensions.get(export_format, ".pdf")
+                out_name = filename or (Path(meta["name"]).stem + ext)
+            else:
+                request = self._drive_service.files().get_media(fileId=file_id)
+                out_name = filename or meta["name"]
+
+            # Download to buffer
+            buf = io.BytesIO()
+            downloader = MediaIoBaseDownload(buf, request)
+            done = False
+            while not done:
+                _, done = await asyncio.to_thread(downloader.next_chunk)
+
+            # Write to sandbox
+            out_path = self._sandbox.resolve(out_name)
+            out_path.write_bytes(buf.getvalue())
+
+            import mimetypes
+            mime, _ = mimetypes.guess_type(str(out_path))
+
+            return (
+                f"Downloaded to workspace: {out_name}\n"
+                f"  Size: {out_path.stat().st_size / 1024:.1f} KB\n"
+                f"  Type: {mime or 'application/octet-stream'}"
+            )
+        except Exception as e:
+            return f"Error downloading file: {e}"
+
+    async def _drive_list_folder(self, tool_input: Dict) -> str:
+        folder_id = tool_input.get("folder_id", "root").strip()
+
+        try:
+            results = await asyncio.to_thread(
+                self._drive_service.files().list(
+                    q=f"'{folder_id}' in parents and trashed = false",
+                    pageSize=50,
+                    fields="files(id, name, mimeType, size, modifiedTime)",
+                    orderBy="folder,name",
+                ).execute
+            )
+
+            files = results.get("files", [])
+            if not files:
+                return "Folder is empty."
+
+            folders = []
+            docs = []
+            for f in files:
+                if f["mimeType"] == "application/vnd.google-apps.folder":
+                    folders.append(f)
+                else:
+                    docs.append(f)
+
+            lines = []
+            if folders:
+                lines.append(f"Folders ({len(folders)}):")
+                for f in folders:
+                    lines.append(f"  📁 {f['name']}  (ID: {f['id']})")
+            if docs:
+                lines.append(f"\nFiles ({len(docs)}):")
+                for f in docs:
+                    size = f.get("size")
+                    size_str = f"{int(size) / 1024:.1f} KB" if size else "Google native"
+                    lines.append(
+                        f"  📄 {f['name']}  ({size_str}, ID: {f['id']})"
+                    )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error listing folder: {e}"
 
     # ── Notion tools ────────────────────────────────────────────────────
 
@@ -4332,6 +5798,424 @@ class ToolExecutor:
         except Exception as e:
             return f"Error renaming database: {e}"
 
+    # ── Notepad (persistent working notes) ─────────────────────────────
+
+    def _notepad_action(self, tool_input: Dict) -> str:
+        action = tool_input.get("action", "write")
+        content = tool_input.get("content", "")
+
+        if action == "write":
+            if not content:
+                return "Error: content is required for write action."
+            self._notepad = content
+            return f"Notes updated ({len(content)} chars)."
+        elif action == "append":
+            if not content:
+                return "Error: content is required for append action."
+            if self._notepad:
+                self._notepad += "\n\n" + content
+            else:
+                self._notepad = content
+            return f"Appended to notes ({len(self._notepad)} chars total)."
+        elif action == "clear":
+            self._notepad = ""
+            return "Notes cleared."
+        else:
+            return f"Unknown notepad action: {action}"
+
+    def _memory_action(self, tool_input: Dict) -> str:
+        from promaia.agents.memory_store import (
+            load_memory_index, load_memory_file, save_memory, delete_memory,
+        )
+        action = tool_input.get("action", "list")
+        name = tool_input.get("name", "").strip()
+
+        if action == "save":
+            content = tool_input.get("content", "")
+            mem_type = tool_input.get("type", "project")
+            return save_memory(self.workspace, name, content, mem_type)
+        elif action == "recall":
+            if not name:
+                return "Error: provide a memory name to recall."
+            return load_memory_file(self.workspace, name)
+        elif action == "list":
+            index = load_memory_index(self.workspace)
+            return index if index else "No memories saved yet."
+        elif action == "delete":
+            if not name:
+                return "Error: provide a memory name to delete."
+            return delete_memory(self.workspace, name)
+        else:
+            return f"Unknown memory action: {action}"
+
+    # ── Context source management ────────────────────────────────────────
+
+    def _context_action(self, tool_input: Dict) -> str:
+        action = tool_input.get("action", "on")
+
+        if action == "on":
+            names = tool_input.get("sources", []) or tool_input.get("shelves", [])
+            if not names:
+                return "Error: provide source names to turn on."
+            turned_on = []
+            for name in names:
+                if name in self._sources:
+                    self._sources[name]["on"] = True
+                    turned_on.append(name)
+            if turned_on:
+                return f"Context ON: {', '.join(turned_on)}. Content now visible."
+            return f"No matching sources. Available: {', '.join(self._sources.keys())}"
+
+        elif action == "off":
+            names = tool_input.get("sources", []) or tool_input.get("shelves", [])
+            if not names:
+                return "Error: provide source names to turn off."
+            turned_off = []
+            for name in names:
+                if name in self._sources:
+                    self._sources[name]["on"] = False
+                    turned_off.append(name)
+            if turned_off:
+                return f"Context OFF: {', '.join(turned_off)}. Content hidden."
+            return f"No matching sources. Available: {', '.join(self._sources.keys())}"
+
+        elif action == "all_on":
+            for src in self._sources.values():
+                src["on"] = True
+            return f"All {len(self._sources)} sources turned ON."
+
+        elif action == "all_off":
+            for src in self._sources.values():
+                src["on"] = False
+            return f"All {len(self._sources)} sources turned OFF."
+
+        elif action == "add":
+            name = tool_input.get("name", "").strip()
+            content = tool_input.get("content", "")
+            if not name:
+                return "Error: source name is required."
+            if not content:
+                return "Error: source content is required."
+            page_count = content.count("\n**") + 1
+            self._sources[name] = {
+                "content": content,
+                "on": False,
+                "page_count": page_count,
+                "source": "manual",
+            }
+            return f"Context source '{name}' added ({len(content)} chars). Turn it ON to include in context."
+
+        elif action == "remove":
+            names = tool_input.get("sources", []) or tool_input.get("shelves", [])
+            name = tool_input.get("name", "").strip()
+            to_remove = names if names else ([name] if name else [])
+            if not to_remove:
+                return "Error: provide source name(s) to remove."
+            removed = []
+            for n in to_remove:
+                if n in self._sources:
+                    del self._sources[n]
+                    removed.append(n)
+            if removed:
+                return f"Sources removed: {', '.join(removed)}"
+            return "No matching sources found."
+
+        return f"Unknown context action: {action}"
+
+    @staticmethod
+    def _extract_titles(pages_dict: dict) -> list:
+        """Extract page titles from a loaded_content dict ({db_name: [page, ...]})."""
+        titles = []
+        for pages in pages_dict.values():
+            for page in pages:
+                title = (page.get("title") or page.get("filename")
+                         or page.get("name") or "")
+                if title:
+                    titles.append(title)
+        return titles
+
+    def build_context_index(self) -> str:
+        """Build the context index string for the system prompt."""
+        if self._sources_muted or not self._sources:
+            return ""
+        lines = [
+            "## Your Context\n",
+            "Toggle sources ON/OFF with the `context` tool.",
+            "Check here BEFORE searching — the data you need may already be loaded.\n",
+        ]
+        for name, src in self._sources.items():
+            state = "ON" if src["on"] else "OFF"
+            origin = src.get("source", "unknown")
+            count = src.get("page_count", 0)
+            chars = len(src.get("content", ""))
+            lines.append(f"- [{state}] **{name}** ({count} entries, {chars // 1000}k chars, source: {origin})")
+            # OFF sources show titles so agent knows what's available without loading
+            if not src["on"]:
+                titles = src.get("titles", [])
+                for t in titles:
+                    lines.append(f"  - {t}")
+        return "\n".join(lines)
+
+    def build_active_source_content(self) -> str:
+        """Build the combined content of all ON sources for the system prompt."""
+        if self._sources_muted:
+            return ""
+        parts = []
+        for name, src in self._sources.items():
+            if src["on"] and src.get("content"):
+                parts.append(src["content"])
+        return "\n\n".join(parts)
+
+    # ── Workspace file tools ────────────────────────────────────────────
+
+    async def _list_workspace_files(self) -> str:
+        try:
+            files = self._sandbox.list_files()
+            if not files:
+                return "Workspace is empty — no files yet."
+            lines = [f"Workspace files ({len(files)}):\n"]
+            for f in files:
+                size_kb = f["size_bytes"] / 1024
+                lines.append(
+                    f"  - {f['path']} ({size_kb:.1f} KB, {f['mime_type']})"
+                )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error listing workspace files: {e}"
+
+    # ── Workflow tools ───────────────────────────────────────────────────
+
+    async def _create_workflow(self, tool_input: Dict) -> str:
+        try:
+            from promaia.tools.workflow_store import create_workflow
+
+            name = tool_input.get("name", "").strip()
+            description = tool_input.get("description", "").strip()
+            steps = tool_input.get("steps", [])
+
+            if not name:
+                return "Error: workflow name is required."
+            if not description:
+                return "Error: workflow description is required."
+            if not steps:
+                return "Error: at least one step is required."
+
+            result = create_workflow(
+                name=name,
+                description=description,
+                steps=steps,
+                workspace=tool_input.get("workspace", self.workspace),
+                example_run=tool_input.get("example_run"),
+            )
+
+            msg = f"Workflow '{name}' created (ID: {result['id']})."
+            if result.get("example_run_id"):
+                msg += f" Example run saved."
+            return msg
+        except ValueError as e:
+            return f"Error: {e}"
+        except Exception as e:
+            return f"Error creating workflow: {e}"
+
+    async def _list_saved_workflows(self) -> str:
+        try:
+            from promaia.tools.workflow_store import list_saved_workflows
+
+            workflows = list_saved_workflows(self.workspace)
+            if not workflows:
+                return "No saved workflows."
+
+            lines = [f"Saved workflows ({len(workflows)}):\n"]
+            for wf in workflows:
+                ws = f" [{wf['workspace']}]" if wf.get("workspace") else " [global]"
+                lines.append(f"  - **{wf['name']}**{ws}: {wf['description']}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error listing workflows: {e}"
+
+    async def _get_workflow_details(self, tool_input: Dict) -> str:
+        try:
+            from promaia.tools.workflow_store import get_workflow_details
+            import json
+
+            name = tool_input.get("name", "").strip()
+            if not name:
+                return "Error: workflow name is required."
+
+            wf = get_workflow_details(name)
+            if not wf:
+                return f"Workflow '{name}' not found."
+
+            lines = [
+                f"**{wf['name']}**",
+                f"Description: {wf['description']}",
+                f"Workspace: {wf.get('workspace') or 'global'}",
+                f"Created: {wf['created_at']}",
+                f"Updated: {wf['updated_at']}",
+                "",
+                f"**Steps ({len(wf['steps'])}):**",
+            ]
+            for i, step in enumerate(wf["steps"], 1):
+                tool = step.get("tool", "manual")
+                lines.append(f"  {i}. {step['description']} (tool: {tool})")
+                if step.get("params_template"):
+                    lines.append(f"     Params: {json.dumps(step['params_template'])}")
+                if step.get("variable_params"):
+                    lines.append(f"     Variable: {', '.join(step['variable_params'])}")
+                if step.get("notes"):
+                    lines.append(f"     Notes: {step['notes']}")
+
+            runs = wf.get("example_runs", [])
+            if runs:
+                lines.append(f"\n**Example runs ({len(runs)}):**")
+                for run in runs:
+                    lines.append(f"  - [{run['outcome']}] {run.get('notes', 'No notes')}")
+                    for tc in run.get("tool_calls", []):
+                        lines.append(f"    → {tc['tool']}: {tc.get('result_summary', '')}")
+
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error getting workflow details: {e}"
+
+    async def _update_workflow(self, tool_input: Dict) -> str:
+        try:
+            from promaia.tools.workflow_store import update_workflow
+
+            name = tool_input.get("name", "").strip()
+            if not name:
+                return "Error: workflow name is required."
+
+            return update_workflow(
+                name=name,
+                description=tool_input.get("description"),
+                steps=tool_input.get("steps"),
+                add_example_run=tool_input.get("add_example_run"),
+            )
+        except Exception as e:
+            return f"Error updating workflow: {e}"
+
+    async def _delete_workflow(self, tool_input: Dict) -> str:
+        try:
+            from promaia.tools.workflow_store import delete_workflow
+
+            name = tool_input.get("name", "").strip()
+            if not name:
+                return "Error: workflow name is required."
+
+            return delete_workflow(name)
+        except Exception as e:
+            return f"Error deleting workflow: {e}"
+
+    # ── External MCP server tools ────────────────────────────────────────
+
+    # Names of built-in tool servers to skip when connecting external MCP servers
+    _BUILTIN_SERVER_NAMES = {"notion", "gmail", "calendar", "query_tools", "promaia"}
+
+    async def connect_mcp_servers(self):
+        """Connect to enabled external MCP servers and discover their tools."""
+        try:
+            from promaia.mcp.client import McpClient
+            from promaia.agents.mcp_loader import _find_mcp_servers_json
+            from promaia.config.mcp_servers import McpServerManager
+
+            config_path = _find_mcp_servers_json()
+            if not config_path:
+                logger.debug("No mcp_servers.json found, skipping MCP connections")
+                return
+
+            manager = McpServerManager(str(config_path))
+            enabled = manager.get_enabled_servers()
+            if not enabled:
+                return
+
+            self._mcp_client = McpClient()
+
+            for name, config in enabled.items():
+                # Skip built-in servers — those are hardcoded in ToolExecutor
+                if name.lower() in self._BUILTIN_SERVER_NAMES:
+                    continue
+
+                # Inject sandbox path so MCP servers can write files there
+                if config.env is None:
+                    config.env = {}
+                config.env["PROMAIA_SANDBOX_DIR"] = str(self._sandbox.root)
+
+                try:
+                    connected = await self._mcp_client.connect_to_server(config)
+                    if connected:
+                        logger.info(f"MCP server connected: {name}")
+                    else:
+                        logger.warning(f"MCP server failed to connect: {name}")
+                except Exception as e:
+                    logger.warning(f"MCP server {name} connection error: {e}")
+
+        except Exception as e:
+            logger.warning(f"MCP server setup failed (continuing without): {e}")
+
+    async def get_mcp_tool_definitions(self) -> list:
+        """Return Anthropic-formatted tool definitions from connected MCP servers."""
+        if not self._mcp_client:
+            return []
+
+        tools = self._mcp_client.get_all_tools()
+        if not tools:
+            return []
+
+        definitions = []
+        for tool in tools:
+            namespaced = f"mcp__{tool.server_name}__{tool.name}"
+            self._mcp_tool_map[namespaced] = (tool.server_name, tool.name)
+            definitions.append({
+                "name": namespaced,
+                "description": f"[{tool.server_name}] {tool.description}",
+                "input_schema": tool.input_schema,
+            })
+
+        logger.info(f"Discovered {len(definitions)} MCP tools from external servers")
+        return definitions
+
+    async def _execute_mcp_tool(self, tool_name: str, tool_input: Dict) -> str:
+        """Execute a tool on an external MCP server."""
+        mapping = self._mcp_tool_map.get(tool_name)
+        if not mapping:
+            return f"Error: unknown MCP tool '{tool_name}'"
+
+        server_name, original_name = mapping
+        protocol_client = self._mcp_client.connected_servers.get(server_name)
+        if not protocol_client:
+            return f"Error: MCP server '{server_name}' is not connected"
+
+        try:
+            result = await protocol_client.call_tool(original_name, tool_input)
+            if result is None:
+                return "MCP tool returned no result."
+
+            # Extract text from content blocks
+            content_blocks = result.get("content", [])
+            texts = []
+            for block in content_blocks:
+                if block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+
+            output = "\n".join(texts) if texts else "MCP tool returned empty result."
+
+            if result.get("isError"):
+                return f"Error from {server_name}: {output}"
+
+            return output
+        except Exception as e:
+            return f"Error calling MCP tool {original_name} on {server_name}: {e}"
+
+    async def disconnect_mcp_servers(self):
+        """Clean up all MCP server connections."""
+        if self._mcp_client:
+            try:
+                await self._mcp_client.disconnect_all()
+            except Exception as e:
+                logger.debug(f"MCP disconnect error (non-critical): {e}")
+            self._mcp_client = None
+            self._mcp_tool_map = {}
+
     # ── Agent tools ─────────────────────────────────────────────────────
 
     async def _list_agents(self) -> str:
@@ -4371,9 +6255,18 @@ class ToolExecutor:
                 f"  Workspace: {agent.workspace}",
                 f"  Status: {'enabled' if agent.enabled else 'disabled'}",
                 f"  Databases: {', '.join(agent.databases) if agent.databases else 'none'}",
-                f"  MCP tools: {', '.join(agent.mcp_tools) if agent.mcp_tools else 'none'}",
+                f"  Tools: {', '.join(agent.mcp_tools) if agent.mcp_tools else 'none'}",
                 f"  Max iterations: {agent.max_iterations}",
             ]
+            # Append connected external MCP servers
+            try:
+                from promaia.config.mcp_servers import McpServerManager
+                mgr = McpServerManager()
+                ext_names = [name for name, srv in mgr.servers.items() if srv.enabled]
+                if ext_names:
+                    lines.append(f"  External MCP servers: {', '.join(ext_names)}")
+            except Exception:
+                pass
             if agent.interval_minutes:
                 lines.append(f"  Interval: every {agent.interval_minutes} minutes")
             if agent.schedule:
@@ -4556,6 +6449,8 @@ class ToolExecutor:
             agent = get_agent(name)
             if not agent:
                 return f"Agent '{name}' not found."
+            if getattr(agent, 'is_default_agent', False):
+                return f"Cannot delete '{name}' — it's the default system agent. You can edit it with update_agent instead."
             deleted = delete_agent(name)
             if deleted:
                 return f"Agent '{name}' removed and resources cleaned up."
@@ -4590,6 +6485,128 @@ class ToolExecutor:
                 return f"Agent '{name}' run failed: {result.get('output', 'unknown error')}"
         except Exception as e:
             return f"Error running agent: {e}"
+
+    async def _create_agent(self, tool_input: Dict) -> str:
+        name = tool_input.get("name", "").strip()
+        if not name:
+            return "Error: agent name is required."
+
+        try:
+            from datetime import datetime
+            from promaia.agents.agent_config import (
+                AgentConfig, save_agent, get_agent, load_agents,
+            )
+            from promaia.agents.notion_setup import generate_agent_id
+
+            # Check for name collision
+            existing = get_agent(name)
+            if existing:
+                return f"Error: agent '{name}' already exists."
+
+            workspace = tool_input.get("workspace", self.workspace).strip()
+            databases = tool_input.get("databases", [])
+            mcp_tools = tool_input.get("mcp_tools", [])
+            description = tool_input.get("description", "")
+            max_iterations = tool_input.get("max_iterations", 40)
+            interval_minutes = tool_input.get("interval_minutes")
+
+            # Generate unique agent_id
+            agent_id = generate_agent_id(name, load_agents())
+
+            # Default prompt
+            prompt = tool_input.get("prompt", "")
+            if not prompt:
+                prompt = f"You are {name}."
+                if description:
+                    prompt += f" {description}"
+
+            # Build config
+            agent_config = AgentConfig(
+                name=name,
+                workspace=workspace,
+                databases=databases,
+                prompt_file=prompt,
+                mcp_tools=mcp_tools,
+                agent_id=agent_id,
+                description=description or None,
+                max_iterations=max_iterations,
+                interval_minutes=interval_minutes,
+                enabled=True,
+                created_at=datetime.now().isoformat(),
+            )
+
+            # Set messaging if provided
+            messaging_platform = tool_input.get("messaging_platform")
+            if messaging_platform:
+                agent_config.messaging_platform = messaging_platform
+                agent_config.messaging_enabled = True
+                channel_id = tool_input.get("messaging_channel_id")
+                if channel_id:
+                    agent_config.messaging_channel_id = channel_id
+
+            # Validate
+            errors = agent_config.validate()
+            if errors:
+                return "Validation errors:\n" + "\n".join(f"  - {e}" for e in errors)
+
+            # Save
+            save_agent(agent_config)
+
+            result_parts = [
+                f"Agent '{name}' created successfully.",
+                f"  Agent ID: @{agent_id}",
+                f"  Workspace: {workspace}",
+            ]
+            if databases:
+                result_parts.append(f"  Databases: {', '.join(databases)}")
+            if mcp_tools:
+                result_parts.append(f"  MCP tools: {', '.join(mcp_tools)}")
+            if interval_minutes:
+                result_parts.append(f"  Interval: every {interval_minutes} minutes")
+
+            # Attempt Notion setup (non-blocking)
+            try:
+                from promaia.agents.notion_setup import create_agent_in_notion
+                notion_page_id = await create_agent_in_notion(agent_config, workspace)
+                if notion_page_id:
+                    agent_config.notion_page_id = notion_page_id
+                    save_agent(agent_config)
+                    page_id_clean = notion_page_id.replace("-", "")
+                    result_parts.append(
+                        f"  Notion page: https://www.notion.so/{workspace}/{page_id_clean}"
+                    )
+            except Exception as e:
+                logger.debug(f"Notion setup skipped for agent {name}: {e}")
+
+            # Attempt Calendar creation (non-blocking)
+            try:
+                from promaia.gcal import get_calendar_manager, google_account_for_workspace
+                calendar_mgr = get_calendar_manager(
+                    account=google_account_for_workspace(workspace)
+                )
+                cal_desc = f"Automated schedule for {name} agent"
+                if description:
+                    cal_desc += f"\n\n{description}"
+                calendar_id = calendar_mgr.create_agent_calendar(
+                    agent_name=name, description=cal_desc
+                )
+                if calendar_id:
+                    agent_config.calendar_id = calendar_id
+                    save_agent(agent_config)
+                    # Make schedule_agent_event available for this agent immediately
+                    self._agent_calendars[name] = calendar_id
+                    result_parts.append(f"  Calendar created: {name}")
+                    result_parts.append(
+                        "  You can now schedule recurring events on this agent's calendar "
+                        "using schedule_agent_event."
+                    )
+            except Exception as e:
+                logger.debug(f"Calendar setup skipped for agent {name}: {e}")
+
+            return "\n".join(result_parts)
+
+        except Exception as e:
+            return f"Error creating agent: {e}"
 
     # ── Channel tools ───────────────────────────────────────────────────
 
@@ -5060,122 +7077,10 @@ def _trim_tool_results(messages: List[Dict], max_result_chars: int = 50_000) -> 
                     block["content"] = _smart_trim_text(result_text, max_result_chars)
 
 
-# ── Planning layer ─────────────────────────────────────────────────────
 
-# Action verbs that signal a distinct task in a user request
-_ACTION_VERBS = re.compile(
-    r'\b(draft|reply|respond|write|send|create|make|schedule|'
-    r'find|search|look up|figure out|check|review|summarize|'
-    r'update|delete|post|notify|remind|book|set up|add|cancel|'
-    r'move|reschedule|forward|compose|prepare|compile|gather)\b',
-    re.IGNORECASE,
-)
-
-
-def _is_complex_request(message: str) -> bool:
-    """Check if a message likely contains multiple distinct tasks.
-
-    Uses a fast heuristic to avoid calling the Planner AI for simple queries.
-    Only multi-action requests trigger planning.
-    """
-    # Find distinct action verbs
-    matches = _ACTION_VERBS.findall(message.lower())
-    unique_actions = set(matches)
-    if len(unique_actions) >= 2:
-        return True
-    return False
-
-
-async def _generate_plan(
-    user_message: str,
-    agent,
-    available_tools: List[str],
-) -> Optional[List[str]]:
-    """Use the Planner AI to decompose a complex request into steps.
-
-    Returns a list of plan step strings, or None if the request is simple.
-    """
-    if not _is_complex_request(user_message):
-        return None
-
-    logger.info("[planning] Complex request detected, generating plan...")
-
-    try:
-        from promaia.utils.ai import get_anthropic_client
-
-        client, prefix = get_anthropic_client()
-        if not client:
-            return None
-
-        # Build a lightweight decomposition prompt (reuses Planner's style)
-        agent_info = ""
-        if agent:
-            name = getattr(agent, 'name', 'Agent')
-            workspace = getattr(agent, 'workspace', '')
-            databases = getattr(agent, 'databases', [])
-            mcp_tools = getattr(agent, 'mcp_tools', []) or []
-            agent_info = (
-                f"\nAgent: {name} (workspace: {workspace})\n"
-                f"Databases: {', '.join(databases)}\n"
-                f"Tools: {', '.join(available_tools)}\n"
-            )
-
-        prompt = f"""You are a task planner. Decompose this user request into distinct executable steps.
-
-User request: {user_message}
-{agent_info}
-Rules:
-- Each step should be a single, focused action
-- Steps should be in logical execution order
-- Only create steps for actions the user actually requested
-- Keep step descriptions concise (one line each)
-- Typical requests have 2-5 steps
-
-Return a JSON array of step descriptions (strings only).
-
-Example:
-["Search emails for Marina/Open Editions thread", "Draft a contextual reply to Marina", "Create calendar event for tomorrow 12-4pm", "Search for dreamshare Quarterly info and compile findings"]
-
-Return ONLY the JSON array, no other text."""
-
-        response = await asyncio.to_thread(
-            client.messages.create,
-            model=f"{prefix}claude-haiku-4-5-20251001",
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        if not response.content:
-            return None
-
-        response_text = response.content[0].text.strip()
-
-        # Parse JSON array from response
-        json_match = re.search(r'\[[\s\S]*\]', response_text)
-        if json_match:
-            steps = json.loads(json_match.group())
-            if isinstance(steps, list) and len(steps) >= 2:
-                logger.info(f"[planning] Generated {len(steps)} plan steps")
-                return [str(s) for s in steps]
-
-        return None
-
-    except Exception as e:
-        logger.warning(f"[planning] Plan generation failed: {e}")
-        return None
-
-
-def _format_plan_for_prompt(steps: List[str]) -> str:
-    """Format plan steps for injection into the system prompt."""
-    numbered = "\n".join(f"{i+1}. {step}" for i, step in enumerate(steps))
-    return (
-        f"# Execution Plan\n\n"
-        f"You identified the following tasks in the user's request:\n\n"
-        f"{numbered}\n\n"
-        f"Execute each step in order. Use your tools for each step. "
-        f"Before starting each step, output [STEP:N] where N is the step number. "
-        f"After completing all steps, summarize what you did."
-    )
+# Planning layer removed — the agent uses Think/Act mode and notepad
+# to plan its own actions. External regex-based planning was too eager
+# and fired on casual conversation.
 
 
 def _serialize_content_blocks(content):
@@ -5218,22 +7123,27 @@ async def agentic_turn(
     on_tool_activity: Optional[ToolActivityCallback] = None,
     plan: Optional[List[str]] = None,
     context_data_block: str = "",
+    suite_registry: Optional[Dict] = None,
+    mcp_suites: Optional[Dict] = None,
 ) -> AgenticTurnResult:
     """
     Run a self-contained agentic turn with tool use.
 
-    Manages its own internal message history (with tool_use/tool_result blocks)
-    but returns only plain text. The conversation manager never sees tool blocks.
+    Operates in Think/Act modes:
+    - Think mode: query tools + notepad + context + suite index (no action tool schemas)
+    - Act mode: loaded suite tools + notepad only (no context, no queries)
 
     Args:
         system_prompt: Base system prompt (without context data)
         messages: Conversation history (plain text messages only)
-        tools: Anthropic tool definitions
+        tools: Anthropic tool definitions (used as fallback if no suite_registry)
         tool_executor: Executes tool calls
         max_iterations: Max loop iterations (from agent config)
         on_tool_activity: Optional callback for UX activity updates
         plan: Optional list of plan steps to inject into the system prompt
-        context_data_block: Loaded database pages block, mutable via compact_context tool
+        context_data_block: Loaded database pages block (used for browser-loaded source parsing)
+        suite_registry: Tool suite registry for Think/Act mode switching
+        mcp_suites: External MCP tool suites (dynamically discovered)
 
     Returns:
         AgenticTurnResult with plain text response and metadata
@@ -5245,13 +7155,6 @@ async def agentic_turn(
         return AgenticTurnResult(
             response_text="I'm sorry, I couldn't generate a response (missing API key).",
         )
-
-    # Inject plan into system prompt if provided
-    if plan:
-        system_prompt += "\n\n" + _format_plan_for_prompt(plan)
-
-    # Context compact tracking — agent can compact with notes or restore
-    context_notes: Optional[str] = None
 
     # Copy messages — tool_use/tool_result blocks stay internal only
     # Format any messages with images into Anthropic multimodal content blocks
@@ -5280,24 +7183,104 @@ async def agentic_turn(
     _step_marker_seen = False
     _current_step = 0  # 0 = not started yet
 
+    # Think/Act mode state
+    act_mode = False
+    act_suites: List[str] = []
+    act_instructions: List[str] = []
+    act_step_status: List[str] = []  # "pending" | "done"
+    use_think_act = suite_registry is not None  # Feature flag: only use Think/Act if registry provided
+
     for iteration in range(max_iterations):
         budget_note = (
             f"\n\n[Tool budget: {max_iterations - iteration}/{max_iterations} "
             f"iterations remaining]"
         )
 
-        # Build effective prompt: include context block only when not muted
+        # ── Build effective prompt and tool list per mode ──────────────
         effective_prompt = system_prompt
-        if context_data_block and context_notes is None:
-            effective_prompt = system_prompt + context_data_block
-        elif context_notes is not None:
-            effective_prompt = system_prompt + "\n\n## Context (compacted)\n\n" + context_notes
+
+        if use_think_act and not act_mode:
+            # THINK MODE: suite index first, then context index + active content
+            _ws = tool_executor.workspace if tool_executor else ""
+            effective_prompt += "\n\n" + _build_suite_index(suite_registry, mcp_suites, workspace=_ws)
+
+            if tool_executor and hasattr(tool_executor, 'build_context_index'):
+                ctx_index = tool_executor.build_context_index()
+                if ctx_index:
+                    effective_prompt += "\n\n" + ctx_index
+
+            if tool_executor and hasattr(tool_executor, '_sources'):
+                active_content = tool_executor.build_active_source_content()
+                if active_content:
+                    effective_prompt += "\n\n" + active_content
+
+            # Think mode tools: query + notepad + memory + context + workflows (read) + act
+            iteration_tools = list(QUERY_TOOL_DEFINITIONS)
+            iteration_tools.append(NOTEPAD_TOOL_DEFINITION)
+            iteration_tools.append(MEMORY_TOOL_DEFINITION)
+            iteration_tools.append(CONTEXT_TOOL_DEFINITION)
+            # Workflow read tools available in Think mode (planning, not acting)
+            for td in WORKFLOW_TOOL_DEFINITIONS:
+                if td["name"] in ("list_saved_workflows", "get_workflow_details"):
+                    iteration_tools.append(td)
+            # Interview tools available in Think mode (launching guided flows)
+            iteration_tools.extend(_build_interview_tool_definitions())
+            iteration_tools.append(ACT_TOOL_DEFINITION)
+
+        elif use_think_act and act_mode:
+            # ACT MODE: no context, no suite index — just notes + memory + loaded suites + instructions
+            budget_note += f"\n\n[ACT MODE: {', '.join(act_suites)}. Call done() when finished.]"
+
+            # Inject instructions checklist into the prompt
+            if act_instructions:
+                instr_lines = ["\n\n## Instructions\n"]
+                for i, step in enumerate(act_instructions):
+                    status = act_step_status[i] if i < len(act_step_status) else "pending"
+                    checkbox = "[x]" if status == "done" else "[ ]"
+                    instr_lines.append(f"{i+1}. {checkbox} {step}")
+                budget_note += "\n".join(instr_lines)
+
+            # Act mode tools: loaded suites + notepad + memory + mark_step_done + done
+            iteration_tools = []
+            for suite_name in act_suites:
+                iteration_tools.extend(_get_suite_tools(suite_name, suite_registry, mcp_suites))
+            iteration_tools.append(NOTEPAD_TOOL_DEFINITION)
+            iteration_tools.append(MEMORY_TOOL_DEFINITION)
+            if act_instructions:
+                iteration_tools.append(MARK_STEP_DONE_TOOL_DEFINITION)
+            iteration_tools.append(DONE_TOOL_DEFINITION)
+
+        else:
+            # Legacy mode (no suite registry): all tools, all context
+            iteration_tools = tools
+            if tool_executor and hasattr(tool_executor, 'build_context_index'):
+                ctx_index = tool_executor.build_context_index()
+                if ctx_index:
+                    effective_prompt += "\n\n" + ctx_index
+            if tool_executor and hasattr(tool_executor, '_sources'):
+                active_content = tool_executor.build_active_source_content()
+                if active_content:
+                    effective_prompt += "\n\n" + active_content
 
         # Proactive context trimming before API call
         from promaia.agents.context_trimmer import trim_context_to_fit
         trimmed_system, internal_messages = await trim_context_to_fit(
-            effective_prompt + budget_note, internal_messages, tools=tools
+            effective_prompt + budget_note, internal_messages, tools=iteration_tools
         )
+
+        # Log the effective prompt (first iteration and on mode switches)
+        if iteration == 0:
+            try:
+                from promaia.utils.env_writer import get_data_dir
+                import datetime as _dt_log
+                log_dir = get_data_dir() / "context_logs" / "agentic_turn_logs"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                ts = _dt_log.datetime.now().strftime("%Y%m%d-%H%M%S")
+                log_path = log_dir / f"{ts}_agentic_prompt.md"
+                log_path.write_text(trimmed_system)
+                logger.info(f"Agentic prompt logged to {log_path}")
+            except Exception as log_err:
+                logger.debug(f"Failed to log agentic prompt: {log_err}")
 
         # Build API call kwargs
         api_kwargs = dict(
@@ -5306,8 +7289,8 @@ async def agentic_turn(
             messages=internal_messages,
             max_tokens=4096,
         )
-        if tools:
-            api_kwargs["tools"] = tools
+        if iteration_tools:
+            api_kwargs["tools"] = iteration_tools
 
         try:
             response = await asyncio.to_thread(
@@ -5454,16 +7437,93 @@ async def agentic_turn(
                 except Exception as e:
                     logger.debug(f"Tool activity callback error: {e}")
 
-            # Execute tool
-            result_text = await tool_executor.execute(tool_use.name, tool_use.input)
+            # Validate tool is in current iteration's tool list
+            valid_tool_names = {t["name"] for t in iteration_tools} if iteration_tools else set()
+            if valid_tool_names and tool_use.name not in valid_tool_names:
+                result_text = (
+                    f"Error: tool '{tool_use.name}' is not available in the current mode. "
+                    f"Available tools: {', '.join(sorted(valid_tool_names))}"
+                )
+                logger.warning(f"[think/act] Rejected tool '{tool_use.name}' — not in current mode")
+            else:
+                # Execute tool
+                result_text = await tool_executor.execute(tool_use.name, tool_use.input)
 
-            # Handle context compact/restore sentinels
-            if result_text.startswith("__CONTEXT_COMPACT__:"):
-                context_notes = result_text[len("__CONTEXT_COMPACT__:"):]
-                result_text = "Context compacted with your notes. Query tools still work normally."
-            elif result_text == "__CONTEXT_RESTORE__":
-                context_notes = None
-                result_text = "Context restored to full loaded data. Query tools still work normally."
+            # Handle Think/Act mode switching sentinels (stay in loop)
+            if result_text.startswith("__ACT__:"):
+                # Parse: __ACT__:suite1,suite2|["step1","step2"]
+                payload = result_text.split(":", 1)[1]
+                if "|" in payload:
+                    suites_part, instructions_json = payload.split("|", 1)
+                    suite_names = [s.strip() for s in suites_part.split(",")]
+                    try:
+                        import json as _json_parse
+                        act_instructions = _json_parse.loads(instructions_json)
+                        act_step_status = ["pending"] * len(act_instructions)
+                    except Exception:
+                        act_instructions = []
+                        act_step_status = []
+                else:
+                    suite_names = [s.strip() for s in payload.split(",")]
+                    act_instructions = []
+                    act_step_status = []
+                act_mode = True
+                act_suites = suite_names
+                # Mute context (preserves individual on/off states for restore)
+                if tool_executor:
+                    tool_executor._sources_muted = True
+                instr_count = f" {len(act_instructions)} steps." if act_instructions else ""
+                result_text = f"Act mode. Suites loaded: {', '.join(suite_names)}.{instr_count} Context muted. Follow your instructions."
+                logger.info(f"[think/act] Entered Act mode with suites: {suite_names}, instructions: {len(act_instructions)} steps")
+                # Fire plan step callback for UX
+                if act_instructions and on_tool_activity:
+                    try:
+                        await on_tool_activity(
+                            tool_name="__plan_step__",
+                            tool_input={"step": 1, "total": len(act_instructions), "steps": act_instructions},
+                            completed=False,
+                        )
+                    except Exception:
+                        pass
+            elif result_text.startswith("__MARK_STEP__:"):
+                step_num = int(result_text.split(":")[1])
+                if 0 < step_num <= len(act_step_status):
+                    act_step_status[step_num - 1] = "done"
+                    result_text = f"Step {step_num} marked done."
+                    logger.info(f"[think/act] Marked step {step_num}/{len(act_instructions)} done")
+                    # Fire UX callback
+                    if on_tool_activity:
+                        try:
+                            # Advance to next pending step for display
+                            next_step = step_num + 1 if step_num < len(act_instructions) else step_num
+                            await on_tool_activity(
+                                tool_name="__plan_step__",
+                                tool_input={"step": next_step, "total": len(act_instructions)},
+                                completed=True,
+                            )
+                        except Exception:
+                            pass
+                else:
+                    result_text = f"Invalid step number: {step_num}"
+            elif result_text == "__DONE__":
+                act_mode = False
+                act_suites = []
+                act_instructions = []
+                act_step_status = []
+                if tool_executor:
+                    tool_executor._sources_muted = False
+                result_text = "Back to Think mode. Context restored."
+                logger.info("[think/act] Returned to Think mode")
+                # Fire plan done callback
+                if on_tool_activity:
+                    try:
+                        await on_tool_activity(
+                            tool_name="__plan_done__",
+                            tool_input={},
+                            completed=True,
+                        )
+                    except Exception:
+                        pass
 
             # Handle interview sentinels — break out of loop and return with signal
             elif result_text.startswith("__INTERVIEW_START__:"):
@@ -5498,6 +7558,33 @@ async def agentic_turn(
                     output_tokens=total_output_tokens,
                     plan=plan,
                     signal={"type": "show_selection", "payload": payload},
+                )
+            elif result_text.startswith("__END_CONVERSATION__:"):
+                # Format: __END_CONVERSATION__:emoji:summary
+                parts = result_text[len("__END_CONVERSATION__:"):].split(":", 1)
+                emoji = parts[0].strip() if parts else ""
+                summary = parts[1].strip() if len(parts) > 1 else ""
+                result_text = "Conversation ended."
+                return AgenticTurnResult(
+                    response_text="\n".join(text_parts),
+                    tool_calls_made=all_tool_calls,
+                    iterations_used=iteration + 1,
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    plan=plan,
+                    signal={"type": "end_conversation", "emoji": emoji or None, "summary": summary or None},
+                )
+            elif result_text.startswith("__LEAVE_CONVERSATION__:"):
+                message = result_text[len("__LEAVE_CONVERSATION__:"):].strip()
+                result_text = message or "Goodbye!"
+                return AgenticTurnResult(
+                    response_text="\n".join(text_parts) + ("\n" + message if message else ""),
+                    tool_calls_made=all_tool_calls,
+                    iterations_used=iteration + 1,
+                    input_tokens=total_input_tokens,
+                    output_tokens=total_output_tokens,
+                    plan=plan,
+                    signal={"type": "leave_conversation"},
                 )
 
             # Build summary for logging and UX

@@ -353,29 +353,26 @@ def upload_image_to_gemini_file_api(image_path: str, display_name: str = None) -
         RuntimeError: If upload fails
     """
     try:
-        import google.generativeai as genai
+        from google import genai
     except ImportError:
-        raise ImportError("google-generativeai package is required for File API. Install with: pip install google-generativeai")
+        raise ImportError("google-genai package is required for File API. Install with: pip install google-genai")
 
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image file not found: {image_path}")
 
-    # Check file size
     file_size = os.path.getsize(image_path)
     if file_size > GEMINI_FILE_API_MAX_SIZE:
         raise ValueError(f"Image file too large for Gemini File API: {file_size} bytes (max: {GEMINI_FILE_API_MAX_SIZE})")
 
-    # Validate format
     media_type = validate_image_format(image_path)
 
     try:
-        # Upload file to Gemini File API
         if display_name is None:
             display_name = os.path.basename(image_path)
 
-        uploaded_file = genai.upload_file(path=image_path, display_name=display_name)
+        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+        uploaded_file = client.files.upload(file=image_path, config={"display_name": display_name})
 
-        # Return the file URI
         return uploaded_file.uri
 
     except Exception as e:
@@ -427,13 +424,15 @@ def process_document_for_gemini(document_path: str) -> Dict[str, Any]:
             raise ValueError(f"Unsupported document format: {ext}")
 
     try:
-        import google.generativeai as genai
+        from google import genai
 
-        # Upload file to Gemini File API
         display_name = os.path.basename(document_path)
-        uploaded_file = genai.upload_file(path=document_path, display_name=display_name, mime_type=mime_type)
+        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+        uploaded_file = client.files.upload(
+            file=document_path,
+            config={"display_name": display_name, "mime_type": mime_type},
+        )
 
-        # Return the file URI
         return {
             'file_uri': uploaded_file.uri,
             'method': 'file_api',
@@ -503,11 +502,10 @@ def format_image_for_gemini(base64_data: str = None, media_type: str = None, fil
     if file_uri:
         # Return File API reference
         try:
-            import google.generativeai as genai
-            # Get file reference from URI
-            return genai.get_file(name=file_uri.split('/')[-1])
+            from google import genai
+            client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+            return client.files.get(name=file_uri.split('/')[-1])
         except Exception:
-            # If getting file fails, return raw URI string (Gemini accepts this too)
             return {"file_uri": file_uri}
     elif base64_data and media_type:
         # Return inline base64 data
