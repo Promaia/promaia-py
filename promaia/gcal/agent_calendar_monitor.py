@@ -81,13 +81,12 @@ class AgentCalendarMonitor:
                             if not run_request:
                                 run_request = "Run based on your system instructions."
 
-                            logger.info("  Passing event description to agent as goal for orchestrator.")
+                            logger.info("  Running agentic turn with calendar event as goal.")
 
-                            # Use orchestrator for multi-step goal execution with conversations
-                            from promaia.agents.orchestrator import Orchestrator
+                            from promaia.agents.run_goal import run_goal
 
-                            orchestrator = Orchestrator(agent)
-                            result = await orchestrator.run_goal(
+                            result = await run_goal(
+                                agent_config=agent,
                                 goal=run_request,
                                 metadata={
                                     "calendar_event_id": event_id,
@@ -98,14 +97,9 @@ class AgentCalendarMonitor:
                             )
 
                             if result.get("success"):
-                                logger.info("Goal completed successfully.")
-                                logger.info(
-                                    f"  tasks_completed={result.get('tasks_completed', 0)} "
-                                    f"tasks_failed={result.get('tasks_failed', 0)} "
-                                    f"goal_id={result.get('goal_id', 'N/A')[:8]}..."
-                                )
+                                logger.info("Agentic turn completed successfully.")
                             else:
-                                logger.error(f"Goal failed: {result.get('error')}")
+                                logger.error(f"Agentic turn failed: {result.get('error')}")
 
             # Trigger database sync every 5 cycles (5 minutes with 1-minute interval)
             sync_counter += 1

@@ -233,10 +233,10 @@ def _show_agent_summary(agent: AgentConfig, console):
 
     console.print(f"Journal Memory: [cyan]{agent.journal_memory_days} days[/cyan]")
 
-    if agent.messaging_enabled and agent.messaging_platform:
-        console.print(f"Messaging: [cyan]{agent.messaging_platform.title()}[/cyan]")
+    if agent.messaging_enabled:
+        console.print(f"Messaging: [cyan]Enabled[/cyan]")
     else:
-        console.print(f"Messaging: [dim]None[/dim]")
+        console.print(f"Messaging: [dim]Disabled[/dim]")
 
     if agent.mcp_tools:
         console.print(f"MCP Tools: [cyan]{', '.join(agent.mcp_tools)}[/cyan]")
@@ -795,7 +795,6 @@ async def handle_agent_reset_default(args):
             and existing.mcp_tools
             and existing.workspace
             and existing.databases
-            and existing.messaging_platform
             and existing.messaging_enabled
             and existing.sdk_enabled
             and existing.agentic_loop_enabled
@@ -813,8 +812,8 @@ async def handle_agent_reset_default(args):
             issues.append("no calendar")
         if not existing.mcp_tools:
             issues.append("no MCP tools")
-        if not existing.messaging_platform or not existing.messaging_enabled:
-            issues.append("messaging not configured")
+        if not existing.messaging_enabled:
+            issues.append("messaging not enabled")
         if not existing.sdk_enabled:
             issues.append("SDK disabled")
         if not existing.agentic_loop_enabled:
@@ -1114,8 +1113,8 @@ async def handle_agent_info_scheduled(args):
         for tool in agent.mcp_tools:
             print(f"  - {tool}")
 
-    if agent.messaging_enabled and agent.messaging_platform:
-        print(f"\nMessaging: {agent.messaging_platform.title()}")
+    if agent.messaging_enabled:
+        print(f"\nMessaging: Enabled")
     print(f"Journal Memory: {agent.journal_memory_days} days")
 
     if agent.description:

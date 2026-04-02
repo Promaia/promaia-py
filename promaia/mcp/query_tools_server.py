@@ -131,26 +131,14 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="update_agent_messaging_config",
             description="Update agent's messaging configuration. "
-                       "Change platform, channel, enable/disable messaging, or adjust conversation settings. "
+                       "Enable/disable messaging tools or adjust conversation timeout. "
                        "Only provide the fields you want to change.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "messaging_platform": {
-                        "type": "string",
-                        "description": "Platform: 'slack' or 'discord'"
-                    },
-                    "messaging_channel_id": {
-                        "type": "string",
-                        "description": "Platform-specific channel ID (e.g., 'C06ABC123' for Slack)"
-                    },
                     "messaging_enabled": {
                         "type": "boolean",
-                        "description": "Enable or disable messaging"
-                    },
-                    "initiate_conversation": {
-                        "type": "boolean",
-                        "description": "true for interactive conversations, false for one-way posts"
+                        "description": "Enable or disable messaging tools"
                     },
                     "conversation_timeout_minutes": {
                         "type": "integer",
@@ -418,21 +406,14 @@ async def _handle_get_messaging_config(args: dict) -> list[TextContent]:
         config_data = {
             "agent_id": AGENT_CONFIG.agent_id,
             "agent_name": AGENT_CONFIG.name,
-            "messaging_platform": AGENT_CONFIG.messaging_platform,
-            "messaging_channel_id": AGENT_CONFIG.messaging_channel_id,
             "messaging_enabled": AGENT_CONFIG.messaging_enabled,
-            "initiate_conversation": AGENT_CONFIG.initiate_conversation,
             "conversation_timeout_minutes": AGENT_CONFIG.conversation_timeout_minutes,
-            "conversation_max_turns": AGENT_CONFIG.conversation_max_turns
         }
-        
-        result_text = f"✅ Current Messaging Configuration:\n\n"
-        result_text += f"Platform: {config_data['messaging_platform'] or 'Not set'}\n"
-        result_text += f"Channel ID: {config_data['messaging_channel_id'] or 'Not set'}\n"
+
+        result_text = f"Current Messaging Configuration:\n\n"
         result_text += f"Enabled: {config_data['messaging_enabled']}\n"
-        result_text += f"Mode: {'Interactive conversation' if config_data['initiate_conversation'] else 'One-way post'}\n"
-        result_text += f"Timeout: {config_data['conversation_timeout_minutes']} minutes\n"
-        result_text += f"Max turns: {config_data['conversation_max_turns'] or 'Unlimited'}\n"
+        result_text += f"Conversation timeout: {config_data['conversation_timeout_minutes']} minutes\n"
+        result_text += f"\nPlatforms are environment-based (available if bot tokens are set).\n"
         
         logger.info("Retrieved messaging config")
         return [TextContent(type="text", text=result_text)]
@@ -459,36 +440,22 @@ async def _handle_update_messaging_config(args: dict) -> list[TextContent]:
         
         # Update fields if provided
         updated_fields = []
-        
-        if 'messaging_platform' in args and args['messaging_platform'] is not None:
-            agent.messaging_platform = args['messaging_platform']
-            updated_fields.append(f"platform={args['messaging_platform']}")
-        
-        if 'messaging_channel_id' in args and args['messaging_channel_id'] is not None:
-            agent.messaging_channel_id = args['messaging_channel_id']
-            updated_fields.append(f"channel_id={args['messaging_channel_id']}")
-        
+
         if 'messaging_enabled' in args and args['messaging_enabled'] is not None:
             agent.messaging_enabled = args['messaging_enabled']
             updated_fields.append(f"enabled={args['messaging_enabled']}")
-        
-        if 'initiate_conversation' in args and args['initiate_conversation'] is not None:
-            agent.initiate_conversation = args['initiate_conversation']
-            updated_fields.append(f"initiate={args['initiate_conversation']}")
-        
+
         if 'conversation_timeout_minutes' in args and args['conversation_timeout_minutes'] is not None:
             agent.conversation_timeout_minutes = args['conversation_timeout_minutes']
             updated_fields.append(f"timeout={args['conversation_timeout_minutes']} min")
-        
+
         # Save configuration
         save_agents(agents)
-        
-        result_text = f"✅ Configuration updated!\n\nUpdated fields: {', '.join(updated_fields)}\n\n"
+
+        result_text = f"Configuration updated!\n\nUpdated fields: {', '.join(updated_fields)}\n\n"
         result_text += "New configuration:\n"
-        result_text += f"- Platform: {agent.messaging_platform}\n"
-        result_text += f"- Channel: {agent.messaging_channel_id}\n"
         result_text += f"- Enabled: {agent.messaging_enabled}\n"
-        result_text += f"- Mode: {'Interactive' if agent.initiate_conversation else 'One-way'}\n"
+        result_text += f"- Conversation timeout: {agent.conversation_timeout_minutes} min\n"
         
         logger.info(f"Updated messaging config: {updated_fields}")
         return [TextContent(type="text", text=result_text)]

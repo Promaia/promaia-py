@@ -2244,14 +2244,9 @@ AGENT_TOOL_DEFINITIONS = [
                     "type": "integer",
                     "description": "Max iterations per run (default 40)"
                 },
-                "messaging_platform": {
-                    "type": "string",
-                    "enum": ["slack", "discord"],
-                    "description": "Messaging platform for notifications"
-                },
-                "messaging_channel_id": {
-                    "type": "string",
-                    "description": "Channel ID for messaging notifications"
+                "messaging_enabled": {
+                    "type": "boolean",
+                    "description": "Whether this agent can use messaging tools"
                 },
             },
             "required": ["name"]
@@ -3217,11 +3212,12 @@ class ToolExecutor:
         return f"Message sent to {target_desc}"
 
     async def _start_conversation(self, tool_input: Dict) -> str:
-        """Start a DM conversation, wait for the user's reply, and return it.
+        """Start a real interactive DM conversation and wait for it to complete.
 
-        Creates a passive 'agentic' conversation — the Slack bot stores
-        incoming messages but does NOT generate AI responses.  The agentic
-        loop is the brain; this tool is just the ears.
+        Creates a TagToChatLoop that drives a full back-and-forth conversation
+        using the agent's personality. The agentic turn suspends until the
+        conversation goes dormant (user stops replying), then resumes with
+        the full transcript.
         """
         import asyncio
         if not self.platform:
@@ -3229,7 +3225,7 @@ class ToolExecutor:
 
         user_name = tool_input.get("user", "")
         message = tool_input.get("message", "")
-        timeout_minutes = tool_input.get("timeout_minutes", 15)
+        timeout_minutes = tool_input.get("timeout_minutes", 60)
 
         if not user_name:
             return "Error: missing 'user' parameter"
@@ -3250,6 +3246,7 @@ class ToolExecutor:
             from promaia.agents.conversation_manager import (
                 ConversationManager, ConversationState,
             )
+            from promaia.agents.tag_to_chat import TagToChatLoop
             from datetime import datetime, timezone
 
             conv_manager = ConversationManager()
@@ -3263,16 +3260,15 @@ class ToolExecutor:
                 getattr(self.agent, "agent_id", None)
                 or getattr(self.agent, "name", "agent")
             )
+            real_name = user_info.get("real_name") or user_info.get("name") or user_name
 
             # Send message at top-level — this becomes the thread parent
             meta = await self.platform.send_message(
                 channel_id=dm_channel, content=message,
             )
-            dm_thread_id = meta.message_id  # ts of the posted message
+            dm_thread_id = meta.message_id
 
-            # Create a passive conversation record — the Slack bot will find
-            # this via get_active_conversation and store user replies, but
-            # handle_user_message won't generate AI responses for type='agentic'.
+            # Create a real conversation state (not passive — agent personality drives it)
             now = datetime.now(timezone.utc).isoformat()
             msg_ts = str(int(datetime.now(timezone.utc).timestamp()))
             conversation_id = f"{platform_name}_{dm_channel}_{msg_ts}"
@@ -3283,7 +3279,7 @@ class ToolExecutor:
                 platform=platform_name,
                 channel_id=dm_channel,
                 user_id=user_info["id"],
-                thread_id=dm_thread_id,  # Bot's message is the thread parent
+                thread_id=dm_thread_id,
                 status="active",
                 last_message_at=now,
                 messages=[{
@@ -3291,42 +3287,64 @@ class ToolExecutor:
                     "content": message,
                     "timestamp": now,
                 }],
-                context={},
+                context={"is_dm": True, "user_name": real_name},
                 timeout_seconds=timeout_minutes * 60,
                 max_turns=None,
                 turn_count=0,
                 created_at=now,
-                conversation_type="agentic",  # passive — no auto-response
+                conversation_type="tag_to_chat",
+                is_active=True,
+                conversation_partner=real_name,
             )
             await conv_manager._save_state(state)
 
-            # Poll for user reply (stored by Slack bot → handle_user_message)
-            poll_interval = 3
-            max_wait = timeout_minutes * 60
-            elapsed = 0
+            # Start a real TagToChatLoop — agent personality drives the conversation
+            loop = TagToChatLoop(
+                conversation_id=conversation_id,
+                channel_id=dm_channel,
+                thread_id=dm_thread_id,
+                platform=platform_name,
+                agent_id=agent_id,
+                platform_impl=self.platform,
+                conv_manager=conv_manager,
+                is_dm=True,
+            )
 
-            while elapsed < max_wait:
-                await asyncio.sleep(poll_interval)
-                elapsed += poll_interval
+            # Dormancy signal — fires when the loop exits (dormant/stopped)
+            done_event = asyncio.Event()
+            loop.on_done(done_event.set)
 
-                state = await conv_manager._load_state(conversation_id)
-                if not state:
-                    return "Error: conversation state lost"
+            # Start the conversation loop
+            asyncio.create_task(loop.run())
+            logger.info(f"Started interactive conversation {conversation_id} with {real_name}")
 
-                # Check for user messages
-                user_msgs = [m for m in state.messages if m["role"] == "user"]
-                if user_msgs:
-                    last_msg = user_msgs[-1]["content"]
-                    # End the conversation so the channel is free
-                    await conv_manager.end_conversation(
-                        conversation_id, "handed_to_agent",
-                    )
-                    return f"User replied: {last_msg}"
+            # Suspend the agentic turn until conversation goes dormant or times out
+            try:
+                await asyncio.wait_for(
+                    done_event.wait(),
+                    timeout=timeout_minutes * 60,
+                )
+            except asyncio.TimeoutError:
+                logger.info(f"Conversation {conversation_id} timed out after {timeout_minutes}min")
+                loop._stop_requested = True
 
-            # Timeout
-            await conv_manager.end_conversation(conversation_id, "timeout")
-            real_name = user_info.get("real_name", user_name)
-            return f"No reply from {real_name} after {timeout_minutes} minutes."
+            # Load final transcript
+            final_state = await conv_manager._load_state(conversation_id)
+            if final_state and final_state.messages:
+                transcript_lines = []
+                for msg in final_state.messages:
+                    role = msg.get("role", "unknown")
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        text_parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                        content = "\n".join(text_parts)
+                    if isinstance(content, str) and content.strip():
+                        speaker = real_name if role == "user" else "You"
+                        transcript_lines.append(f"[{speaker}]: {content}")
+                transcript = "\n".join(transcript_lines)
+                return f"Conversation with {real_name} completed.\n\nTranscript:\n{transcript}"
+            else:
+                return f"Conversation with {real_name} ended (no messages exchanged)."
 
         except Exception as e:
             logger.error(f"start_conversation error: {e}", exc_info=True)
@@ -6632,14 +6650,9 @@ class ToolExecutor:
                 created_at=datetime.now().isoformat(),
             )
 
-            # Set messaging if provided
-            messaging_platform = tool_input.get("messaging_platform")
-            if messaging_platform:
-                agent_config.messaging_platform = messaging_platform
+            # Set messaging permission if provided
+            if tool_input.get("messaging_enabled"):
                 agent_config.messaging_enabled = True
-                channel_id = tool_input.get("messaging_channel_id")
-                if channel_id:
-                    agent_config.messaging_channel_id = channel_id
 
             # Validate
             errors = agent_config.validate()
