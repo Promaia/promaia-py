@@ -86,6 +86,7 @@ def _load_agent_calendars(workspace: str) -> Dict[str, str]:
         if not maia_agent:
             maia_agent = AgentConfig(
                 name="maia",
+                agent_id="maia",
                 workspace=workspace,
                 databases=[],
                 prompt_file="",

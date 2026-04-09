@@ -1893,22 +1893,22 @@ async def handle_agent_edit(args):
     # Ask what to edit
     from prompt_toolkit import PromptSession
 
+    # Agent ID is immutable after creation — shown above for reference, not editable.
     console.print("[bold]What would you like to edit?[/bold]")
     console.print("  1. Name")
-    console.print("  2. Agent ID")
-    console.print("  3. Databases")
-    console.print("  4. Schedule")
-    console.print("  5. MCP Tools")
-    console.print("  6. Max Iterations")
-    console.print("  7. Description")
-    console.print("  8. All fields (full edit)")
-    console.print("  9. Calendar Settings")
+    console.print("  2. Databases")
+    console.print("  3. Schedule")
+    console.print("  4. MCP Tools")
+    console.print("  5. Max Iterations")
+    console.print("  6. Description")
+    console.print("  7. All fields (full edit)")
+    console.print("  8. Calendar Settings")
     console.print("  0. Cancel")
     console.print()
 
     session = PromptSession()
     try:
-        choice = await session.prompt_async("Select option (0-9): ")
+        choice = await session.prompt_async("Select option (0-8): ")
         choice = choice.strip()
     except (EOFError, KeyboardInterrupt):
         console.print("\n❌ Cancelled", style="red")
@@ -1919,8 +1919,9 @@ async def handle_agent_edit(args):
         return
 
     # Edit based on choice
-    if choice in ["1", "8"]:
+    if choice in ["1", "7"]:
         console.print(f"\nCurrent name: [cyan]{agent.name}[/cyan]")
+        console.print(f"Agent ID (immutable): [dim]@{agent.agent_id}[/dim]")
         try:
             new_name = await session.prompt_async("New name (ENTER to keep): ")
             new_name = new_name.strip()
@@ -1930,18 +1931,7 @@ async def handle_agent_edit(args):
         except (EOFError, KeyboardInterrupt):
             pass
 
-    if choice in ["2", "8"]:
-        console.print(f"\nCurrent Agent ID: [cyan]@{agent.agent_id}[/cyan]")
-        try:
-            new_id = await session.prompt_async("New Agent ID (without @, ENTER to keep): ")
-            new_id = new_id.strip()
-            if new_id:
-                agent.agent_id = new_id
-                console.print(f"✓ Updated Agent ID to: [cyan]@{new_id}[/cyan]", style="dim")
-        except (EOFError, KeyboardInterrupt):
-            pass
-
-    if choice in ["3", "8"]:
+    if choice in ["2", "7"]:
         console.print("\nSelect databases...")
         db_manager = get_database_manager()
         workspace_databases = db_manager.get_workspace_databases(agent.workspace)
@@ -1987,14 +1977,14 @@ async def handle_agent_edit(args):
             agent.databases = selected_databases
             console.print(f"✓ Updated databases: [cyan]{', '.join(agent.databases)}[/cyan]", style="dim")
 
-    if choice in ["4", "8"]:
+    if choice in ["3", "7"]:
         console.print("\nSelect schedule...")
         new_schedule = await select_schedule()
         if new_schedule:
             agent.schedule = new_schedule
             console.print(f"✓ Updated schedule: [cyan]{schedule_to_string(new_schedule)}[/cyan]", style="dim")
 
-    if choice in ["5", "8"]:
+    if choice in ["4", "7"]:
         console.print("\nSelect MCP tools...")
         # Load available MCP servers from mcp_servers.json + built-in integrations
         available_tools = []
@@ -2024,7 +2014,7 @@ async def handle_agent_edit(args):
             tools_display = ', '.join(selected_tools) if selected_tools else "None"
             console.print(f"✓ Updated MCP tools: [cyan]{tools_display}[/cyan]", style="dim")
 
-    if choice in ["6", "8"]:
+    if choice in ["5", "7"]:
         console.print(f"\nCurrent max iterations: [cyan]{agent.max_iterations}[/cyan]")
         try:
             new_max = await session.prompt_async("New max iterations (ENTER to keep): ")
@@ -2035,7 +2025,7 @@ async def handle_agent_edit(args):
         except (EOFError, KeyboardInterrupt):
             pass
 
-    if choice in ["7", "8"]:
+    if choice in ["6", "7"]:
         console.print(f"\nCurrent description: [dim]{agent.description}[/dim]")
         try:
             new_desc = await session.prompt_async("New description (ENTER to keep): ")
@@ -2046,7 +2036,7 @@ async def handle_agent_edit(args):
         except (EOFError, KeyboardInterrupt):
             pass
 
-    if choice == "9":
+    if choice == "8":
         console.print("\n📅 Calendar Settings", style="bold cyan")
 
         if agent.calendar_id:

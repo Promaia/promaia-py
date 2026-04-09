@@ -2402,6 +2402,13 @@ AGENT_TOOL_DEFINITIONS = [
                 "interval_minutes": {"type": "integer", "description": "Run interval in minutes"},
                 "max_iterations": {"type": "integer", "description": "Max query iterations per run"},
                 "prompt": {"type": "string", "description": "New system prompt text"},
+                "messaging_enabled": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether this agent can use messaging tools "
+                        "(send_message, start_conversation, etc.)."
+                    )
+                },
             },
             "required": ["name"]
         }
@@ -7147,10 +7154,45 @@ class ToolExecutor:
         except Exception as e:
             return f"Error getting agent info: {e}"
 
+    def _refuse_self_edit(self, target_name: str) -> Optional[str]:
+        """Block agents from editing themselves.
+
+        Returns a refusal message if `target_name` resolves to the currently-
+        running agent, else None. Keys on `agent_id` (the immutable identity);
+        falls back to `name` comparison if either id is empty as a safety net
+        during backfill.
+
+        TODO: drop the name-fallback branch once all environments have
+        non-empty agent_id on every agent.
+        """
+        try:
+            from promaia.agents.agent_config import get_agent
+            target = get_agent(target_name)
+        except Exception:
+            return None
+        if not target:
+            return None
+        self_id = (getattr(self.agent, "agent_id", "") or "").strip()
+        target_id = (getattr(target, "agent_id", "") or "").strip()
+        is_self = False
+        if self_id and target_id:
+            is_self = self_id == target_id
+        else:
+            is_self = getattr(self.agent, "name", None) == getattr(target, "name", None)
+        if is_self:
+            return (
+                "Refused: agents cannot edit themselves. "
+                "Only the user can modify this agent directly."
+            )
+        return None
+
     async def _enable_agent(self, tool_input: Dict) -> str:
         name = tool_input.get("name", "").strip()
         if not name:
             return "Error: agent name is required."
+        refusal = self._refuse_self_edit(name)
+        if refusal:
+            return refusal
         try:
             from promaia.agents.agent_config import get_agent, save_agent
             agent = get_agent(name)
@@ -7168,6 +7210,9 @@ class ToolExecutor:
         name = tool_input.get("name", "").strip()
         if not name:
             return "Error: agent name is required."
+        refusal = self._refuse_self_edit(name)
+        if refusal:
+            return refusal
         try:
             from promaia.agents.agent_config import get_agent, save_agent
             agent = get_agent(name)
@@ -7186,6 +7231,9 @@ class ToolExecutor:
         new_name = tool_input.get("new_name", "").strip()
         if not old_name or not new_name:
             return "Error: old_name and new_name are required."
+        refusal = self._refuse_self_edit(old_name)
+        if refusal:
+            return refusal
         try:
             from promaia.agents.agent_config import get_agent, save_agent, load_agents
             agent = get_agent(old_name)
@@ -7267,6 +7315,9 @@ class ToolExecutor:
         name = tool_input.get("name", "").strip()
         if not name:
             return "Error: agent name is required."
+        refusal = self._refuse_self_edit(name)
+        if refusal:
+            return refusal
         try:
             from promaia.agents.agent_config import get_agent, save_agent
             agent = get_agent(name)
@@ -7292,6 +7343,9 @@ class ToolExecutor:
             if "prompt" in tool_input:
                 agent.prompt_file = tool_input["prompt"]
                 changes.append("prompt")
+            if "messaging_enabled" in tool_input:
+                agent.messaging_enabled = bool(tool_input["messaging_enabled"])
+                changes.append("messaging_enabled")
 
             if not changes:
                 return "No fields to update were provided."
@@ -7305,6 +7359,9 @@ class ToolExecutor:
         name = tool_input.get("name", "").strip()
         if not name:
             return "Error: agent name is required."
+        refusal = self._refuse_self_edit(name)
+        if refusal:
+            return refusal
         try:
             from promaia.agents.agent_config import get_agent, delete_agent
             agent = get_agent(name)
@@ -7348,6 +7405,13 @@ class ToolExecutor:
             return f"Error running agent: {e}"
 
     async def _create_agent(self, tool_input: Dict) -> str:
+        # TODO: replace with tier-based permission check once agent ranks
+        # exist — master agent (rank 1) will be allowed to create sub-agents
+        # (rank ≥ 2). For now, agent creation is a human-only action.
+        return (
+            "Refused: agents cannot create other agents. "
+            "This is a human-only action for now."
+        )
         name = tool_input.get("name", "").strip()
         if not name:
             return "Error: agent name is required."
