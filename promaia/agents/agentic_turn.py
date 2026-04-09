@@ -7978,6 +7978,86 @@ def _extract_overflow_tokens(error_str: str) -> Optional[int]:
     return None
 
 
+# ── Anthropic API retry with exponential backoff ─────────────────────
+#
+# 529 overloaded_error / 429 rate_limit_error / 500 api_error /
+# 503 service_unavailable are transient and should be retried invisibly
+# before surfacing anything to the user. Non-retryable errors
+# (bad_request, authentication, permission, not_found) re-raise.
+
+_RETRYABLE_ERROR_MARKERS = (
+    "overloaded_error",
+    "overloaded",
+    "529",
+    "rate_limit_error",
+    "429",
+    "api_error",
+    "500",
+    "service_unavailable",
+    "503",
+)
+
+_API_RETRY_MAX_ATTEMPTS = 5  # 1 initial + 4 retries
+_API_RETRY_BASE_DELAY = 2.0  # seconds; schedule is 2, 4, 8, 16
+
+
+class _OverloadExhausted(Exception):
+    """Raised when Anthropic API retries are exhausted on a retryable error."""
+
+
+def _is_retryable_api_error(err: Exception) -> bool:
+    err_type = type(err).__name__.lower()
+    err_str = str(err).lower()
+    blob = f"{err_type} {err_str}"
+    return any(marker in blob for marker in _RETRYABLE_ERROR_MARKERS)
+
+
+async def _call_with_retry(
+    client: Any,
+    api_kwargs: Dict[str, Any],
+    on_tool_activity: Optional["ToolActivityCallback"] = None,
+) -> Any:
+    """Call client.messages.create with exponential backoff on transient errors.
+
+    Raises _OverloadExhausted after _API_RETRY_MAX_ATTEMPTS retryable failures.
+    Non-retryable errors re-raise immediately.
+    """
+    last_err: Optional[Exception] = None
+    for attempt in range(_API_RETRY_MAX_ATTEMPTS):
+        try:
+            return await asyncio.to_thread(client.messages.create, **api_kwargs)
+        except Exception as err:
+            if not _is_retryable_api_error(err):
+                raise
+            last_err = err
+            if attempt == _API_RETRY_MAX_ATTEMPTS - 1:
+                break
+            delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
+            logger.warning(
+                f"[agentic] Anthropic API transient error "
+                f"(attempt {attempt + 1}/{_API_RETRY_MAX_ATTEMPTS}): {err}. "
+                f"Retrying in {delay:.0f}s"
+            )
+            if on_tool_activity:
+                try:
+                    await on_tool_activity(
+                        tool_name="__api_retry__",
+                        tool_input={},
+                        completed=False,
+                        summary=(
+                            f"Anthropic overloaded, retrying in {delay:.0f}s "
+                            f"(attempt {attempt + 2}/{_API_RETRY_MAX_ATTEMPTS})"
+                        ),
+                    )
+                except Exception:
+                    pass
+            await asyncio.sleep(delay)
+
+    raise _OverloadExhausted(
+        f"Anthropic API retries exhausted after {_API_RETRY_MAX_ATTEMPTS} attempts: {last_err}"
+    )
+
+
 def _trim_tool_results(messages: List[Dict], max_result_chars: int = 50_000) -> None:
     """Smart-trim large tool_result blocks using proportional recency-weighted trimming.
 
@@ -8233,9 +8313,31 @@ async def agentic_turn(
             api_kwargs["tools"] = iteration_tools
 
         try:
-            response = await asyncio.to_thread(
-                client.messages.create,
-                **api_kwargs,
+            response = await _call_with_retry(client, api_kwargs, on_tool_activity)
+        except _OverloadExhausted as exhaust_err:
+            logger.warning(f"[agentic] {exhaust_err}")
+            last_text = "\n".join(text_parts) if text_parts else ""
+            friendly = (
+                "Claude is currently overloaded and I couldn't get a response "
+                "after several retries. Please try again in a moment."
+            )
+            response_text = (last_text + "\n\n" + friendly) if last_text else friendly
+            if plan and on_tool_activity:
+                try:
+                    await on_tool_activity(
+                        tool_name="__plan_done__",
+                        tool_input={"total": len(plan)},
+                        completed=True,
+                    )
+                except Exception:
+                    pass
+            return AgenticTurnResult(
+                response_text=response_text,
+                tool_calls_made=all_tool_calls,
+                iterations_used=iteration + 1,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                plan=plan,
             )
         except Exception as api_err:
             err_str = str(api_err)
@@ -8263,11 +8365,15 @@ async def agentic_turn(
                             pass
                     _trim_tool_results(internal_messages, max_result_chars=trim_limit)
                     try:
-                        response = await asyncio.to_thread(
-                            client.messages.create,
-                            **api_kwargs,
+                        response = await _call_with_retry(
+                            client, api_kwargs, on_tool_activity
                         )
                         break  # Success
+                    except _OverloadExhausted:
+                        # Overload on the trimmed retry — bail to the outer
+                        # exhaustion path by re-raising as a tagged sentinel.
+                        response = None
+                        break
                     except Exception:
                         continue  # Try tighter trim
 
