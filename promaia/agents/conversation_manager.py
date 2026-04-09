@@ -611,6 +611,7 @@ class ConversationManager:
                 notepad_content=notepad_content,
                 source_states=source_states,
                 on_tool_activity=on_tool_activity,
+                messaging_enabled=getattr(agent, 'messaging_enabled', False),
             )
 
             output = result.response_text
