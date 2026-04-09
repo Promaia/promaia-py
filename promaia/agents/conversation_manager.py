@@ -658,7 +658,7 @@ class ConversationManager:
 
             if not output:
                 logger.warning(f"Agent {state.agent_id} returned empty response")
-                return "I'm sorry, I couldn't generate a response."
+                return None
 
             # Handle end_conversation signal — mark DM conversations done with summary
             if result.signal and result.signal.get("type") == "end_conversation":

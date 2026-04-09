@@ -8190,6 +8190,7 @@ async def agentic_turn(
     act_step_status: List[str] = []  # "pending" | "done"
     act_tool_use_ids: List[str] = []  # tool_use ids produced in the current act burst (shelved on __DONE__)
     use_think_act = suite_registry is not None  # Feature flag: only use Think/Act if registry provided
+    _retried_for_empty_text = False  # One-shot: nudge model to produce text if end_turn had none
 
     for iteration in range(max_iterations):
         # Stamp the current iteration on the executor so source-management
@@ -8440,6 +8441,23 @@ async def agentic_turn(
 
         # If no tool calls, we're done — return the final text
         if response.stop_reason == "end_turn" or not tool_uses:
+            # If the model ended the turn with zero text but DID execute tools,
+            # nudge it once to produce a plain-English summary for the user.
+            if not text_parts and all_tool_calls and not _retried_for_empty_text:
+                _retried_for_empty_text = True
+                internal_messages.append({
+                    "role": "assistant",
+                    "content": _serialize_content_blocks(response.content),
+                })
+                internal_messages.append({
+                    "role": "user",
+                    "content": (
+                        "You completed tool actions but didn't provide a response "
+                        "to the user. Please summarize what you did in plain English."
+                    ),
+                })
+                continue
+
             if plan and on_tool_activity:
                 try:
                     await on_tool_activity(
