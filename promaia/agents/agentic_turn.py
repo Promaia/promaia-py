@@ -3325,7 +3325,7 @@ class ToolExecutor:
     async def _write_journal_to_workspace(self, content: str, note_type: str) -> str:
         """Write a journal entry to the workspace's journal database directly."""
         from promaia.config.databases import get_database_manager
-        from promaia.connectors.notion_connector import get_client
+        from promaia.notion.client import get_client
         from promaia.agents.notion_journal import _derive_title
 
         # Find the workspace journal database
