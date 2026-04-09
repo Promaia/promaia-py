@@ -54,7 +54,14 @@ jobs:
           username: root
           key: ${{ secrets.KOII_SSH_KEY }}
           script: |
+            set -euo pipefail
             cd /root/promaia
+            # Reclaim disk before pulling so extraction can't silently fail.
+            # prune -a skips images used by running containers, so the
+            # currently-live :latest stays protected.
+            docker builder prune -f
+            docker image prune -a -f
+            df -h /
             docker pull ghcr.io/promaia/promaia-py:latest
             docker compose down --remove-orphans --timeout 30
             docker compose up -d
@@ -72,7 +79,14 @@ jobs:
           username: root
           key: ${{ secrets.GLACIER_SSH_KEY }}
           script: |
+            set -euo pipefail
             cd /root/promaia-py
+            # Reclaim disk before pulling so extraction can't silently fail.
+            # prune -a skips images used by running containers, so the
+            # currently-live :latest stays protected.
+            docker builder prune -f
+            docker image prune -a -f
+            df -h /
             docker pull ghcr.io/promaia/promaia-py:latest
             docker compose down --remove-orphans --timeout 30
             docker compose up -d
