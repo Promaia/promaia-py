@@ -2957,9 +2957,15 @@ class ToolExecutor:
         self._sandbox = Sandbox()
         # Persistent notepad (survives across turns within a conversation)
         self._notepad = ""
-        # Context sources: name → {"content": str, "on": bool, "page_count": int, "source": str}
+        # Context sources: name → {
+        #     "content": str, "on": bool, "page_count": int, "source": str,
+        #     "mounted_at_iteration": int,  # set when toggled ON; used by LRU trim
+        # }
         self._sources = {}
         self._sources_muted = False
+        # Updated each iteration by the agentic loop so source-management
+        # paths (shelving, _context_action) can stamp mounted_at_iteration.
+        self._current_iteration = 0
         # External MCP server connections
         self._mcp_client = None        # McpClient instance
         self._mcp_tool_map = {}        # namespaced_name → (server_name, original_name)
@@ -6579,6 +6585,7 @@ class ToolExecutor:
             for name in names:
                 if name in self._sources:
                     self._sources[name]["on"] = True
+                    self._sources[name]["mounted_at_iteration"] = self._current_iteration
                     turned_on.append(name)
             if turned_on:
                 return f"Context ON: {', '.join(turned_on)}. Content now visible."
@@ -6683,6 +6690,142 @@ class ToolExecutor:
             if src["on"] and src.get("content"):
                 parts.append(src["content"])
         return "\n\n".join(parts)
+
+    # ── Act-mode tool result shelving ───────────────────────────────────
+    #
+    # When act mode exits via __DONE__, all tool_result blocks produced
+    # during the burst are moved into the _sources shelf system. The
+    # full payload is registered as an ON source (so think mode sees it
+    # immediately via build_active_source_content) and the inline
+    # tool_result block is replaced with a short stub. The matching
+    # tool_use block is left untouched, so workflow capture
+    # (all_tool_calls[]) is unaffected.
+    #
+    # Tiny results (control acks, "done", error strings) stay inline.
+
+    _SHELVE_MIN_CHARS = 500
+
+    def shelve_act_results(
+        self,
+        tool_use_ids: List[str],
+        internal_messages: List[Dict],
+        current_iteration: int,
+    ) -> int:
+        """Shelve every tool_result whose id is in tool_use_ids.
+
+        Returns the number of results shelved. Stubs replace the inline
+        content; the registered source is ON so think mode sees it
+        immediately on its next turn.
+        """
+        if not tool_use_ids:
+            return 0
+
+        id_set = set(tool_use_ids)
+        shelved = 0
+
+        # Walk newest → oldest so multiple bursts behave predictably.
+        for msg in reversed(internal_messages):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "tool_result":
+                    continue
+                tu_id = block.get("tool_use_id")
+                if tu_id not in id_set:
+                    continue
+                result_text = block.get("content", "")
+                if not isinstance(result_text, str):
+                    continue
+                if len(result_text) < self._SHELVE_MIN_CHARS:
+                    continue
+                # Skip if already a stub (idempotent)
+                if result_text.startswith("[tool result shelved]"):
+                    continue
+
+                tool_name = self._lookup_tool_name(internal_messages, tu_id)
+                source_id = self._make_act_source_id(tool_name, tu_id)
+                title = self._make_act_source_title(tool_name, tu_id, internal_messages)
+
+                self._sources[source_id] = {
+                    "content": result_text,
+                    "on": True,
+                    "page_count": 1,
+                    "source": tool_name or "act_tool",
+                    "titles": [title] if title else [],
+                    "mounted_at_iteration": current_iteration,
+                }
+
+                stub = (
+                    f"[tool result shelved] source_id={source_id} "
+                    f"tool={tool_name or 'unknown'} size={len(result_text)} chars\n"
+                    f"Call turn_on_source if you need to re-read this."
+                )
+                block["content"] = stub
+                shelved += 1
+
+        if shelved:
+            logger.info(
+                f"[shelve_act_results] Shelved {shelved} act-mode tool result(s) "
+                f"into _sources at iteration {current_iteration}"
+            )
+        return shelved
+
+    @staticmethod
+    def _lookup_tool_name(internal_messages: List[Dict], tool_use_id: str) -> str:
+        """Find the tool_use block matching tool_use_id and return its name."""
+        for msg in internal_messages:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and block.get("id") == tool_use_id
+                ):
+                    return block.get("name", "")
+        return ""
+
+    @staticmethod
+    def _make_act_source_id(tool_name: str, tool_use_id: str) -> str:
+        suffix = (tool_use_id or "").split("_")[-1][:8] or "x"
+        safe_name = (tool_name or "act_tool").replace("__", "_")
+        return f"act_{safe_name}_{suffix}"
+
+    @staticmethod
+    def _make_act_source_title(
+        tool_name: str, tool_use_id: str, internal_messages: List[Dict]
+    ) -> str:
+        """Build a short human-readable title from the tool's input args."""
+        for msg in internal_messages:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and block.get("id") == tool_use_id
+                ):
+                    inp = block.get("input") or {}
+                    if isinstance(inp, dict):
+                        for key in ("query", "q", "name", "range", "thread_id", "id"):
+                            if key in inp and inp[key]:
+                                return f"{tool_name}({inp[key]!s:.60})"
+                        if inp:
+                            first_k, first_v = next(iter(inp.items()))
+                            return f"{tool_name}({first_k}={first_v!s:.40})"
+                    return tool_name or ""
+        return tool_name or ""
 
     # ── Workspace file tools ────────────────────────────────────────────
 
@@ -7901,31 +8044,35 @@ async def agentic_turn(
     act_suites: List[str] = []
     act_instructions: List[str] = []
     act_step_status: List[str] = []  # "pending" | "done"
+    act_tool_use_ids: List[str] = []  # tool_use ids produced in the current act burst (shelved on __DONE__)
     use_think_act = suite_registry is not None  # Feature flag: only use Think/Act if registry provided
 
     for iteration in range(max_iterations):
+        # Stamp the current iteration on the executor so source-management
+        # paths (shelving, _context_action) can record mounted_at_iteration.
+        if tool_executor is not None:
+            tool_executor._current_iteration = iteration
+
         budget_note = (
             f"\n\n[Tool budget: {max_iterations - iteration}/{max_iterations} "
             f"iterations remaining]"
         )
 
         # ── Build effective prompt and tool list per mode ──────────────
-        effective_prompt = system_prompt
+        # base_prompt = everything EXCEPT the active-source content block.
+        # The active-source block is appended via _compose_prompt() so the
+        # context trimmer can rebuild after LRU-off'ing sources.
+        base_prompt = system_prompt
 
         if use_think_act and not act_mode:
             # THINK MODE: suite index first, then context index + active content
             _ws = tool_executor.workspace if tool_executor else ""
-            effective_prompt += "\n\n" + _build_suite_index(suite_registry, mcp_suites, workspace=_ws)
+            base_prompt += "\n\n" + _build_suite_index(suite_registry, mcp_suites, workspace=_ws)
 
             if tool_executor and hasattr(tool_executor, 'build_context_index'):
                 ctx_index = tool_executor.build_context_index()
                 if ctx_index:
-                    effective_prompt += "\n\n" + ctx_index
-
-            if tool_executor and hasattr(tool_executor, '_sources'):
-                active_content = tool_executor.build_active_source_content()
-                if active_content:
-                    effective_prompt += "\n\n" + active_content
+                    base_prompt += "\n\n" + ctx_index
 
             # Think mode tools: query + notepad + memory + context + workflows (read) + act
             iteration_tools = list(QUERY_TOOL_DEFINITIONS)
@@ -7969,16 +8116,32 @@ async def agentic_turn(
             if tool_executor and hasattr(tool_executor, 'build_context_index'):
                 ctx_index = tool_executor.build_context_index()
                 if ctx_index:
-                    effective_prompt += "\n\n" + ctx_index
-            if tool_executor and hasattr(tool_executor, '_sources'):
-                active_content = tool_executor.build_active_source_content()
-                if active_content:
-                    effective_prompt += "\n\n" + active_content
+                    base_prompt += "\n\n" + ctx_index
 
-        # Proactive context trimming before API call
+        # Compose final prompt = base + active-source block + budget_note.
+        # The active-source block is recomputed from current _sources state
+        # so it reflects post-LRU shelving when called from the trimmer.
+        def _compose_prompt() -> str:
+            active = ""
+            # Note: in act mode, build_active_source_content returns "" because
+            # _sources_muted is True — preserved automatically.
+            if tool_executor and hasattr(tool_executor, "build_active_source_content"):
+                active = tool_executor.build_active_source_content() or ""
+            parts = [base_prompt]
+            if active:
+                parts.append(active)
+            return "\n\n".join(parts) + budget_note
+
+        effective_prompt = _compose_prompt()
+
         from promaia.agents.context_trimmer import trim_context_to_fit
         trimmed_system, internal_messages = await trim_context_to_fit(
-            effective_prompt + budget_note, internal_messages, tools=iteration_tools
+            effective_prompt,
+            internal_messages,
+            tools=iteration_tools,
+            tool_executor=tool_executor,
+            current_iteration=iteration,
+            rebuild_system_prompt=_compose_prompt,
         )
 
         # Log the effective prompt (first iteration and on mode switches)
@@ -8182,6 +8345,7 @@ async def agentic_turn(
                     act_step_status = []
                 act_mode = True
                 act_suites = suite_names
+                act_tool_use_ids = []  # fresh burst
                 # Mute context (preserves individual on/off states for restore)
                 if tool_executor:
                     tool_executor._sources_muted = True
@@ -8219,10 +8383,25 @@ async def agentic_turn(
                 else:
                     result_text = f"Invalid step number: {step_num}"
             elif result_text == "__DONE__":
+                # Shelve all act-burst tool results into _sources before
+                # returning to Think mode. This frees ~all of the bloat
+                # while keeping the data lossly recoverable via turn_on_source.
+                if tool_executor and act_tool_use_ids:
+                    try:
+                        tool_executor.shelve_act_results(
+                            act_tool_use_ids,
+                            internal_messages,
+                            current_iteration=iteration,
+                        )
+                    except Exception as shelve_err:
+                        logger.warning(
+                            f"[think/act] shelve_act_results failed: {shelve_err}"
+                        )
                 act_mode = False
                 act_suites = []
                 act_instructions = []
                 act_step_status = []
+                act_tool_use_ids = []
                 if tool_executor:
                     tool_executor._sources_muted = False
                 result_text = "Back to Think mode. Context restored."
@@ -8310,6 +8489,11 @@ async def agentic_turn(
                 "tool_use_id": tool_use.id,
                 "content": result_text,
             })
+            # Track tool_use ids produced inside an act burst so they can
+            # be shelved on __DONE__. Recorded *after* mode-switch sentinels
+            # are handled above so __ACT__/__DONE__ themselves are excluded.
+            if act_mode:
+                act_tool_use_ids.append(tool_use.id)
             all_tool_calls.append({
                 "name": tool_use.name,
                 "input": tool_use.input,
