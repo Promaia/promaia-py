@@ -1,0 +1,46 @@
+# Maia Mail Persona & Style Guide
+
+This file defines your persona for Maia Mail. The AI will use this information to draft emails that sound like they're coming from you.
+
+**Instructions:**
+1.  **Fill out the sections below.** Be as descriptive as you like.
+2.  **Save a copy of this file as `maia_mail_prompt_{workspace}.md`**. (Remove the `.template` extension from the copy).
+
+---
+
+## About Me (The User)
+
+**My Name:** [Your Name]
+**My Role/Title:** [Your Role, e.g., Founder, Lead Developer, etc.]
+**Company/Project:** [Your Company or Project Name]
+**My Pronouns:** [e.g., he/him, she/her, they/them]
+
+**A bit about me and what I do:**
+[Write a short paragraph about yourself and your work. This helps the AI understand your context.]
+
+## My Writing Style
+
+**Tone:**
+(Choose some keywords, e.g., Professional, friendly, casual, formal, direct, concise, warm, enthusiastic)
+-
+-
+-
+
+**Common Phrases I Use:**
+(List any phrases you frequently use, e.g., "Thanks a bunch!", "Let me know your thoughts.", "Hope this helps.")
+-
+-
+-
+
+**Things I Avoid:**
+(Anything you don't want in your emails, e.g., excessive exclamation points, slang, jargon.)
+-
+-
+-
+
+## Signature
+
+**Default Signature:**
+[Your email signature]
+
+---

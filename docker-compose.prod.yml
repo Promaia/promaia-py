@@ -58,17 +58,18 @@ services:
       - TZ=${TZ:-America/Los_Angeles}
     restart: unless-stopped
 
-  maia-mail:
-    image: ghcr.io/promaia/promaia-py:latest
-    entrypoint: ["python", "-m", "promaia.services.supervisor", "mail", "--"]
-    command: ["maia", "mail", "-p", "--loop", "--interval", "1800"]
-    volumes:
-      - ./maia-data:/app/maia-data
-    env_file: ./maia-data/.env
-    environment:
-      - PROMAIA_DATA_DIR=/app/maia-data
-      - TZ=${TZ:-America/Los_Angeles}
-    restart: unless-stopped
+  # maia-mail — DISABLED (removed from compose to prevent deploy restarts)
+  # maia-mail:
+  #   image: ghcr.io/promaia/promaia-py:latest
+  #   entrypoint: ["python", "-m", "promaia.services.supervisor", "mail", "--"]
+  #   command: ["maia", "mail", "-p", "--loop", "--interval", "1800"]
+  #   volumes:
+  #     - ./maia-data:/app/maia-data
+  #   env_file: ./maia-data/.env
+  #   environment:
+  #     - PROMAIA_DATA_DIR=/app/maia-data
+  #     - TZ=${TZ:-America/Los_Angeles}
+  #   restart: unless-stopped
 
   maia-discord:
     image: ghcr.io/promaia/promaia-py:latest

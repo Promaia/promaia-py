@@ -87,21 +87,19 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
-  # Mail processor — checks Gmail and drafts responses
-  # Uses --loop/--interval for proper Python loop (graceful SIGTERM).
-  # Supervisor watches services.json to enable/disable at runtime.
+  # Mail processor — DISABLED (removed from compose to prevent deploy restarts)
   # ---------------------------------------------------------------------------
-  maia-mail:
-    image: promaia:dev
-    entrypoint: ["python", "-m", "promaia.services.supervisor", "mail", "--"]
-    command: ["maia", "mail", "-p", "--loop", "--interval", "1800"]
-    volumes:
-      - .:/app
-    env_file: ./maia-data/.env
-    environment:
-      - PROMAIA_DATA_DIR=/app/maia-data
-      - TZ=${TZ:-America/Los_Angeles}
-    restart: unless-stopped
+  # maia-mail:
+  #   image: promaia:dev
+  #   entrypoint: ["python", "-m", "promaia.services.supervisor", "mail", "--"]
+  #   command: ["maia", "mail", "-p", "--loop", "--interval", "1800"]
+  #   volumes:
+  #     - .:/app
+  #   env_file: ./maia-data/.env
+  #   environment:
+  #     - PROMAIA_DATA_DIR=/app/maia-data
+  #     - TZ=${TZ:-America/Los_Angeles}
+  #   restart: unless-stopped
 
   # ---------------------------------------------------------------------------
   # Discord bot
