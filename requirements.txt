@@ -68,7 +68,6 @@ wcwidth==0.2.13
 websockets==15.0.1
 yarl==1.20.0
 chromadb==0.5.23
-chroma-hnswlib==0.7.5  # 0.7.6 SIGILL on DO droplet CPUs
 posthog>=2.4.0,<6.0.0  # Fix telemetry errors with chromadb 0.5.23
 
 # Web content extraction
