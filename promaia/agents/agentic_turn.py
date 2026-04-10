@@ -913,25 +913,8 @@ CALENDAR_MANAGEMENT_TOOL_DEFINITIONS = [
 ]
 
 WEB_SEARCH_TOOL_DEFINITIONS = [{
+    "type": "web_search_20250305",
     "name": "web_search",
-    "description": (
-        "Search the internet for current information. "
-        "Use for real-time info, recent news, facts not in local data, or verification."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "Search query",
-            },
-            "reasoning": {
-                "type": "string",
-                "description": "Why you need to search the web",
-            },
-        },
-        "required": ["query", "reasoning"],
-    },
 }]
 
 
@@ -5609,92 +5592,8 @@ class ToolExecutor:
     # ── Notion tools ────────────────────────────────────────────────────
 
     async def _web_search(self, tool_input: Dict) -> str:
-        """Search the web via Perplexity API."""
-        import json as _json
-        import urllib.request
-        import urllib.error
-
-        query = tool_input.get("query", "")
-        if not query:
-            return "Error: missing 'query' parameter"
-
-        from promaia.auth import get_integration
-
-        try:
-            perplexity = get_integration("perplexity")
-            api_key = perplexity.get_default_credential()
-        except Exception:
-            api_key = None
-        if not api_key:
-            return "Error: Perplexity API key not configured. Run `maia auth setup perplexity`."
-
-        url = "https://api.perplexity.ai/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        data = {
-            "model": "sonar-pro",
-            "messages": [{"role": "user", "content": query}],
-        }
-
-        def _call():
-            req = urllib.request.Request(
-                url,
-                data=_json.dumps(data).encode("utf-8"),
-                headers=headers,
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return _json.loads(resp.read().decode("utf-8"))
-
-        try:
-            result = await asyncio.to_thread(_call)
-        except urllib.error.HTTPError as e:
-            if e.code == 401:
-                return "Error: Invalid Perplexity API key."
-            elif e.code == 429:
-                return "Error: Perplexity rate limit exceeded. Try again later."
-            return f"Error: Perplexity API returned HTTP {e.code}: {e.reason}"
-        except Exception as e:
-            return f"Error: Web search failed: {e}"
-
-        # Extract content
-        content = ""
-        citations = []
-        if "choices" in result and result["choices"]:
-            content = result["choices"][0]["message"]["content"]
-            msg = result["choices"][0]["message"]
-            citations = msg.get("citations", result.get("citations", []))
-
-        if not content:
-            return "Web search returned no results."
-
-        # Extract search_results array (title + URL + snippet per result)
-        search_results = result.get("search_results", [])
-
-        # Format response
-        parts = [content]
-        if search_results:
-            parts.append("\n\nSearch Results:")
-            for i, sr in enumerate(search_results, 1):
-                title = sr.get("title", "Untitled")
-                url = sr.get("url", "")
-                snippet = sr.get("snippet", "")
-                parts.append(f"  {i}. {title}")
-                if url:
-                    parts.append(f"     {url}")
-                if snippet:
-                    parts.append(f"     {snippet}")
-        if citations:
-            parts.append("\n\nSources:")
-            for i, cite in enumerate(citations, 1):
-                if isinstance(cite, dict):
-                    parts.append(f"  {i}. {cite.get('title', cite.get('url', 'Source'))}")
-                    if cite.get("url"):
-                        parts.append(f"     {cite['url']}")
-                else:
-                    parts.append(f"  {i}. {cite}")
-        return "\n".join(parts)
+        """Stub — web_search is now an Anthropic server-side tool."""
+        return "Error: web_search is handled server-side by the Anthropic API. This method should not be called."
 
     async def _web_fetch(self, tool_input: Dict) -> str:
         """Fetch and extract text content from a URL."""
@@ -8106,6 +8005,10 @@ def _serialize_content_blocks(content):
                         "tool_use_id": block.tool_use_id,
                         "content": block.content,
                     })
+                elif block.type in ("server_tool_use", "web_search_tool_result"):
+                    # Server-side tool blocks must be preserved verbatim
+                    # for multi-turn replay (encrypted_content, caller, etc.)
+                    result.append(block.model_dump())
             elif isinstance(block, dict):
                 result.append(block)
         return result
@@ -8438,6 +8341,39 @@ async def agentic_turn(
                 text_parts.append(clean_text)
             elif block.type == "tool_use":
                 tool_uses.append(block)
+            elif block.type == "server_tool_use":
+                # Server-side tool (e.g. web_search) — already resolved by
+                # the API, no local execution needed.  Fire UX callbacks and
+                # record in all_tool_calls for history.
+                query = block.input.get("query", "") if isinstance(block.input, dict) else ""
+                if on_tool_activity:
+                    try:
+                        await on_tool_activity(
+                            tool_name="web_search",
+                            tool_input={"query": query},
+                            completed=False,
+                        )
+                    except Exception:
+                        pass
+                all_tool_calls.append({
+                    "name": block.name,
+                    "input": block.input if isinstance(block.input, dict) else {},
+                    "summary": f'Web search "{query}"',
+                })
+            elif block.type == "web_search_tool_result":
+                # Results already consumed by the model — log errors.
+                if hasattr(block, "content") and hasattr(block.content, "error_code"):
+                    logger.warning(f"[agentic] Web search error: {block.content.error_code}")
+                if on_tool_activity:
+                    try:
+                        await on_tool_activity(
+                            tool_name="web_search",
+                            tool_input={},
+                            completed=True,
+                            summary="Web search completed",
+                        )
+                    except Exception:
+                        pass
 
         # If no tool calls, we're done — return the final text
         if response.stop_reason == "end_turn" or not tool_uses:

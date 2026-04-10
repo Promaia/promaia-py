@@ -149,12 +149,13 @@ def detect_available_tools(workspace: str) -> List[str]:
     except Exception:
         pass
 
+    # web_search is an Anthropic server-side tool — available when using
+    # the Anthropic API directly.  OpenRouter does not proxy server tools,
+    # so only enable when ANTHROPIC_API_KEY is set.
     try:
-        perplexity = get_integration("perplexity")
-        if perplexity:
-            cred = perplexity.get_default_credential()
-            if cred:
-                tools.append("web_search")
+        import os
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            tools.append("web_search")
     except Exception:
         pass
 
@@ -344,8 +345,8 @@ def build_agentic_system_prompt(
         tool_sections_parts.append(
             "## Web Search & Fetch (Read)\n\n"
             "- **web_search**: Search the internet for current information. "
-            "Returns a synthesized answer plus a list of individual search results "
-            "(title, URL, snippet per result).\n"
+            "The search is performed automatically and results are synthesized "
+            "directly into the response.\n"
             "- **web_fetch**: Fetch and read the full content of a specific web page "
             "by URL. Returns the page as clean extracted text.\n\n"
             "### Local-first principle\n\n"
