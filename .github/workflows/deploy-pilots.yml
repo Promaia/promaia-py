@@ -56,16 +56,20 @@ jobs:
           script: |
             set -euo pipefail
             cd /root/promaia
-            # Reclaim disk before pulling so extraction can't silently fail.
-            # prune -a skips images used by running containers, so the
-            # currently-live :latest stays protected.
             docker builder prune -f
             docker image prune -a -f
             df -h /
-            docker pull ghcr.io/promaia/promaia-py:latest
-            docker compose down --remove-orphans --timeout 30
-            docker compose up -d
-            echo "Deployed $(docker inspect --format='{{.Id}}' ghcr.io/promaia/promaia-py:latest | head -c 12)"
+            docker compose pull
+            docker compose up -d --force-recreate --remove-orphans
+            sleep 5
+            RUNNING=$(docker compose ps --status running -q | wc -l)
+            EXPECTED=$(docker compose ps -q | wc -l)
+            if [ "$RUNNING" -lt "$EXPECTED" ]; then
+              echo "ERROR: Only $RUNNING/$EXPECTED containers running"
+              docker compose ps
+              exit 1
+            fi
+            echo "Deployed $RUNNING containers from $(docker inspect --format='{{.Id}}' ghcr.io/promaia/promaia-py:latest | head -c 12)"
 
   deploy-glacier:
     runs-on: ubuntu-latest
@@ -81,13 +85,17 @@ jobs:
           script: |
             set -euo pipefail
             cd /root/promaia-py
-            # Reclaim disk before pulling so extraction can't silently fail.
-            # prune -a skips images used by running containers, so the
-            # currently-live :latest stays protected.
             docker builder prune -f
             docker image prune -a -f
             df -h /
-            docker pull ghcr.io/promaia/promaia-py:latest
-            docker compose down --remove-orphans --timeout 30
-            docker compose up -d
-            echo "Deployed $(docker inspect --format='{{.Id}}' ghcr.io/promaia/promaia-py:latest | head -c 12)"
+            docker compose pull
+            docker compose up -d --force-recreate --remove-orphans
+            sleep 5
+            RUNNING=$(docker compose ps --status running -q | wc -l)
+            EXPECTED=$(docker compose ps -q | wc -l)
+            if [ "$RUNNING" -lt "$EXPECTED" ]; then
+              echo "ERROR: Only $RUNNING/$EXPECTED containers running"
+              docker compose ps
+              exit 1
+            fi
+            echo "Deployed $RUNNING containers from $(docker inspect --format='{{.Id}}' ghcr.io/promaia/promaia-py:latest | head -c 12)"
