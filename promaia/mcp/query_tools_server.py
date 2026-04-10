@@ -163,11 +163,11 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
-            name="write_journal",
-            description="Write a personal note to your journal. "
-                       "Use this to record insights, learnings, behavior changes, or important information you want to remember. "
-                       "This is NOT for execution logs (those are automatic). "
-                       "Only write to journal when you have something meaningful to record.",
+            name="write_agent_journal",
+            description="Write a note to your agent journal — your private notebook for tracking insights, "
+                       "learnings, and information across runs. This is YOUR agent journal, not the user's "
+                       "personal journal database. NOT for execution logs (those are automatic). "
+                       "Only write when you have something meaningful to record.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -205,7 +205,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return await _handle_update_messaging_config(arguments)
         elif name == "list_available_messaging_channels":
             return await _handle_list_messaging_channels(arguments)
-        elif name == "write_journal":
+        elif name == "write_agent_journal":
             return await _handle_write_journal(arguments)
         else:
             error_msg = f"Unknown tool: {name}"
@@ -533,7 +533,7 @@ async def _handle_list_messaging_channels(args: dict) -> list[TextContent]:
 
 
 async def _handle_write_journal(args: dict) -> list[TextContent]:
-    """Handle write_journal tool call - Agent writes personal note to journal"""
+    """Handle write_agent_journal tool call - Agent writes to its own journal"""
     try:
         content = args.get("content", "")
         note_type = args.get("note_type", "Note")
@@ -589,7 +589,7 @@ async def main():
         except Exception as e:
             logger.warning(f"Could not load agent config: {e}, running without permission enforcement")
 
-    logger.info("Tools available: query_sql, query_vector, query_source, get_agent_messaging_config, update_agent_messaging_config, list_available_messaging_channels, write_journal")
+    logger.info("Tools available: query_sql, query_vector, query_source, get_agent_messaging_config, update_agent_messaging_config, list_available_messaging_channels, write_agent_journal")
 
     # Run stdio server
     async with stdio_server() as (read_stream, write_stream):

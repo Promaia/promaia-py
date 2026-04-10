@@ -101,7 +101,7 @@ QUERY_TOOL_DEFINITIONS = [
         "description": (
             "Load pages from a specific database with time filtering. "
             "Use to expand context or load different time ranges. "
-            "Available databases include: journal, gmail, stories, tasks, calendar, "
+            "Available databases include: agent_journal, gmail, stories, tasks, calendar, "
             "and any Discord/Slack channel sources."
         ),
         "input_schema": {
@@ -110,7 +110,7 @@ QUERY_TOOL_DEFINITIONS = [
                 "database": {
                     "type": "string",
                     "description": (
-                        "Database name (e.g., 'journal', 'gmail', 'stories', "
+                        "Database name (e.g., 'agent_journal', 'gmail', 'stories', "
                         "'tasks', 'calendar')"
                     )
                 },
@@ -123,10 +123,11 @@ QUERY_TOOL_DEFINITIONS = [
         }
     },
     {
-        "name": "write_journal",
+        "name": "write_agent_journal",
         "description": (
-            "Write a personal note to your journal. "
-            "Use to record insights, learnings, or important information you want to remember."
+            "Write a note to your agent journal — your private notebook for tracking insights, "
+            "learnings, and information across runs. This is YOUR agent journal, not the user's "
+            "personal journal database."
         ),
         "input_schema": {
             "type": "object",
@@ -2970,7 +2971,7 @@ class ToolExecutor:
                 return await self._query_vector(tool_input)
             elif tool_name == "query_source":
                 return await self._query_source(tool_input)
-            elif tool_name == "write_journal":
+            elif tool_name == "write_agent_journal":
                 return await self._write_journal(tool_input)
             # Messaging tools
             elif tool_name == "send_message":
@@ -3255,6 +3256,12 @@ class ToolExecutor:
         database = tool_input.get("database", "")
         if not database:
             return "Error: missing 'database' parameter"
+
+        # Resolve "agent_journal" alias to this agent's actual journal nickname
+        if database == "agent_journal" and hasattr(self.agent, 'agent_id'):
+            agent_id = self.agent.agent_id
+            if agent_id and agent_id != "terminal-user":
+                database = f"{agent_id.replace('-', '_')}_journal"
 
         days = tool_input.get("days")
         if days == 0:
@@ -8717,8 +8724,8 @@ def _summarize_tool_result(
             return f"Loaded {db}:{days} ({count_part.lower()})"
         return f"Loaded {db}:{days}"
 
-    elif tool_name == "write_journal":
-        return "Wrote journal entry"
+    elif tool_name == "write_agent_journal":
+        return "Wrote agent journal entry"
 
     elif tool_name == "send_email":
         to = tool_input.get("to", "")

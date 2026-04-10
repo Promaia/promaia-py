@@ -136,7 +136,9 @@ Bad: "pricing" (too ambiguous — describe the *kind* of pricing thinking)
 
 If a query returns nothing, try at least 2-3 different approaches before giving up.
 
-### write_journal — Record a note or insight to the Notion journal
+### write_agent_journal — Record a note or insight to the agent's own journal
+
+Your **agent journal** (`write_agent_journal`, source `agent_journal`) is YOUR private notebook — it persists across runs and is for tracking your own insights, learnings, and notes. If the user has a database called "journal", that is THEIR personal journal — a completely separate database. Use context to determine which journal is being referenced.
 
 ---
 

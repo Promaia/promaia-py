@@ -170,7 +170,7 @@ Only mention capabilities that are relevant to their specific need.
 - query_sql: Keyword search across synced databases (exact text matching)
 - query_vector: Semantic/meaning-based search across databases
 - query_source: Load full database contents with time filtering
-- write_journal: Write notes/insights to the agent's personal journal
+- write_agent_journal: Write notes/insights to the agent's own journal
 
 **MCP tools** (opt-in per agent):
 - gmail: Send emails, create drafts, reply to threads
@@ -201,7 +201,7 @@ Only mention capabilities that are relevant to their specific need.
 
 **Journals**:
 - Every agent has a personal journal database
-- Agents can write notes, insights, and learnings via `write_journal`
+- Agents can write notes, insights, and learnings via `write_agent_journal`
 - Journal entries become memory for future runs (configurable lookback)
 - Great for agents that need to track patterns over time
 

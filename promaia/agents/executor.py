@@ -1136,7 +1136,7 @@ Respond naturally to continue the conversation.{meta_text}
 If you need more data beyond what's preloaded above, use these query tools:
 
 1. **query_source(database, days)**: Load different time ranges
-   - Example: `query_source(database='journal', days=30)` for more history
+   - Example: `query_source(database='agent_journal', days=30)` for more history
 
 2. **query_sql(query, reasoning)**: Search for specific keywords
    - Example: `query_sql(query='emails about budget', reasoning='need financial context')`
@@ -1209,7 +1209,7 @@ Current time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
             "   - Example: `query_vector(query='project delays', reasoning='understanding blockers')`",
             "",
             "3. **query_source(database, days)**: Load from specific source",
-            "   - Example: `query_source(database='journal', days=30)`",
+            "   - Example: `query_source(database='agent_journal', days=30)`",
             "",
             "## Query Tool Usage Guidelines",
             "",
