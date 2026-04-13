@@ -56,11 +56,12 @@ jobs:
           script: |
             set -euo pipefail
             cd /root/promaia
+            docker compose down --remove-orphans || true
             docker builder prune -f
             docker image prune -a -f
             df -h /
             docker compose pull
-            docker compose up -d --force-recreate --remove-orphans
+            docker compose up -d --remove-orphans
             sleep 5
             RUNNING=$(docker compose ps --status running -q | wc -l)
             EXPECTED=$(docker compose ps -q | wc -l)
@@ -85,11 +86,12 @@ jobs:
           script: |
             set -euo pipefail
             cd /root/promaia-py
+            docker compose down --remove-orphans || true
             docker builder prune -f
             docker image prune -a -f
             df -h /
             docker compose pull
-            docker compose up -d --force-recreate --remove-orphans
+            docker compose up -d --remove-orphans
             sleep 5
             RUNNING=$(docker compose ps --status running -q | wc -l)
             EXPECTED=$(docker compose ps -q | wc -l)
