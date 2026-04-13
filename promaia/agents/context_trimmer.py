@@ -115,6 +115,10 @@ def _estimate_messages_tokens(messages: List[Dict]) -> int:
                     # text blocks
                     elif block.get("type") == "text":
                         total += estimate_token_count(block.get("text", ""))
+                    # image blocks: Anthropic charges ~1600 tokens per image
+                    # based on resolution, NOT on base64 data size
+                    elif block.get("type") == "image":
+                        total += 1600
                     else:
                         total += estimate_token_count(json.dumps(block))
                 elif isinstance(block, str):

@@ -350,7 +350,10 @@ def create_slack_bot():
                             logger.warning(f"Failed to download Slack image {f.get('name')}: HTTP {resp.status}")
                             continue
                         data = await resp.read()
-                    encoded = encode_image_from_bytes(data, filename=f.get('name', ''), media_type=mimetype)
+                    encoded = encode_image_from_bytes(
+                        data, filename=f.get('name', ''), media_type=mimetype,
+                        max_size=(1568, 1568),
+                    )
                     images.append(encoded)
                     if len(images) >= IMAGE_LIMIT:
                         logger.warning(f"Capped Slack images at {IMAGE_LIMIT}, {len(files)} attached")
