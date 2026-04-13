@@ -211,15 +211,19 @@ class TagToChatLoop:
 
     # ── Public API (called from bot event handlers) ─────────────────────
 
-    def add_message(self, user_id: str, username: str, text: str, timestamp: str):
+    def add_message(self, user_id: str, username: str, text: str, timestamp: str,
+                    images: list | None = None):
         """Feed a new human message into the loop."""
         now = time.time()
-        self.state.pending_messages.append({
+        msg = {
             'user_id': user_id,
             'username': username,
             'text': text,
             'timestamp': timestamp,
-        })
+        }
+        if images:
+            msg['images'] = images
+        self.state.pending_messages.append(msg)
         self.state.last_message_at = now
         self.state.ultimate_timeout = now + ULTIMATE_TIMEOUT
         self._participants.add(username)

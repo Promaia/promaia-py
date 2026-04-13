@@ -322,6 +322,44 @@ def create_slack_bot():
         except Exception:
             return user_id
 
+    async def _download_slack_images(files: list) -> list:
+        """Download image attachments from Slack and return base64-encoded dicts.
+
+        Returns list of {"data": base64_str, "media_type": mime_str} for use
+        with the Anthropic vision API. Non-image files are silently skipped.
+        Caps at 5 images (Anthropic per-message limit).
+        """
+        from promaia.utils.image_processing import encode_image_from_bytes, SUPPORTED_FORMATS
+        import aiohttp
+
+        IMAGE_LIMIT = 5
+        images = []
+        headers = {"Authorization": f"Bearer {bot_token}"}
+
+        async with aiohttp.ClientSession() as session:
+            for f in files:
+                mimetype = f.get('mimetype', '')
+                if mimetype not in SUPPORTED_FORMATS:
+                    continue
+                url = f.get('url_private')
+                if not url:
+                    continue
+                try:
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status != 200:
+                            logger.warning(f"Failed to download Slack image {f.get('name')}: HTTP {resp.status}")
+                            continue
+                        data = await resp.read()
+                    encoded = encode_image_from_bytes(data, filename=f.get('name', ''), media_type=mimetype)
+                    images.append(encoded)
+                    if len(images) >= IMAGE_LIMIT:
+                        logger.warning(f"Capped Slack images at {IMAGE_LIMIT}, {len(files)} attached")
+                        break
+                except Exception as e:
+                    logger.warning(f"Skipping Slack image {f.get('name')}: {e}")
+
+        return images
+
     def _start_loop(
         conversation_id: str,
         channel_id: str,
@@ -390,8 +428,8 @@ def create_slack_bot():
             if message.get('bot_id'):
                 return
 
-            # Skip messages without text
-            if not message.get('text'):
+            # Skip messages without text or files
+            if not message.get('text') and not message.get('files'):
                 return
 
             # Skip @mentions in channels — handled by handle_app_mention
@@ -407,11 +445,13 @@ def create_slack_bot():
             if not is_1on1_dm and f'<@{_bot_user_id}>' in message.get('text', ''):
                 return  # Channel/group @mention — let handle_app_mention deal with it
             user_id = message['user']
-            text = message['text']
+            text = message.get('text') or ''
             # Strip bot @mention from 1-on-1 DMs
             if is_1on1_dm and _bot_user_id:
                 text = text.replace(f'<@{_bot_user_id}>', '').strip()
             thread_ts = message.get('thread_ts')
+            raw_files = message.get('files', [])
+            images = await _download_slack_images(raw_files) if raw_files else []
 
             logger.info(f"Message from {user_id} in {channel_id}: {text[:50]}...")
 
@@ -426,6 +466,7 @@ def create_slack_bot():
                         username=username,
                         text=text,
                         timestamp=message['ts'],
+                        images=images,
                     )
                     logger.info(f"Fed message to active loop for {loop_key[:12]}")
                     return
@@ -440,6 +481,7 @@ def create_slack_bot():
                         username=username,
                         text=text,
                         timestamp=message['ts'],
+                        images=images,
                     )
                     asyncio.create_task(loop.run())
                     logger.info(f"Woke dormant thread {thread_ts[:12]} with new message")
@@ -487,6 +529,7 @@ def create_slack_bot():
                     username=username,
                     text=text,
                     timestamp=message['ts'],
+                    images=images,
                 )
 
                 asyncio.create_task(loop.run())
@@ -510,9 +553,11 @@ def create_slack_bot():
         try:
             channel_id = event['channel']
             user_id = event['user']
-            text = event['text']
+            text = event.get('text') or ''
             event_ts = event['ts']
             thread_ts = event.get('thread_ts')
+            raw_files = event.get('files', [])
+            images = await _download_slack_images(raw_files) if raw_files else []
 
             # Get bot user ID for parsing
             auth_result = await client.auth_test()
@@ -532,7 +577,7 @@ def create_slack_bot():
                     await say("No agents are currently configured.")
                 return
 
-            if not query:
+            if not query and not images:
                 if thread_ts:
                     # In a thread with empty @mention — treat as re-engagement
                     query = "hey"
@@ -569,6 +614,7 @@ def create_slack_bot():
                     username=username,
                     text=query,
                     timestamp=event_ts,
+                    images=images,
                 )
                 # If stopped, restart the loop
                 if loop.state.status == "stopped":
@@ -615,6 +661,7 @@ def create_slack_bot():
                         username=username,
                         text=query,
                         timestamp=event_ts,
+                        images=images,
                     )
                     asyncio.create_task(loop.run())
                     logger.info(f"Re-engaged thread {thread_ts[:12]} via @tag")
@@ -722,6 +769,7 @@ def create_slack_bot():
                 username=username,
                 text=query,
                 timestamp=event_ts,
+                images=images,
             )
 
             asyncio.create_task(loop.run())
