@@ -135,12 +135,12 @@ def _parse_workflow(workflow: WorkflowRequest) -> Tuple[List[Dict[str, Any]], Op
 def _call_anthropic(system_prompt: str, user_message: str, model_data: Dict) -> str:
     """Call Anthropic API with given prompts and model configuration."""
     from anthropic import Anthropic
-    from promaia.ai.models import ANTHROPIC_MODELS
+    from promaia.ai.models import ANTHROPIC_MODELS, resolve_anthropic_model_id
     import os
     
     client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     response = client.messages.create(
-        model=ANTHROPIC_MODELS.get("sonnet", "claude-sonnet-4-6"),
+        model=resolve_anthropic_model_id(ANTHROPIC_MODELS.get("sonnet", "claude-sonnet-4-6")),
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
         max_tokens=model_data.get("max_tokens", 4000),

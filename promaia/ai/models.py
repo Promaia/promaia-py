@@ -1,7 +1,19 @@
 ANTHROPIC_MODELS = {
     "opus": "claude-opus-4-6",
+    "opus-1m": "claude-opus-4-6-1m",
     "sonnet": "claude-sonnet-4-6",
 }
+
+# Maps synthetic internal model IDs to real Anthropic API model IDs.
+# IDs not in this map are passed through as-is.
+ANTHROPIC_API_MODEL_IDS = {
+    "claude-opus-4-6-1m": "claude-opus-4-6",
+}
+
+
+def resolve_anthropic_model_id(model_id: str) -> str:
+    """Resolve a synthetic internal model ID to the real Anthropic API model ID."""
+    return ANTHROPIC_API_MODEL_IDS.get(model_id, model_id)
 
 GOOGLE_MODELS = {
     # Gemini 3 models (latest generation)
@@ -40,6 +52,7 @@ LLAMA_MODELS = {
 MODEL_DISPLAY_NAMES = {
     # Anthropic models
     "claude-opus-4-6": "Claude Opus 4.6",
+    "claude-opus-4-6-1m": "Claude Opus 4.6 (1M)",
     "claude-opus-4-5": "Claude Opus 4.5",
     "claude-opus-4-5-20251101": "Claude Opus 4.5",
     "claude-opus-4-1-20250805": "Claude Opus 4.1",

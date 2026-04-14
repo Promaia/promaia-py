@@ -3439,14 +3439,87 @@ class ToolExecutor:
         if not channel_id:
             return "Error: must provide either 'user' or 'channel_id'"
 
-        await self.platform.send_message(
+        meta = await self.platform.send_message(
             channel_id=channel_id,
             content=content,
             thread_id=thread_id,
         )
+
+        # For top-level DMs, register a dormant conversation so replies
+        # can be routed back with full context of the original message.
+        if user_name and not thread_id:
+            await self._register_dormant_dm(
+                meta=meta,
+                user_info=user_info,
+                dm_channel=channel_id,
+                content=content,
+            )
+
         if thread_id:
             target_desc += f" (thread {thread_id[:12]})"
         return f"Message sent to {target_desc}"
+
+    async def _register_dormant_dm(
+        self, meta, user_info: Dict, dm_channel: str, content: str,
+    ) -> None:
+        """Create a dormant ConversationState for a DM so replies are routable."""
+        try:
+            from promaia.agents.conversation_manager import (
+                ConversationManager, ConversationState,
+            )
+            from datetime import datetime, timezone
+
+            conv_manager = ConversationManager()
+            platform_name = getattr(self.platform, "platform_name", "slack")
+
+            if platform_name not in conv_manager.platforms:
+                conv_manager.register_platform(platform_name, self.platform)
+
+            agent_id = (
+                getattr(self.agent, "agent_id", None)
+                or getattr(self.agent, "name", "agent")
+            )
+            real_name = (
+                user_info.get("real_name")
+                or user_info.get("name")
+                or "unknown"
+            )
+
+            now = datetime.now(timezone.utc).isoformat()
+            msg_ts = str(int(datetime.now(timezone.utc).timestamp()))
+            conversation_id = f"{platform_name}_{dm_channel}_{msg_ts}"
+            dm_thread_id = meta.message_id
+
+            state = ConversationState(
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                platform=platform_name,
+                channel_id=dm_channel,
+                user_id=user_info["id"],
+                thread_id=dm_thread_id,
+                status="dormant",
+                last_message_at=now,
+                messages=[{
+                    "role": "assistant",
+                    "content": content,
+                    "timestamp": now,
+                }],
+                context={"is_dm": True, "user_name": real_name},
+                timeout_seconds=600,
+                max_turns=None,
+                turn_count=0,
+                created_at=now,
+                conversation_type="tag_to_chat",
+                is_active=True,
+                conversation_partner=real_name,
+            )
+            await conv_manager._save_state(state)
+            logger.info(
+                f"Registered dormant DM conversation {conversation_id} "
+                f"(thread {dm_thread_id[:12]}) for replies from {real_name}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to register dormant DM conversation: {e}")
 
     async def _start_conversation(self, tool_input: Dict) -> str:
         """Start a real interactive DM conversation and wait for it to complete.

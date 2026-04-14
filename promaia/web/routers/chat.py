@@ -498,15 +498,15 @@ async def _handle_anthropic(user_message: str, images: List[ImageData], message_
     estimated_prompt = _improved_token_estimate(system_prompt + str(anthropic_messages))
     estimated_response = _improved_token_estimate(response_content)
     
-    cost_data = calculate_ai_cost(estimated_prompt, estimated_response, model_name)
-    
+    cost_data = calculate_ai_cost(estimated_prompt, estimated_response, model_id)
+
     from promaia.web.models import TokenUsage
     token_usage_data = TokenUsage(
         prompt_tokens=estimated_prompt,
         response_tokens=estimated_response,
         total_tokens=estimated_prompt + estimated_response,
         cost=cost_data["total_cost"],
-        model=get_model_display_name(model_name, "anthropic")
+        model=get_model_display_name(model_id, "anthropic")
     )
     
     return response_content, token_usage_data
