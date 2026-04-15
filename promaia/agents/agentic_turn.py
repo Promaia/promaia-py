@@ -2436,6 +2436,8 @@ AGENT_TOOL_DEFINITIONS = [
         "description": (
             "Create a new scheduled agent. Provide a name and optionally "
             "databases, mcp_tools, description, prompt, schedule, and messaging config. "
+            "Use allowed_channel_ids to restrict which Slack/Discord channels "
+            "the agent can respond in and read from — get IDs from list_channels first. "
             "Workspace defaults to current. Always confirm with the user first."
         ),
         "input_schema": {
@@ -2478,8 +2480,9 @@ AGENT_TOOL_DEFINITIONS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Slack/Discord channel IDs this agent can respond in "
-                        "and query messages from. Omit for unrestricted access."
+                        "Slack/Discord channel IDs (e.g. ['C0ABC123']) this agent "
+                        "can respond in and query messages from. Get IDs from "
+                        "list_channels. Omit for unrestricted access."
                     )
                 },
             },
