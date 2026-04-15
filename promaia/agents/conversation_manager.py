@@ -561,10 +561,14 @@ class ConversationManager:
                             text_parts.append(block)
                     content = "\n".join(text_parts) if text_parts else ""
                 if content and isinstance(content, str) and content.strip():
-                    messages.append({
+                    rebuilt = {
                         "role": msg["role"],
                         "content": content
-                    })
+                    }
+                    # Carry transient image data through to the API call
+                    if msg.get("images"):
+                        rebuilt["images"] = msg["images"]
+                    messages.append(rebuilt)
 
             # Save context log for debugging
             try:
@@ -611,6 +615,7 @@ class ConversationManager:
                 notepad_content=notepad_content,
                 source_states=source_states,
                 on_tool_activity=on_tool_activity,
+                messaging_enabled=getattr(agent, 'messaging_enabled', False),
             )
 
             output = result.response_text
@@ -657,7 +662,7 @@ class ConversationManager:
 
             if not output:
                 logger.warning(f"Agent {state.agent_id} returned empty response")
-                return "I'm sorry, I couldn't generate a response."
+                return None
 
             # Handle end_conversation signal — mark DM conversations done with summary
             if result.signal and result.signal.get("type") == "end_conversation":
@@ -1052,7 +1057,18 @@ class ConversationManager:
             AI-generated response text
         """
         # Combine messages into a single user turn with attribution
-        combined = "\n".join(f"{m['username']}: {m['text']}" for m in messages)
+        # Note image presence in text so the LLM knows images were sent even in history
+        combined_parts = []
+        all_images = []
+        for m in messages:
+            text = m.get('text') or ''
+            if m.get('images'):
+                all_images.extend(m['images'])
+                img_note = f" [+{len(m['images'])} image(s)]"
+            else:
+                img_note = ''
+            combined_parts.append(f"{m['username']}: {text}{img_note}")
+        combined = "\n".join(combined_parts)
 
         # Load conversation state
         state = await self._load_state(conversation_id)
@@ -1080,6 +1096,12 @@ class ConversationManager:
             'timestamp': now,
         })
 
+        # Temporarily attach images to the last user message for the current
+        # API call only. Images are NOT persisted to the database — they would
+        # replay on every subsequent turn and overwhelm the token budget.
+        if all_images:
+            state.messages[-1]['images'] = all_images
+
         # Generate AI response
         try:
             response = await self._get_ai_response(
@@ -1091,6 +1113,9 @@ class ConversationManager:
         except Exception as e:
             logger.error(f"Error generating batched response: {e}", exc_info=True)
             response = f"I'm sorry, I encountered an error generating a response ({type(e).__name__}: {e}). Please try again."
+
+        # Strip transient image data before persisting
+        state.messages[-1].pop('images', None)
 
         # Save response to conversation (skip if agentic turn already stored history_messages)
         if not getattr(state, '_skip_response_append', False):

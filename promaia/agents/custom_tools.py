@@ -27,10 +27,10 @@ def create_query_source_tool(agent_config, workspace: str):
         description="""Load pages from a Promaia database with time range filtering.
 
 Use this to expand beyond the initial context boundary. For example, if initial
-context includes journal:7 (last 7 days), you can query journal:30 to get more history.
+context includes agent_journal:7 (last 7 days), you can query agent_journal:30 to get more history.
 
 Examples:
-- query_source(database="journal", days=30) - Load last 30 days of journal
+- query_source(database="agent_journal", days=30) - Load last 30 days of agent journal
 - query_source(database="gmail", days=14) - Load 2 weeks of emails
 - query_source(database="tasks", days=None) - Load all tasks
 

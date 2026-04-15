@@ -86,6 +86,7 @@ def _load_agent_calendars(workspace: str) -> Dict[str, str]:
         if not maia_agent:
             maia_agent = AgentConfig(
                 name="maia",
+                agent_id="maia",
                 workspace=workspace,
                 databases=[],
                 prompt_file="",
@@ -148,12 +149,13 @@ def detect_available_tools(workspace: str) -> List[str]:
     except Exception:
         pass
 
+    # web_search is an Anthropic server-side tool — available when using
+    # the Anthropic API directly.  OpenRouter does not proxy server tools,
+    # so only enable when ANTHROPIC_API_KEY is set.
     try:
-        perplexity = get_integration("perplexity")
-        if perplexity:
-            cred = perplexity.get_default_credential()
-            if cred:
-                tools.append("web_search")
+        import os
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            tools.append("web_search")
     except Exception:
         pass
 
@@ -343,8 +345,8 @@ def build_agentic_system_prompt(
         tool_sections_parts.append(
             "## Web Search & Fetch (Read)\n\n"
             "- **web_search**: Search the internet for current information. "
-            "Returns a synthesized answer plus a list of individual search results "
-            "(title, URL, snippet per result).\n"
+            "The search is performed automatically and results are synthesized "
+            "directly into the response.\n"
             "- **web_fetch**: Fetch and read the full content of a specific web page "
             "by URL. Returns the page as clean extracted text.\n\n"
             "### Local-first principle\n\n"
@@ -659,6 +661,7 @@ async def run_agentic_turn(
     notepad_content: Optional[str] = None,
     source_states: Optional[Dict[str, Dict]] = None,
     on_tool_activity: Optional[Callable] = None,
+    messaging_enabled: bool = False,
 ) -> AgenticTurnResult:
     """Run an agentic turn using the full autonomous tool loop.
 
@@ -666,6 +669,10 @@ async def run_agentic_turn(
 
     Args:
         workflow_prompt: If set, prepended to system prompt for active interview workflows.
+        messaging_enabled: If True, initialize a messaging platform (Slack/Discord)
+            so the messaging suite is registered and its tools are executable.
+            Threaded through from conversation_manager based on the agent's
+            messaging_enabled config flag.
     """
     workspace = _resolve_workspace(workspace)
 
@@ -681,15 +688,36 @@ async def run_agentic_turn(
         mcp_tools=mcp_tools,
         agent_calendars=agent_calendars,
     )
+    # Reflect the permission on the shim so downstream code that reads
+    # agent.messaging_enabled sees the truth.
+    shim.messaging_enabled = messaging_enabled
+
+    # Initialize messaging platform if the agent has permission. Reuses the
+    # same helper the scheduled/calendar-triggered path uses, so both code
+    # paths share identical Slack-bot-token resolution via the auth module.
+    platform = None
+    if messaging_enabled:
+        try:
+            from promaia.agents.run_goal import _init_messaging_platform
+            platform = _init_messaging_platform(shim)
+        except Exception as e:
+            logger.warning(f"Failed to initialize messaging platform: {e}")
+        if platform is None:
+            logger.warning(
+                "messaging_enabled=True but no messaging platform could be "
+                "initialized (no Slack/Discord bot token found). The "
+                "messaging tool suite will not be available this turn."
+            )
+    has_platform = platform is not None
 
     # Build tool definitions (legacy, used as fallback)
-    tools = build_tool_definitions(shim, has_platform=False)
+    tools = build_tool_definitions(shim, has_platform=has_platform)
 
     # Build suite registry for Think/Act mode
-    suite_registry = _build_tool_suite_registry(shim, has_platform=False)
+    suite_registry = _build_tool_suite_registry(shim, has_platform=has_platform)
 
     # Create tool executor
-    executor = ToolExecutor(agent=shim, workspace=workspace)
+    executor = ToolExecutor(agent=shim, workspace=workspace, platform=platform)
 
     # Restore notepad from previous turn
     if notepad_content:

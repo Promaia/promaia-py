@@ -15,8 +15,16 @@ jobs:
           username: root
           key: ${{ secrets.GLACIER_SSH_KEY }}
           script: |
+            set -e
             cd /root/promaia-py
-            docker pull ghcr.io/promaia/promaia-py:latest
-            docker compose down --remove-orphans --timeout 30
-            docker compose up -d
-            echo "Deployed $(docker inspect --format='{{.Id}}' ghcr.io/promaia/promaia-py:latest | head -c 12)"
+            docker compose pull
+            docker compose up -d --force-recreate
+            sleep 5
+            RUNNING=$(docker compose ps --status running -q | wc -l)
+            EXPECTED=$(docker compose ps -q | wc -l)
+            if [ "$RUNNING" -lt "$EXPECTED" ]; then
+              echo "ERROR: Only $RUNNING/$EXPECTED containers running"
+              docker compose ps
+              exit 1
+            fi
+            echo "Deployed $RUNNING containers from $(docker inspect --format='{{.Id}}' ghcr.io/promaia/promaia-py:latest | head -c 12)"

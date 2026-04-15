@@ -4,17 +4,17 @@ Proactive context trimming — hybrid threshold-multiplier model.
 Two layers prevent context-window overflow before it happens:
 
 Layer 1: Trim context entries in the system prompt (database pages).
-Layer 2: Summarize old conversation turns when messages alone are too large.
+Layer 2: Bucket-aware trim — measure sources / history / other and trim
+         the largest bucket first. Sources are LRU'd off (lossless,
+         re-mountable via turn_on_source) before any history is dropped.
 """
 
-import asyncio
 import datetime as _dt
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from promaia.utils.ai import estimate_token_count
 
@@ -115,6 +115,10 @@ def _estimate_messages_tokens(messages: List[Dict]) -> int:
                     # text blocks
                     elif block.get("type") == "text":
                         total += estimate_token_count(block.get("text", ""))
+                    # image blocks: Anthropic charges ~1600 tokens per image
+                    # based on resolution, NOT on base64 data size
+                    elif block.get("type") == "image":
+                        total += 1600
                     else:
                         total += estimate_token_count(json.dumps(block))
                 elif isinstance(block, str):
@@ -239,163 +243,217 @@ def _trim_context_entries(system_prompt: str, target_tokens: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Layer 2: Conversation history summarization
+# Layer 2: Bucket-aware trim
 # ---------------------------------------------------------------------------
 
-async def _summarize_old_turns(messages: List[Dict], budget_tokens: int) -> List[Dict]:
-    """Summarize old conversation turns, keeping the most recent 4 pairs.
+# Margin above the strict overflow so the trimmer doesn't immediately re-fire
+# next iteration. ~1 turn's worth of expected growth.
+_TRIM_MARGIN_TOKENS = 10_000
 
-    Calls Haiku to generate a summary, then replaces old messages with a
-    single summary message. Maintains alternating user/assistant structure.
+# Sources mounted within this many recent iterations are protected from LRU
+# off, so the model can actually use what it just asked for.
+_RECENT_MOUNT_GRACE = 2
+
+
+def _measure_buckets(
+    system_tokens: int,
+    tools_tokens: int,
+    messages: List[Dict],
+    tool_executor: Any,
+) -> Tuple[int, int, int]:
+    """Return (sources_tokens, history_tokens, other_tokens).
+
+    Sources are part of the system prompt via build_active_source_content,
+    so we subtract them from system to get the 'other' bucket and avoid
+    double-counting.
     """
-    # Find user+assistant turn pairs from the end
-    pairs_to_keep = 4
-    pair_count = 0
-    keep_from_idx = len(messages)
-
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].get("role") == "user":
-            pair_count += 1
-            if pair_count >= pairs_to_keep:
-                keep_from_idx = i
-                break
-
-    # If there aren't enough old messages to summarize, return as-is
-    if keep_from_idx <= 1:
-        return messages
-
-    # Ensure we don't split inside a tool_use/tool_result pair.
-    # If the first "recent" message contains tool_result blocks, its matching
-    # tool_use is in the message before it — pull that into recent too.
-    while keep_from_idx > 0:
-        first_recent = messages[keep_from_idx] if keep_from_idx < len(messages) else None
-        if first_recent:
-            content = first_recent.get("content", "")
-            has_tool_result = False
-            if isinstance(content, list):
-                has_tool_result = any(
-                    isinstance(b, dict) and b.get("type") == "tool_result"
-                    for b in content
-                )
-            if has_tool_result and keep_from_idx > 0:
-                # Pull back to include the matching tool_use message
-                keep_from_idx -= 1
+    sources_tokens = 0
+    if tool_executor is not None and hasattr(tool_executor, "_sources"):
+        for src in tool_executor._sources.values():
+            if not src.get("on"):
                 continue
-        break
+            content = src.get("content", "") or ""
+            sources_tokens += estimate_token_count(content)
 
-    old_messages = messages[:keep_from_idx]
-    recent_messages = messages[keep_from_idx:]
+    history_tokens = _estimate_messages_tokens(messages)
+    other_tokens = max(0, system_tokens + tools_tokens - sources_tokens)
+    return sources_tokens, history_tokens, other_tokens
 
-    # Build text from old messages for summarization
-    old_text_parts = []
-    for msg in old_messages:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            # Extract text from content blocks
-            text_parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                    elif block.get("type") == "tool_result":
-                        result = block.get("content", "")
-                        if isinstance(result, str):
-                            # Truncate large tool results in summary input
-                            text_parts.append(result[:500] + "..." if len(result) > 500 else result)
-                    elif block.get("type") == "tool_use":
-                        text_parts.append(f"[Called tool: {block.get('name', '?')}]")
-            content = "\n".join(text_parts)
-        old_text_parts.append(f"{role}: {content}")
 
-    old_transcript = "\n\n".join(old_text_parts)
+def _trim_sources_bucket(
+    tool_executor: Any,
+    need_to_free: int,
+    current_iteration: int,
+) -> int:
+    """Toggle sources OFF in LRU order until ~need_to_free tokens are freed.
 
-    # Truncate the transcript itself if it's too large for the Haiku call
-    max_summary_input_chars = 80_000
-    if len(old_transcript) > max_summary_input_chars:
-        old_transcript = old_transcript[:max_summary_input_chars] + "\n\n[... earlier content truncated ...]"
+    Skips sources mounted within _RECENT_MOUNT_GRACE iterations. Returns the
+    number of tokens actually freed.
+    """
+    if tool_executor is None or not hasattr(tool_executor, "_sources"):
+        return 0
 
-    summary_budget = min(budget_tokens, 2000)  # cap summary size
-    summary_prompt = (
-        f"Summarize this conversation history in under {summary_budget} tokens. "
-        f"Preserve key facts, decisions, context the user established, and any "
-        f"important tool results or data. Be concise but thorough.\n\n"
-        f"CONVERSATION:\n{old_transcript}"
-    )
+    candidates = []
+    for name, src in tool_executor._sources.items():
+        if not src.get("on"):
+            continue
+        mounted_at = src.get("mounted_at_iteration", 0) or 0
+        if current_iteration - mounted_at < _RECENT_MOUNT_GRACE:
+            continue
+        size = estimate_token_count(src.get("content", "") or "")
+        candidates.append((mounted_at, size, name))
 
-    # Call Haiku for summarization
-    summary_text = await _call_haiku_for_summary(summary_prompt)
+    # LRU: oldest mounted_at first
+    candidates.sort(key=lambda x: (x[0], -x[1]))
 
-    if not summary_text:
-        # Haiku call failed — fall back to simple truncation
-        summary_text = (
-            "[Earlier conversation truncated to fit context limit. "
-            f"Contained {len(old_messages)} messages.]"
+    freed = 0
+    turned_off = []
+    for _, size, name in candidates:
+        if freed >= need_to_free:
+            break
+        tool_executor._sources[name]["on"] = False
+        freed += size
+        turned_off.append(name)
+
+    if turned_off:
+        logger.info(
+            f"[context_trimmer] Sources bucket trim: turned OFF {turned_off}, "
+            f"freed ~{freed} tokens"
         )
-
-    summary_message = {
-        "role": "user",
-        "content": f"[Conversation summary: {summary_text}]",
-    }
-
-    # Ensure alternating structure: summary (user) then recent messages
-    result = [summary_message]
-
-    # If recent messages start with a user message, insert a placeholder assistant msg
-    if recent_messages and recent_messages[0].get("role") == "user":
-        result.append({"role": "assistant", "content": "[Continuing from summary above.]"})
-
-    result.extend(recent_messages)
-
-    # Validate alternating structure
-    result = _fix_alternating_structure(result)
-
-    logger.info(
-        f"[context_trimmer] Summarized {len(old_messages)} old messages "
-        f"into {estimate_token_count(summary_text)} token summary, "
-        f"keeping {len(recent_messages)} recent messages"
-    )
-
-    return result
+    return freed
 
 
-async def _call_haiku_for_summary(prompt: str) -> Optional[str]:
-    """Call Haiku to generate a conversation summary."""
-    try:
-        from promaia.utils.ai import get_anthropic_client
+def _drop_oldest_history(messages: List[Dict], need_to_free: int) -> List[Dict]:
+    """Drop oldest complete turns until ~need_to_free tokens are freed.
 
-        client, prefix = get_anthropic_client()
-        if not client:
-            return None
-
-        response = await asyncio.to_thread(
-            client.messages.create,
-            model=f"{prefix}claude-haiku-4-5-20251001",
-            system="You are a conversation summarizer. Output only the summary, no preamble.",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=2048,
-        )
-        if response and response.content:
-            return response.content[0].text
-    except Exception as e:
-        logger.warning(f"[context_trimmer] Haiku summary call failed: {e}")
-    return None
-
-
-def _fix_alternating_structure(messages: List[Dict]) -> List[Dict]:
-    """Ensure messages alternate between user and assistant roles."""
+    Pair safety: a tool_use block in an assistant message and its matching
+    tool_result block in the next user message must be dropped together.
+    Walks forward in turn-pairs (user → assistant → optional tool_results).
+    """
     if not messages:
         return messages
 
-    fixed = [messages[0]]
-    for msg in messages[1:]:
-        if msg.get("role") == fixed[-1].get("role"):
-            if msg["role"] == "user":
-                fixed.append({"role": "assistant", "content": "[continued]"})
-            else:
-                fixed.append({"role": "user", "content": "[continued]"})
-        fixed.append(msg)
-    return fixed
+    freed = 0
+    drop_until = 0  # exclusive index — messages[:drop_until] will be dropped
+
+    i = 0
+    n = len(messages)
+    while i < n and freed < need_to_free:
+        # Identify the end of the current "turn group": one user message,
+        # the following assistant message, and any subsequent user message
+        # that contains tool_result blocks (which pair with tool_use blocks
+        # in the assistant message).
+        group_end = i + 1
+        # Pull in trailing assistant + tool_result user messages
+        while group_end < n:
+            nxt = messages[group_end]
+            content = nxt.get("content", "")
+            is_tool_result_msg = (
+                nxt.get("role") == "user"
+                and isinstance(content, list)
+                and any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in content
+                )
+            )
+            if nxt.get("role") == "assistant" or is_tool_result_msg:
+                group_end += 1
+                continue
+            break
+
+        group_tokens = _estimate_messages_tokens(messages[i:group_end])
+        freed += group_tokens
+        drop_until = group_end
+        i = group_end
+
+    if drop_until == 0:
+        return messages
+
+    if drop_until >= len(messages):
+        # Refuse to drop everything — leave at least the most recent turn.
+        # Find the start of the last user message and keep from there.
+        for j in range(len(messages) - 1, -1, -1):
+            if messages[j].get("role") == "user":
+                drop_until = j
+                break
+        if drop_until == 0:
+            return messages
+
+    dropped = messages[:drop_until]
+    kept = messages[drop_until:]
+
+    # Pair safety: if the first kept message contains tool_result blocks,
+    # we orphaned its tool_use. Strip orphan tool_result blocks from the
+    # head of `kept`.
+    while kept:
+        first = kept[0]
+        content = first.get("content", "")
+        if first.get("role") == "user" and isinstance(content, list):
+            has_tool_result = any(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for b in content
+            )
+            if has_tool_result:
+                # Drop this orphaned tool_result message entirely
+                kept = kept[1:]
+                continue
+        break
+
+    logger.info(
+        f"[context_trimmer] History bucket trim: dropped {len(dropped)} oldest "
+        f"messages, freed ~{freed} tokens"
+    )
+    return kept
+
+
+async def _bucket_trim(
+    messages: List[Dict],
+    tool_executor: Any,
+    system_tokens: int,
+    tools_tokens: int,
+    available: int,
+    current_iteration: int,
+) -> Tuple[List[Dict], int]:
+    """Bucket-aware trim. Returns (new_messages, sources_freed_tokens).
+
+    Picks the largest bucket (sources / history / other) and trims it.
+    Sources are tried first when they alone could close the gap, since
+    they're losslessly recoverable via turn_on_source.
+    """
+    sources_tokens, history_tokens, other_tokens = _measure_buckets(
+        system_tokens, tools_tokens, messages, tool_executor
+    )
+    total = sources_tokens + history_tokens + other_tokens
+    overflow = total - available
+
+    logger.info(
+        f"[context_trimmer] Bucket measurement: sources={sources_tokens}, "
+        f"history={history_tokens}, other={other_tokens} (untrimmable), "
+        f"total={total}, available={available}, overflow={overflow}"
+    )
+
+    if overflow <= 0:
+        return messages, 0
+
+    need = overflow + _TRIM_MARGIN_TOKENS
+    sources_freed = 0
+
+    # Strategy: try sources first if they can cover the need OR if they're
+    # the largest bucket. Otherwise go to history.
+    try_sources_first = (
+        sources_tokens >= need or sources_tokens >= history_tokens
+    )
+
+    if try_sources_first and sources_tokens > 0:
+        sources_freed = _trim_sources_bucket(
+            tool_executor, need, current_iteration
+        )
+        need -= sources_freed
+
+    if need > 0 and history_tokens > 0:
+        messages = _drop_oldest_history(messages, need)
+
+    return messages, sources_freed
 
 
 # ---------------------------------------------------------------------------
@@ -408,11 +466,21 @@ async def trim_context_to_fit(
     max_context_tokens: int = 200_000,
     max_output_tokens: int = 4096,
     tools: Optional[List[Dict]] = None,
+    tool_executor: Any = None,
+    current_iteration: int = 0,
+    rebuild_system_prompt: Optional[Any] = None,
 ) -> Tuple[str, List[Dict]]:
     """Proactively trim system prompt and messages to stay within context budget.
 
     Returns (trimmed_system_prompt, trimmed_messages). No-op if already within
     the 3/4 threshold.
+
+    Layer 1: Trim context entries in the system prompt (database pages).
+    Layer 2: Bucket-aware trim — sources LRU off (lossless), then history.
+
+    If `rebuild_system_prompt` is provided, it is called after Layer 2 toggles
+    sources off so the system prompt's active-source block reflects the new
+    state.
     """
     available = int(max_context_tokens * 0.75) - max_output_tokens
 
@@ -444,15 +512,31 @@ async def trim_context_to_fit(
     if total <= available:
         return system_prompt, messages
 
-    # Layer 2: Summarize old conversation turns
-    messages_budget = available - system_tokens - tools_tokens
-    if messages_budget > 0 and messages_tokens > messages_budget:
-        messages = await _summarize_old_turns(messages, messages_budget)
-        messages_tokens = _estimate_messages_tokens(messages)
-        total = system_tokens + tools_tokens + messages_tokens
-        logger.info(
-            f"[context_trimmer] After Layer 2: msgs={messages_tokens}, total={total}"
-        )
+    # Layer 2: Bucket-aware trim
+    messages, sources_freed = await _bucket_trim(
+        messages=messages,
+        tool_executor=tool_executor,
+        system_tokens=system_tokens,
+        tools_tokens=tools_tokens,
+        available=available,
+        current_iteration=current_iteration,
+    )
+
+    # If sources were toggled off, the system prompt's active-source block is
+    # now stale — rebuild it.
+    if sources_freed > 0 and rebuild_system_prompt is not None:
+        try:
+            system_prompt = rebuild_system_prompt()
+            system_tokens = estimate_token_count(system_prompt)
+        except Exception as e:
+            logger.warning(f"[context_trimmer] rebuild_system_prompt failed: {e}")
+
+    messages_tokens = _estimate_messages_tokens(messages)
+    total = system_tokens + tools_tokens + messages_tokens
+    logger.info(
+        f"[context_trimmer] After Layer 2: system={system_tokens}, "
+        f"msgs={messages_tokens}, total={total}"
+    )
 
     # Safety net: if still over, aggressively trim system prompt
     if total > available:

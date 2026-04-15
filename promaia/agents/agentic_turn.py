@@ -101,7 +101,7 @@ QUERY_TOOL_DEFINITIONS = [
         "description": (
             "Load pages from a specific database with time filtering. "
             "Use to expand context or load different time ranges. "
-            "Available databases include: journal, gmail, stories, tasks, calendar, "
+            "Available databases include: agent_journal, gmail, stories, tasks, calendar, "
             "and any Discord/Slack channel sources."
         ),
         "input_schema": {
@@ -110,7 +110,7 @@ QUERY_TOOL_DEFINITIONS = [
                 "database": {
                     "type": "string",
                     "description": (
-                        "Database name (e.g., 'journal', 'gmail', 'stories', "
+                        "Database name (e.g., 'agent_journal', 'gmail', 'stories', "
                         "'tasks', 'calendar')"
                     )
                 },
@@ -123,10 +123,11 @@ QUERY_TOOL_DEFINITIONS = [
         }
     },
     {
-        "name": "write_journal",
+        "name": "write_agent_journal",
         "description": (
-            "Write a personal note to your journal. "
-            "Use to record insights, learnings, or important information you want to remember."
+            "Write a note to your agent journal — your private notebook for tracking insights, "
+            "learnings, and information across runs. This is YOUR agent journal, not the user's "
+            "personal journal database."
         ),
         "input_schema": {
             "type": "object",
@@ -913,25 +914,8 @@ CALENDAR_MANAGEMENT_TOOL_DEFINITIONS = [
 ]
 
 WEB_SEARCH_TOOL_DEFINITIONS = [{
+    "type": "web_search_20250305",
     "name": "web_search",
-    "description": (
-        "Search the internet for current information. "
-        "Use for real-time info, recent news, facts not in local data, or verification."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "Search query",
-            },
-            "reasoning": {
-                "type": "string",
-                "description": "Why you need to search the web",
-            },
-        },
-        "required": ["query", "reasoning"],
-    },
 }]
 
 
@@ -2402,6 +2386,22 @@ AGENT_TOOL_DEFINITIONS = [
                 "interval_minutes": {"type": "integer", "description": "Run interval in minutes"},
                 "max_iterations": {"type": "integer", "description": "Max query iterations per run"},
                 "prompt": {"type": "string", "description": "New system prompt text"},
+                "messaging_enabled": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether this agent can use messaging tools "
+                        "(send_message, start_conversation, etc.)."
+                    )
+                },
+                "allowed_channel_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Slack/Discord channel IDs this agent can respond in "
+                        "and query messages from. Pass empty array to remove "
+                        "restrictions (allow all channels). Omit to leave unchanged."
+                    )
+                },
             },
             "required": ["name"]
         }
@@ -2473,6 +2473,14 @@ AGENT_TOOL_DEFINITIONS = [
                 "messaging_enabled": {
                     "type": "boolean",
                     "description": "Whether this agent can use messaging tools"
+                },
+                "allowed_channel_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Slack/Discord channel IDs this agent can respond in "
+                        "and query messages from. Omit for unrestricted access."
+                    )
                 },
             },
             "required": ["name"]
@@ -2957,9 +2965,15 @@ class ToolExecutor:
         self._sandbox = Sandbox()
         # Persistent notepad (survives across turns within a conversation)
         self._notepad = ""
-        # Context sources: name → {"content": str, "on": bool, "page_count": int, "source": str}
+        # Context sources: name → {
+        #     "content": str, "on": bool, "page_count": int, "source": str,
+        #     "mounted_at_iteration": int,  # set when toggled ON; used by LRU trim
+        # }
         self._sources = {}
         self._sources_muted = False
+        # Updated each iteration by the agentic loop so source-management
+        # paths (shelving, _context_action) can stamp mounted_at_iteration.
+        self._current_iteration = 0
         # External MCP server connections
         self._mcp_client = None        # McpClient instance
         self._mcp_tool_map = {}        # namespaced_name → (server_name, original_name)
@@ -2974,7 +2988,7 @@ class ToolExecutor:
                 return await self._query_vector(tool_input)
             elif tool_name == "query_source":
                 return await self._query_source(tool_input)
-            elif tool_name == "write_journal":
+            elif tool_name == "write_agent_journal":
                 return await self._write_journal(tool_input)
             # Messaging tools
             elif tool_name == "send_message":
@@ -3260,6 +3274,12 @@ class ToolExecutor:
         if not database:
             return "Error: missing 'database' parameter"
 
+        # Resolve "agent_journal" alias to this agent's actual journal nickname
+        if database == "agent_journal" and hasattr(self.agent, 'agent_id'):
+            agent_id = self.agent.agent_id
+            if agent_id and agent_id != "terminal-user":
+                database = f"{agent_id.replace('-', '_')}_journal"
+
         days = tool_input.get("days")
         if days == 0:
             days = None
@@ -3319,7 +3339,7 @@ class ToolExecutor:
     async def _write_journal_to_workspace(self, content: str, note_type: str) -> str:
         """Write a journal entry to the workspace's journal database directly."""
         from promaia.config.databases import get_database_manager
-        from promaia.connectors.notion_connector import get_client
+        from promaia.notion.client import get_client
         from promaia.agents.notion_journal import _derive_title
 
         # Find the workspace journal database
@@ -3436,14 +3456,87 @@ class ToolExecutor:
         if not channel_id:
             return "Error: must provide either 'user' or 'channel_id'"
 
-        await self.platform.send_message(
+        meta = await self.platform.send_message(
             channel_id=channel_id,
             content=content,
             thread_id=thread_id,
         )
+
+        # For top-level DMs, register a dormant conversation so replies
+        # can be routed back with full context of the original message.
+        if user_name and not thread_id:
+            await self._register_dormant_dm(
+                meta=meta,
+                user_info=user_info,
+                dm_channel=channel_id,
+                content=content,
+            )
+
         if thread_id:
             target_desc += f" (thread {thread_id[:12]})"
         return f"Message sent to {target_desc}"
+
+    async def _register_dormant_dm(
+        self, meta, user_info: Dict, dm_channel: str, content: str,
+    ) -> None:
+        """Create a dormant ConversationState for a DM so replies are routable."""
+        try:
+            from promaia.agents.conversation_manager import (
+                ConversationManager, ConversationState,
+            )
+            from datetime import datetime, timezone
+
+            conv_manager = ConversationManager()
+            platform_name = getattr(self.platform, "platform_name", "slack")
+
+            if platform_name not in conv_manager.platforms:
+                conv_manager.register_platform(platform_name, self.platform)
+
+            agent_id = (
+                getattr(self.agent, "agent_id", None)
+                or getattr(self.agent, "name", "agent")
+            )
+            real_name = (
+                user_info.get("real_name")
+                or user_info.get("name")
+                or "unknown"
+            )
+
+            now = datetime.now(timezone.utc).isoformat()
+            msg_ts = str(int(datetime.now(timezone.utc).timestamp()))
+            conversation_id = f"{platform_name}_{dm_channel}_{msg_ts}"
+            dm_thread_id = meta.message_id
+
+            state = ConversationState(
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+                platform=platform_name,
+                channel_id=dm_channel,
+                user_id=user_info["id"],
+                thread_id=dm_thread_id,
+                status="dormant",
+                last_message_at=now,
+                messages=[{
+                    "role": "assistant",
+                    "content": content,
+                    "timestamp": now,
+                }],
+                context={"is_dm": True, "user_name": real_name},
+                timeout_seconds=600,
+                max_turns=None,
+                turn_count=0,
+                created_at=now,
+                conversation_type="tag_to_chat",
+                is_active=True,
+                conversation_partner=real_name,
+            )
+            await conv_manager._save_state(state)
+            logger.info(
+                f"Registered dormant DM conversation {conversation_id} "
+                f"(thread {dm_thread_id[:12]}) for replies from {real_name}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to register dormant DM conversation: {e}")
 
     async def _start_conversation(self, tool_input: Dict) -> str:
         """Start a real interactive DM conversation and wait for it to complete.
@@ -5596,92 +5689,8 @@ class ToolExecutor:
     # ── Notion tools ────────────────────────────────────────────────────
 
     async def _web_search(self, tool_input: Dict) -> str:
-        """Search the web via Perplexity API."""
-        import json as _json
-        import urllib.request
-        import urllib.error
-
-        query = tool_input.get("query", "")
-        if not query:
-            return "Error: missing 'query' parameter"
-
-        from promaia.auth import get_integration
-
-        try:
-            perplexity = get_integration("perplexity")
-            api_key = perplexity.get_default_credential()
-        except Exception:
-            api_key = None
-        if not api_key:
-            return "Error: Perplexity API key not configured. Run `maia auth setup perplexity`."
-
-        url = "https://api.perplexity.ai/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        data = {
-            "model": "sonar-pro",
-            "messages": [{"role": "user", "content": query}],
-        }
-
-        def _call():
-            req = urllib.request.Request(
-                url,
-                data=_json.dumps(data).encode("utf-8"),
-                headers=headers,
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return _json.loads(resp.read().decode("utf-8"))
-
-        try:
-            result = await asyncio.to_thread(_call)
-        except urllib.error.HTTPError as e:
-            if e.code == 401:
-                return "Error: Invalid Perplexity API key."
-            elif e.code == 429:
-                return "Error: Perplexity rate limit exceeded. Try again later."
-            return f"Error: Perplexity API returned HTTP {e.code}: {e.reason}"
-        except Exception as e:
-            return f"Error: Web search failed: {e}"
-
-        # Extract content
-        content = ""
-        citations = []
-        if "choices" in result and result["choices"]:
-            content = result["choices"][0]["message"]["content"]
-            msg = result["choices"][0]["message"]
-            citations = msg.get("citations", result.get("citations", []))
-
-        if not content:
-            return "Web search returned no results."
-
-        # Extract search_results array (title + URL + snippet per result)
-        search_results = result.get("search_results", [])
-
-        # Format response
-        parts = [content]
-        if search_results:
-            parts.append("\n\nSearch Results:")
-            for i, sr in enumerate(search_results, 1):
-                title = sr.get("title", "Untitled")
-                url = sr.get("url", "")
-                snippet = sr.get("snippet", "")
-                parts.append(f"  {i}. {title}")
-                if url:
-                    parts.append(f"     {url}")
-                if snippet:
-                    parts.append(f"     {snippet}")
-        if citations:
-            parts.append("\n\nSources:")
-            for i, cite in enumerate(citations, 1):
-                if isinstance(cite, dict):
-                    parts.append(f"  {i}. {cite.get('title', cite.get('url', 'Source'))}")
-                    if cite.get("url"):
-                        parts.append(f"     {cite['url']}")
-                else:
-                    parts.append(f"  {i}. {cite}")
-        return "\n".join(parts)
+        """Stub — web_search is now an Anthropic server-side tool."""
+        return "Error: web_search is handled server-side by the Anthropic API. This method should not be called."
 
     async def _web_fetch(self, tool_input: Dict) -> str:
         """Fetch and extract text content from a URL."""
@@ -6579,6 +6588,7 @@ class ToolExecutor:
             for name in names:
                 if name in self._sources:
                     self._sources[name]["on"] = True
+                    self._sources[name]["mounted_at_iteration"] = self._current_iteration
                     turned_on.append(name)
             if turned_on:
                 return f"Context ON: {', '.join(turned_on)}. Content now visible."
@@ -6683,6 +6693,142 @@ class ToolExecutor:
             if src["on"] and src.get("content"):
                 parts.append(src["content"])
         return "\n\n".join(parts)
+
+    # ── Act-mode tool result shelving ───────────────────────────────────
+    #
+    # When act mode exits via __DONE__, all tool_result blocks produced
+    # during the burst are moved into the _sources shelf system. The
+    # full payload is registered as an ON source (so think mode sees it
+    # immediately via build_active_source_content) and the inline
+    # tool_result block is replaced with a short stub. The matching
+    # tool_use block is left untouched, so workflow capture
+    # (all_tool_calls[]) is unaffected.
+    #
+    # Tiny results (control acks, "done", error strings) stay inline.
+
+    _SHELVE_MIN_CHARS = 500
+
+    def shelve_act_results(
+        self,
+        tool_use_ids: List[str],
+        internal_messages: List[Dict],
+        current_iteration: int,
+    ) -> int:
+        """Shelve every tool_result whose id is in tool_use_ids.
+
+        Returns the number of results shelved. Stubs replace the inline
+        content; the registered source is ON so think mode sees it
+        immediately on its next turn.
+        """
+        if not tool_use_ids:
+            return 0
+
+        id_set = set(tool_use_ids)
+        shelved = 0
+
+        # Walk newest → oldest so multiple bursts behave predictably.
+        for msg in reversed(internal_messages):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "tool_result":
+                    continue
+                tu_id = block.get("tool_use_id")
+                if tu_id not in id_set:
+                    continue
+                result_text = block.get("content", "")
+                if not isinstance(result_text, str):
+                    continue
+                if len(result_text) < self._SHELVE_MIN_CHARS:
+                    continue
+                # Skip if already a stub (idempotent)
+                if result_text.startswith("[tool result shelved]"):
+                    continue
+
+                tool_name = self._lookup_tool_name(internal_messages, tu_id)
+                source_id = self._make_act_source_id(tool_name, tu_id)
+                title = self._make_act_source_title(tool_name, tu_id, internal_messages)
+
+                self._sources[source_id] = {
+                    "content": result_text,
+                    "on": True,
+                    "page_count": 1,
+                    "source": tool_name or "act_tool",
+                    "titles": [title] if title else [],
+                    "mounted_at_iteration": current_iteration,
+                }
+
+                stub = (
+                    f"[tool result shelved] source_id={source_id} "
+                    f"tool={tool_name or 'unknown'} size={len(result_text)} chars\n"
+                    f"Call turn_on_source if you need to re-read this."
+                )
+                block["content"] = stub
+                shelved += 1
+
+        if shelved:
+            logger.info(
+                f"[shelve_act_results] Shelved {shelved} act-mode tool result(s) "
+                f"into _sources at iteration {current_iteration}"
+            )
+        return shelved
+
+    @staticmethod
+    def _lookup_tool_name(internal_messages: List[Dict], tool_use_id: str) -> str:
+        """Find the tool_use block matching tool_use_id and return its name."""
+        for msg in internal_messages:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and block.get("id") == tool_use_id
+                ):
+                    return block.get("name", "")
+        return ""
+
+    @staticmethod
+    def _make_act_source_id(tool_name: str, tool_use_id: str) -> str:
+        suffix = (tool_use_id or "").split("_")[-1][:8] or "x"
+        safe_name = (tool_name or "act_tool").replace("__", "_")
+        return f"act_{safe_name}_{suffix}"
+
+    @staticmethod
+    def _make_act_source_title(
+        tool_name: str, tool_use_id: str, internal_messages: List[Dict]
+    ) -> str:
+        """Build a short human-readable title from the tool's input args."""
+        for msg in internal_messages:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_use"
+                    and block.get("id") == tool_use_id
+                ):
+                    inp = block.get("input") or {}
+                    if isinstance(inp, dict):
+                        for key in ("query", "q", "name", "range", "thread_id", "id"):
+                            if key in inp and inp[key]:
+                                return f"{tool_name}({inp[key]!s:.60})"
+                        if inp:
+                            first_k, first_v = next(iter(inp.items()))
+                            return f"{tool_name}({first_k}={first_v!s:.40})"
+                    return tool_name or ""
+        return tool_name or ""
 
     # ── Workspace file tools ────────────────────────────────────────────
 
@@ -7004,10 +7150,45 @@ class ToolExecutor:
         except Exception as e:
             return f"Error getting agent info: {e}"
 
+    def _refuse_self_edit(self, target_name: str) -> Optional[str]:
+        """Block agents from editing themselves.
+
+        Returns a refusal message if `target_name` resolves to the currently-
+        running agent, else None. Keys on `agent_id` (the immutable identity);
+        falls back to `name` comparison if either id is empty as a safety net
+        during backfill.
+
+        TODO: drop the name-fallback branch once all environments have
+        non-empty agent_id on every agent.
+        """
+        try:
+            from promaia.agents.agent_config import get_agent
+            target = get_agent(target_name)
+        except Exception:
+            return None
+        if not target:
+            return None
+        self_id = (getattr(self.agent, "agent_id", "") or "").strip()
+        target_id = (getattr(target, "agent_id", "") or "").strip()
+        is_self = False
+        if self_id and target_id:
+            is_self = self_id == target_id
+        else:
+            is_self = getattr(self.agent, "name", None) == getattr(target, "name", None)
+        if is_self:
+            return (
+                "Refused: agents cannot edit themselves. "
+                "Only the user can modify this agent directly."
+            )
+        return None
+
     async def _enable_agent(self, tool_input: Dict) -> str:
         name = tool_input.get("name", "").strip()
         if not name:
             return "Error: agent name is required."
+        refusal = self._refuse_self_edit(name)
+        if refusal:
+            return refusal
         try:
             from promaia.agents.agent_config import get_agent, save_agent
             agent = get_agent(name)
@@ -7025,6 +7206,9 @@ class ToolExecutor:
         name = tool_input.get("name", "").strip()
         if not name:
             return "Error: agent name is required."
+        refusal = self._refuse_self_edit(name)
+        if refusal:
+            return refusal
         try:
             from promaia.agents.agent_config import get_agent, save_agent
             agent = get_agent(name)
@@ -7043,6 +7227,9 @@ class ToolExecutor:
         new_name = tool_input.get("new_name", "").strip()
         if not old_name or not new_name:
             return "Error: old_name and new_name are required."
+        refusal = self._refuse_self_edit(old_name)
+        if refusal:
+            return refusal
         try:
             from promaia.agents.agent_config import get_agent, save_agent, load_agents
             agent = get_agent(old_name)
@@ -7124,6 +7311,9 @@ class ToolExecutor:
         name = tool_input.get("name", "").strip()
         if not name:
             return "Error: agent name is required."
+        refusal = self._refuse_self_edit(name)
+        if refusal:
+            return refusal
         try:
             from promaia.agents.agent_config import get_agent, save_agent
             agent = get_agent(name)
@@ -7149,6 +7339,13 @@ class ToolExecutor:
             if "prompt" in tool_input:
                 agent.prompt_file = tool_input["prompt"]
                 changes.append("prompt")
+            if "messaging_enabled" in tool_input:
+                agent.messaging_enabled = bool(tool_input["messaging_enabled"])
+                changes.append("messaging_enabled")
+            if "allowed_channel_ids" in tool_input:
+                ids = tool_input["allowed_channel_ids"]
+                agent.allowed_channel_ids = ids if ids else None
+                changes.append("allowed_channel_ids")
 
             if not changes:
                 return "No fields to update were provided."
@@ -7162,6 +7359,9 @@ class ToolExecutor:
         name = tool_input.get("name", "").strip()
         if not name:
             return "Error: agent name is required."
+        refusal = self._refuse_self_edit(name)
+        if refusal:
+            return refusal
         try:
             from promaia.agents.agent_config import get_agent, delete_agent
             agent = get_agent(name)
@@ -7205,6 +7405,13 @@ class ToolExecutor:
             return f"Error running agent: {e}"
 
     async def _create_agent(self, tool_input: Dict) -> str:
+        # TODO: replace with tier-based permission check once agent ranks
+        # exist — master agent (rank 1) will be allowed to create sub-agents
+        # (rank ≥ 2). For now, agent creation is a human-only action.
+        return (
+            "Refused: agents cannot create other agents. "
+            "This is a human-only action for now."
+        )
         name = tool_input.get("name", "").strip()
         if not name:
             return "Error: agent name is required."
@@ -7256,6 +7463,11 @@ class ToolExecutor:
             # Set messaging permission if provided
             if tool_input.get("messaging_enabled"):
                 agent_config.messaging_enabled = True
+
+            # Set channel restrictions if provided
+            if "allowed_channel_ids" in tool_input:
+                ids = tool_input["allowed_channel_ids"]
+                agent_config.allowed_channel_ids = ids if ids else None
 
             # Validate
             errors = agent_config.validate()
@@ -7771,6 +7983,86 @@ def _extract_overflow_tokens(error_str: str) -> Optional[int]:
     return None
 
 
+# ── Anthropic API retry with exponential backoff ─────────────────────
+#
+# 529 overloaded_error / 429 rate_limit_error / 500 api_error /
+# 503 service_unavailable are transient and should be retried invisibly
+# before surfacing anything to the user. Non-retryable errors
+# (bad_request, authentication, permission, not_found) re-raise.
+
+_RETRYABLE_ERROR_MARKERS = (
+    "overloaded_error",
+    "overloaded",
+    "529",
+    "rate_limit_error",
+    "429",
+    "api_error",
+    "500",
+    "service_unavailable",
+    "503",
+)
+
+_API_RETRY_MAX_ATTEMPTS = 5  # 1 initial + 4 retries
+_API_RETRY_BASE_DELAY = 2.0  # seconds; schedule is 2, 4, 8, 16
+
+
+class _OverloadExhausted(Exception):
+    """Raised when Anthropic API retries are exhausted on a retryable error."""
+
+
+def _is_retryable_api_error(err: Exception) -> bool:
+    err_type = type(err).__name__.lower()
+    err_str = str(err).lower()
+    blob = f"{err_type} {err_str}"
+    return any(marker in blob for marker in _RETRYABLE_ERROR_MARKERS)
+
+
+async def _call_with_retry(
+    client: Any,
+    api_kwargs: Dict[str, Any],
+    on_tool_activity: Optional["ToolActivityCallback"] = None,
+) -> Any:
+    """Call client.messages.create with exponential backoff on transient errors.
+
+    Raises _OverloadExhausted after _API_RETRY_MAX_ATTEMPTS retryable failures.
+    Non-retryable errors re-raise immediately.
+    """
+    last_err: Optional[Exception] = None
+    for attempt in range(_API_RETRY_MAX_ATTEMPTS):
+        try:
+            return await asyncio.to_thread(client.messages.create, **api_kwargs)
+        except Exception as err:
+            if not _is_retryable_api_error(err):
+                raise
+            last_err = err
+            if attempt == _API_RETRY_MAX_ATTEMPTS - 1:
+                break
+            delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
+            logger.warning(
+                f"[agentic] Anthropic API transient error "
+                f"(attempt {attempt + 1}/{_API_RETRY_MAX_ATTEMPTS}): {err}. "
+                f"Retrying in {delay:.0f}s"
+            )
+            if on_tool_activity:
+                try:
+                    await on_tool_activity(
+                        tool_name="__api_retry__",
+                        tool_input={},
+                        completed=False,
+                        summary=(
+                            f"Anthropic overloaded, retrying in {delay:.0f}s "
+                            f"(attempt {attempt + 2}/{_API_RETRY_MAX_ATTEMPTS})"
+                        ),
+                    )
+                except Exception:
+                    pass
+            await asyncio.sleep(delay)
+
+    raise _OverloadExhausted(
+        f"Anthropic API retries exhausted after {_API_RETRY_MAX_ATTEMPTS} attempts: {last_err}"
+    )
+
+
 def _trim_tool_results(messages: List[Dict], max_result_chars: int = 50_000) -> None:
     """Smart-trim large tool_result blocks using proportional recency-weighted trimming.
 
@@ -7819,6 +8111,10 @@ def _serialize_content_blocks(content):
                         "tool_use_id": block.tool_use_id,
                         "content": block.content,
                     })
+                elif block.type in ("server_tool_use", "web_search_tool_result"):
+                    # Server-side tool blocks must be preserved verbatim
+                    # for multi-turn replay (encrypted_content, caller, etc.)
+                    result.append(block.model_dump())
             elif isinstance(block, dict):
                 result.append(block)
         return result
@@ -7901,31 +8197,36 @@ async def agentic_turn(
     act_suites: List[str] = []
     act_instructions: List[str] = []
     act_step_status: List[str] = []  # "pending" | "done"
+    act_tool_use_ids: List[str] = []  # tool_use ids produced in the current act burst (shelved on __DONE__)
     use_think_act = suite_registry is not None  # Feature flag: only use Think/Act if registry provided
+    _retried_for_empty_text = False  # One-shot: nudge model to produce text if end_turn had none
 
     for iteration in range(max_iterations):
+        # Stamp the current iteration on the executor so source-management
+        # paths (shelving, _context_action) can record mounted_at_iteration.
+        if tool_executor is not None:
+            tool_executor._current_iteration = iteration
+
         budget_note = (
             f"\n\n[Tool budget: {max_iterations - iteration}/{max_iterations} "
             f"iterations remaining]"
         )
 
         # ── Build effective prompt and tool list per mode ──────────────
-        effective_prompt = system_prompt
+        # base_prompt = everything EXCEPT the active-source content block.
+        # The active-source block is appended via _compose_prompt() so the
+        # context trimmer can rebuild after LRU-off'ing sources.
+        base_prompt = system_prompt
 
         if use_think_act and not act_mode:
             # THINK MODE: suite index first, then context index + active content
             _ws = tool_executor.workspace if tool_executor else ""
-            effective_prompt += "\n\n" + _build_suite_index(suite_registry, mcp_suites, workspace=_ws)
+            base_prompt += "\n\n" + _build_suite_index(suite_registry, mcp_suites, workspace=_ws)
 
             if tool_executor and hasattr(tool_executor, 'build_context_index'):
                 ctx_index = tool_executor.build_context_index()
                 if ctx_index:
-                    effective_prompt += "\n\n" + ctx_index
-
-            if tool_executor and hasattr(tool_executor, '_sources'):
-                active_content = tool_executor.build_active_source_content()
-                if active_content:
-                    effective_prompt += "\n\n" + active_content
+                    base_prompt += "\n\n" + ctx_index
 
             # Think mode tools: query + notepad + memory + context + workflows (read) + act
             iteration_tools = list(QUERY_TOOL_DEFINITIONS)
@@ -7969,16 +8270,32 @@ async def agentic_turn(
             if tool_executor and hasattr(tool_executor, 'build_context_index'):
                 ctx_index = tool_executor.build_context_index()
                 if ctx_index:
-                    effective_prompt += "\n\n" + ctx_index
-            if tool_executor and hasattr(tool_executor, '_sources'):
-                active_content = tool_executor.build_active_source_content()
-                if active_content:
-                    effective_prompt += "\n\n" + active_content
+                    base_prompt += "\n\n" + ctx_index
 
-        # Proactive context trimming before API call
+        # Compose final prompt = base + active-source block + budget_note.
+        # The active-source block is recomputed from current _sources state
+        # so it reflects post-LRU shelving when called from the trimmer.
+        def _compose_prompt() -> str:
+            active = ""
+            # Note: in act mode, build_active_source_content returns "" because
+            # _sources_muted is True — preserved automatically.
+            if tool_executor and hasattr(tool_executor, "build_active_source_content"):
+                active = tool_executor.build_active_source_content() or ""
+            parts = [base_prompt]
+            if active:
+                parts.append(active)
+            return "\n\n".join(parts) + budget_note
+
+        effective_prompt = _compose_prompt()
+
         from promaia.agents.context_trimmer import trim_context_to_fit
         trimmed_system, internal_messages = await trim_context_to_fit(
-            effective_prompt + budget_note, internal_messages, tools=iteration_tools
+            effective_prompt,
+            internal_messages,
+            tools=iteration_tools,
+            tool_executor=tool_executor,
+            current_iteration=iteration,
+            rebuild_system_prompt=_compose_prompt,
         )
 
         # Log the effective prompt (first iteration and on mode switches)
@@ -8006,9 +8323,31 @@ async def agentic_turn(
             api_kwargs["tools"] = iteration_tools
 
         try:
-            response = await asyncio.to_thread(
-                client.messages.create,
-                **api_kwargs,
+            response = await _call_with_retry(client, api_kwargs, on_tool_activity)
+        except _OverloadExhausted as exhaust_err:
+            logger.warning(f"[agentic] {exhaust_err}")
+            last_text = "\n".join(text_parts) if text_parts else ""
+            friendly = (
+                "Claude is currently overloaded and I couldn't get a response "
+                "after several retries. Please try again in a moment."
+            )
+            response_text = (last_text + "\n\n" + friendly) if last_text else friendly
+            if plan and on_tool_activity:
+                try:
+                    await on_tool_activity(
+                        tool_name="__plan_done__",
+                        tool_input={"total": len(plan)},
+                        completed=True,
+                    )
+                except Exception:
+                    pass
+            return AgenticTurnResult(
+                response_text=response_text,
+                tool_calls_made=all_tool_calls,
+                iterations_used=iteration + 1,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                plan=plan,
             )
         except Exception as api_err:
             err_str = str(api_err)
@@ -8036,11 +8375,15 @@ async def agentic_turn(
                             pass
                     _trim_tool_results(internal_messages, max_result_chars=trim_limit)
                     try:
-                        response = await asyncio.to_thread(
-                            client.messages.create,
-                            **api_kwargs,
+                        response = await _call_with_retry(
+                            client, api_kwargs, on_tool_activity
                         )
                         break  # Success
+                    except _OverloadExhausted:
+                        # Overload on the trimmed retry — bail to the outer
+                        # exhaustion path by re-raising as a tagged sentinel.
+                        response = None
+                        break
                     except Exception:
                         continue  # Try tighter trim
 
@@ -8104,9 +8447,59 @@ async def agentic_turn(
                 text_parts.append(clean_text)
             elif block.type == "tool_use":
                 tool_uses.append(block)
+            elif block.type == "server_tool_use":
+                # Server-side tool (e.g. web_search) — already resolved by
+                # the API, no local execution needed.  Fire UX callbacks and
+                # record in all_tool_calls for history.
+                query = block.input.get("query", "") if isinstance(block.input, dict) else ""
+                if on_tool_activity:
+                    try:
+                        await on_tool_activity(
+                            tool_name="web_search",
+                            tool_input={"query": query},
+                            completed=False,
+                        )
+                    except Exception:
+                        pass
+                all_tool_calls.append({
+                    "name": block.name,
+                    "input": block.input if isinstance(block.input, dict) else {},
+                    "summary": f'Web search "{query}"',
+                })
+            elif block.type == "web_search_tool_result":
+                # Results already consumed by the model — log errors.
+                if hasattr(block, "content") and hasattr(block.content, "error_code"):
+                    logger.warning(f"[agentic] Web search error: {block.content.error_code}")
+                if on_tool_activity:
+                    try:
+                        await on_tool_activity(
+                            tool_name="web_search",
+                            tool_input={},
+                            completed=True,
+                            summary="Web search completed",
+                        )
+                    except Exception:
+                        pass
 
         # If no tool calls, we're done — return the final text
         if response.stop_reason == "end_turn" or not tool_uses:
+            # If the model ended the turn with zero text but DID execute tools,
+            # nudge it once to produce a plain-English summary for the user.
+            if not text_parts and all_tool_calls and not _retried_for_empty_text:
+                _retried_for_empty_text = True
+                internal_messages.append({
+                    "role": "assistant",
+                    "content": _serialize_content_blocks(response.content),
+                })
+                internal_messages.append({
+                    "role": "user",
+                    "content": (
+                        "You completed tool actions but didn't provide a response "
+                        "to the user. Please summarize what you did in plain English."
+                    ),
+                })
+                continue
+
             if plan and on_tool_activity:
                 try:
                     await on_tool_activity(
@@ -8182,6 +8575,7 @@ async def agentic_turn(
                     act_step_status = []
                 act_mode = True
                 act_suites = suite_names
+                act_tool_use_ids = []  # fresh burst
                 # Mute context (preserves individual on/off states for restore)
                 if tool_executor:
                     tool_executor._sources_muted = True
@@ -8219,10 +8613,25 @@ async def agentic_turn(
                 else:
                     result_text = f"Invalid step number: {step_num}"
             elif result_text == "__DONE__":
+                # Shelve all act-burst tool results into _sources before
+                # returning to Think mode. This frees ~all of the bloat
+                # while keeping the data lossly recoverable via turn_on_source.
+                if tool_executor and act_tool_use_ids:
+                    try:
+                        tool_executor.shelve_act_results(
+                            act_tool_use_ids,
+                            internal_messages,
+                            current_iteration=iteration,
+                        )
+                    except Exception as shelve_err:
+                        logger.warning(
+                            f"[think/act] shelve_act_results failed: {shelve_err}"
+                        )
                 act_mode = False
                 act_suites = []
                 act_instructions = []
                 act_step_status = []
+                act_tool_use_ids = []
                 if tool_executor:
                     tool_executor._sources_muted = False
                 result_text = "Back to Think mode. Context restored."
@@ -8310,6 +8719,11 @@ async def agentic_turn(
                 "tool_use_id": tool_use.id,
                 "content": result_text,
             })
+            # Track tool_use ids produced inside an act burst so they can
+            # be shelved on __DONE__. Recorded *after* mode-switch sentinels
+            # are handled above so __ACT__/__DONE__ themselves are excluded.
+            if act_mode:
+                act_tool_use_ids.append(tool_use.id)
             all_tool_calls.append({
                 "name": tool_use.name,
                 "input": tool_use.input,
@@ -8409,8 +8823,8 @@ def _summarize_tool_result(
             return f"Loaded {db}:{days} ({count_part.lower()})"
         return f"Loaded {db}:{days}"
 
-    elif tool_name == "write_journal":
-        return "Wrote journal entry"
+    elif tool_name == "write_agent_journal":
+        return "Wrote agent journal entry"
 
     elif tool_name == "send_email":
         to = tool_input.get("to", "")

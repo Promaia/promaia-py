@@ -154,7 +154,7 @@ class TagToChatState:
     # Message collection
     pending_messages: List[Dict[str, Any]] = field(default_factory=list)
 
-    # Lifecycle: "active", "dormant", "paused", "stopped"
+    # Lifecycle: "active", "paused", "stopped"
     status: str = "active"
 
     # DM flag — suppresses leave announcements, etc.
@@ -189,7 +189,7 @@ class TagToChatLoop:
             agent_id=agent_id,
             last_message_at=time.time(),
             ultimate_timeout=time.time() + ULTIMATE_TIMEOUT,
-            status="dormant" if is_wake else "active",
+            status="active",
             is_dm=is_dm,
         )
         self.platform = platform_impl
@@ -203,6 +203,7 @@ class TagToChatLoop:
         self.thread_parent_message_id: Optional[str] = None  # Editable parent (from /agent)
         self.thread_parent_channel_id: Optional[str] = None  # Parent channel (Discord: starter msg lives here, not in thread)
         self._participants: set = set()  # Display names of thread participants
+        self._response_count = 0  # Successful responses; gates Haiku batching
 
     def on_done(self, callback):
         """Register a callback to run when the loop exits (dormant/stopped)."""
@@ -210,15 +211,19 @@ class TagToChatLoop:
 
     # ── Public API (called from bot event handlers) ─────────────────────
 
-    def add_message(self, user_id: str, username: str, text: str, timestamp: str):
+    def add_message(self, user_id: str, username: str, text: str, timestamp: str,
+                    images: list | None = None):
         """Feed a new human message into the loop."""
         now = time.time()
-        self.state.pending_messages.append({
+        msg = {
             'user_id': user_id,
             'username': username,
             'text': text,
             'timestamp': timestamp,
-        })
+        }
+        if images:
+            msg['images'] = images
+        self.state.pending_messages.append(msg)
         self.state.last_message_at = now
         self.state.ultimate_timeout = now + ULTIMATE_TIMEOUT
         self._participants.add(username)
@@ -316,7 +321,7 @@ class TagToChatLoop:
         # Skip the Haiku decision call on first response — if someone just
         # @mentioned us, they obviously want a response. Only use the decision
         # call for follow-up messages after the first response.
-        if self.state.status == "dormant":
+        if self._response_count > 0:
             decision, _ = await self._make_decision()
             thread_key = self.state.thread_id or self.state.channel_id or "dm"
             logger.info(f"[tag2chat:{thread_key[:12]}] Decision: {decision}")
@@ -600,6 +605,13 @@ class TagToChatLoop:
             # No tools used — delete thinking message (existing behavior)
             await self._cleanup_temp_message()
 
+        # Agentic turn returned no text — don't consume messages, don't post,
+        # just clean up the thinking animation. Messages stay pending for the
+        # next tick or next user message.
+        if response_text is None:
+            await self._cleanup_temp_message()
+            return
+
         # Post actual response as new message (triggers notifications)
         # Discord has a 2000 char limit — split long responses into chunks
         try:
@@ -627,11 +639,10 @@ class TagToChatLoop:
         # Update thread title if we own the parent message
         await self._update_thread_title(response_text)
 
-        # Reset state after successful response
+        # Consume processed messages and go dormant
         self.state.pending_messages.clear()
+        self._response_count += 1
         self.state.ultimate_timeout = time.time() + ULTIMATE_TIMEOUT
-
-        # Go dormant — loop stops, thread stays watched
         await self._go_dormant()
 
     async def _countdown(self, seconds: int) -> bool:
@@ -998,7 +1009,9 @@ class TagToChatLoop:
         """
         logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Going dormant (announce={announce})")
         self.state.status = "dormant"
-        self.state.pending_messages.clear()  # Don't re-evaluate the same messages
+        # NOTE: pending_messages is NOT cleared here — dormancy is a polling
+        # optimization, not a state reset. Messages are cleared explicitly
+        # after successful responses in _do_thinking_and_respond().
         await self._update_db_status("dormant")
 
         if announce:

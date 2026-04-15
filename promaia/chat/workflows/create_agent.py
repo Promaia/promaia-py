@@ -56,6 +56,13 @@ always change this later.
 a Slack or Discord channel. If yes, ask for the platform and channel ID. \
 If they're not sure, skip — this can be configured later.
 
+8b. **Channel permissions** (optional): If the agent has Slack or \
+Discord data sources, ask whether it should be restricted to specific \
+channels. Use `list_channels` to show available channels and let the \
+user pick. If they want the agent to access all channels, skip this \
+step. Pass the selected channel IDs as `allowed_channel_ids` when \
+creating the agent.
+
 9. **Confirm and create**: Summarize the full configuration:
    - Name
    - Workspace
@@ -65,6 +72,7 @@ If they're not sure, skip — this can be configured later.
    - Prompt (abbreviated)
    - Schedule (if any)
    - Messaging (if any)
+   - Channel permissions (if restricted)
    Ask the user to confirm, then call `create_agent` with all the fields.
 
 10. **Post-creation**: Report the result from `create_agent`. Mention:

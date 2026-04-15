@@ -633,7 +633,7 @@ def switch_model(target_model=None):
         target_model = target_model.lower()
         model_map = {
             "claude": "anthropic", "anthropic": "anthropic",
-            "opus": "anthropic", "sonnet": "anthropic",
+            "opus": "anthropic", "opus-1m": "anthropic", "1m": "anthropic", "sonnet": "anthropic",
             "gpt": "openai", "openai": "openai",
             "gemini": "gemini", "google": "gemini",
             "flash": "gemini", "pro": "gemini",
@@ -642,9 +642,12 @@ def switch_model(target_model=None):
 
         if target_model in model_map:
             new_api = model_map[target_model]
-            # Check if this model is available - find first matching provider
+            # For specific model aliases, prefer matching the exact variant
+            prefer_1m = target_model in ("opus-1m", "1m")
             for choice_num, (api, name, model_id) in available_choices.items():
                 if api == new_api:
+                    if prefer_1m and "1m" not in model_id:
+                        continue
                     current_api = new_api
                     os.environ["API_TYPE"] = current_api
                     os.environ["SELECTED_MODEL_ID"] = model_id
@@ -787,7 +790,7 @@ async def push_chat_to_notion(messages):
 
 def call_anthropic_with_retry(client, system_prompt, messages, max_tokens=4096, temperature=0.7, max_retries=3):
     """Calls the Anthropic API with retry logic."""
-    from promaia.ai.models import ANTHROPIC_MODELS
+    from promaia.ai.models import ANTHROPIC_MODELS, resolve_anthropic_model_id
 
     # Determine which model to use based on current selection
     # Check if a specific model ID was selected
@@ -797,17 +800,20 @@ def call_anthropic_with_retry(client, system_prompt, messages, max_tokens=4096, 
     else:
         # Fallback to checking display name
         current_model_name = get_current_model_name()
-        if "Opus" in current_model_name:
-            model_to_use = ANTHROPIC_MODELS.get("opus", "claude-opus-4-5")
+        if "1M" in current_model_name or "1m" in current_model_name:
+            model_to_use = ANTHROPIC_MODELS.get("opus-1m", "claude-opus-4-6-1m")
+        elif "Opus" in current_model_name:
+            model_to_use = ANTHROPIC_MODELS.get("opus", "claude-opus-4-6")
         else:
-            model_to_use = ANTHROPIC_MODELS.get("sonnet", "claude-sonnet-4-5")
+            model_to_use = ANTHROPIC_MODELS.get("sonnet", "claude-sonnet-4-6")
 
-    debug_print(f"Using Anthropic model: {model_to_use}")
-    
+    api_model = resolve_anthropic_model_id(model_to_use)
+    debug_print(f"Using Anthropic model: {api_model} (internal: {model_to_use})")
+
     for attempt in range(max_retries):
         try:
             response = client.messages.create(
-                model=model_to_use,
+                model=api_model,
                 system=system_prompt,
                 messages=messages,
                 max_tokens=max_tokens,

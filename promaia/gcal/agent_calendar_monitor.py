@@ -83,9 +83,9 @@ class AgentCalendarMonitor:
 
                             logger.info("  Running agentic turn with calendar event as goal.")
 
-                            from promaia.agents.run_goal import run_goal
+                            from promaia.agents.run_goal import _run_agentic
 
-                            result = await run_goal(
+                            result = await _run_agentic(
                                 agent_config=agent,
                                 goal=run_request,
                                 metadata={

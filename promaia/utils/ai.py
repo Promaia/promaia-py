@@ -12,7 +12,7 @@ from fastapi import HTTPException # Keep for now, consider custom errors later
 import json # For structured logging
 from datetime import datetime # For timestamping log files
 import logging # New import
-from promaia.ai.models import ANTHROPIC_MODELS
+from promaia.ai.models import ANTHROPIC_MODELS, resolve_anthropic_model_id
 
 logger = logging.getLogger(__name__) # New logger instance
 
@@ -149,6 +149,10 @@ def calculate_ai_cost(prompt_tokens: int, response_tokens: int, model_name: str 
             "input_cost_per_million": 3.00,
             "output_cost_per_million": 15.00
         },
+        "claude-opus-4.6": {
+            "input_cost_per_million": 5.00,
+            "output_cost_per_million": 25.00
+        },
         "claude-opus-4.5": {
             "input_cost_per_million": 5.00,
             "output_cost_per_million": 25.00
@@ -185,6 +189,8 @@ def calculate_ai_cost(prompt_tokens: int, response_tokens: int, model_name: str 
     
     # Map model names to pricing keys
     model_mapping = {
+        "claude-opus-4-6": "claude-opus-4.6",
+        "claude-opus-4-6-1m": "claude-opus-4.6",
         "claude-opus-4-5-20251101": "claude-opus-4.5",
         "claude-opus-4-5-20250514": "claude-opus-4.5",
         "claude-opus-4-1-20250805": "claude-opus-4",
@@ -302,8 +308,9 @@ async def call_anthropic_with_retry(
                     content_preview = msg.get("content", "")[:200] # Preview first 200 chars
                     debug_print(f"Message {i+1} - Role: {role}, Content (first 200 chars): {content_preview}...")
 
+            api_model_name = resolve_anthropic_model_id(model_name)
             response = await client.messages.create(
-                model=model_name,
+                model=api_model_name,
                 max_tokens=max_tokens,
                 system=system_prompt,
                 messages=messages,

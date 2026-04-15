@@ -44,6 +44,10 @@ class AgentConfig:
     interval_minutes: Optional[int] = None  # Legacy: 5, 15, 30, 60, etc. (deprecated, use schedule)
 
     # Notion integration fields
+    # IMMUTABLE after creation. Assigned once by generate_agent_id() or hardcoded
+    # for default agents (e.g. "maia"). Never mutate this field on an existing
+    # agent — it's the stable identity used by the self-edit guard and journal
+    # lookups. Renaming the agent does NOT change agent_id.
     agent_id: str = ""                                  # "grace", "bondu", "daily-summary"
     notion_page_id: Optional[str] = None                # Agent's page in Agents database
     system_prompt_page_id: Optional[str] = None         # System Prompt subpage ID
@@ -77,6 +81,10 @@ class AgentConfig:
     # Messaging: permission gate (platforms are environment-based, not per-agent)
     messaging_enabled: bool = False  # Agent can use messaging tools
     conversation_timeout_minutes: int = 15  # Minutes before conversation timeout
+
+    # Channel-level permissions: restrict which Slack/Discord channels this agent
+    # can respond in and query messages from.  None = all channels (backwards compat).
+    allowed_channel_ids: Optional[List[str]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -160,6 +168,16 @@ class AgentConfig:
             ]
         else:
             return []  # Legacy mode: no write permissions
+
+    def can_access_channel(self, channel_id: str) -> bool:
+        """Check if agent is allowed to operate in a given channel.
+
+        Returns True when the allowlist is None (legacy/unrestricted) or
+        when *channel_id* is explicitly listed.
+        """
+        if self.allowed_channel_ids is None:
+            return True
+        return channel_id in self.allowed_channel_ids
 
     def can_query_source(self, source_name: str, days: int) -> bool:
         """Check if agent can query this source with given time range"""

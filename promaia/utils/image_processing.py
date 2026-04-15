@@ -137,18 +137,21 @@ def encode_image_from_path(image_path: str, max_size: Optional[Tuple[int, int]] 
     except Exception as e:
         raise IOError(f"Failed to process image {image_path}: {str(e)}")
 
-def encode_image_from_bytes(image_data: bytes, filename: str = None, media_type: str = None) -> Dict[str, str]:
+def encode_image_from_bytes(image_data: bytes, filename: str = None, media_type: str = None,
+                            max_size: Optional[Tuple[int, int]] = None) -> Dict[str, str]:
     """
     Encode an image from bytes to base64.
-    
+
     Args:
         image_data: Raw image bytes
         filename: Optional filename for format detection
         media_type: Optional MIME type override
-        
+        max_size: Optional maximum dimensions (width, height).
+                  Defaults to MAX_IMAGE_DIMENSIONS (4096x4096).
+
     Returns:
         Dict with 'data' (base64) and 'media_type' keys
-        
+
     Raises:
         ValueError: If the image format is not supported or data is too large
         IOError: If the image cannot be processed
@@ -186,9 +189,10 @@ def encode_image_from_bytes(image_data: bytes, filename: str = None, media_type:
                 img = background
         
         # Resize if needed
-        if img.size[0] > MAX_IMAGE_DIMENSIONS[0] or img.size[1] > MAX_IMAGE_DIMENSIONS[1]:
-            img.thumbnail(MAX_IMAGE_DIMENSIONS, Image.Resampling.LANCZOS)
-        
+        target = max_size or MAX_IMAGE_DIMENSIONS
+        if img.size[0] > target[0] or img.size[1] > target[1]:
+            img.thumbnail(target, Image.Resampling.LANCZOS)
+
         # Save to bytes
         img_bytes = io.BytesIO()
         format_map = {

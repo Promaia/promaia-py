@@ -27,8 +27,21 @@ current configuration. Present it clearly.
    - **Prompt**: System prompt / instructions
    - **Schedule**: Interval in minutes
    - **Max iterations**: Per-run iteration limit
+   - **Messaging**: Enable/disable messaging tools (send_message, start_conversation)
+   - **Channel permissions**: Restrict which Slack/Discord channels the \
+agent can respond in and query. Use `list_channels` to show available \
+channels. Pass channel IDs as `allowed_channel_ids` via `update_agent`. \
+Pass an empty array to remove restrictions.
    - **Name**: Rename the agent (uses `rename_agent`)
    - **Enable/Disable**: Toggle the agent on/off
+
+   Note: `agent_id` is immutable and cannot be edited. You cannot edit the
+   agent that is currently running (i.e. yourself) — only the user can do
+   that directly.
+
+   TODO: once agent tiers/ranks are introduced, add tier-aware
+   create/edit permissions to this workflow so lower-ranked agents can
+   only be edited by higher-ranked ones.
 
    Let the user pick what they want to change.
 

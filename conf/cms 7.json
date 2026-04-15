@@ -1,0 +1,15 @@
+{
+  "image_processing": {
+    "webp_conversion": {
+      "enabled": true,
+      "quality": 85,
+      "convert_formats": ["image/jpeg", "image/png"],
+      "skip_formats": ["image/gif", "image/webp", "image/svg+xml"],
+      "max_dimension": 2048
+    }
+  },
+  "webflow": {
+    "max_concurrent_uploads": 8,
+    "retry_attempts": 3
+  }
+}
