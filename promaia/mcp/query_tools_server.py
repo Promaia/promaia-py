@@ -43,6 +43,55 @@ server = Server("promaia-query-tools")
 # Global state (workspace and agent config passed via args)
 WORKSPACE = None
 AGENT_CONFIG = None
+ALLOWED_CHANNEL_IDS = None  # Optional[List[str]] — restrict query results to these channels
+
+
+def _filter_pages_by_channel(pages: list, allowed_ids: list) -> list:
+    """Keep only pages whose channel ID is in *allowed_ids*.
+
+    Works for Slack and Discord pages whose metadata stores a channel ID
+    under ``slack_channel_id`` or ``discord_channel_id``.  Pages without
+    any channel metadata are kept (they're not messaging data).
+    """
+    allowed_set = set(allowed_ids)
+    filtered = []
+    for page in pages:
+        meta_raw = page.get("metadata")
+        if not meta_raw:
+            filtered.append(page)
+            continue
+
+        # metadata may be a JSON string (from SQLite) or already a dict
+        if isinstance(meta_raw, str):
+            try:
+                meta = json.loads(meta_raw)
+            except (json.JSONDecodeError, TypeError):
+                filtered.append(page)
+                continue
+        else:
+            meta = meta_raw
+
+        ch_id = meta.get("slack_channel_id") or meta.get("discord_channel_id")
+        if ch_id is None or ch_id in allowed_set:
+            filtered.append(page)
+    return filtered
+
+
+def _filter_loaded_content_by_channel(
+    loaded_content: dict, allowed_ids: list
+) -> dict:
+    """Apply channel filtering across a multi-source loaded_content dict.
+
+    Sources whose names contain 'slack' or 'discord' are filtered;
+    all others are passed through unchanged.
+    """
+    result = {}
+    for source_name, pages in loaded_content.items():
+        if any(kw in source_name.lower() for kw in ("slack", "discord")):
+            result[source_name] = _filter_pages_by_channel(pages, allowed_ids)
+        else:
+            result[source_name] = pages
+    return result
 
 
 @server.list_tools()
@@ -246,6 +295,10 @@ async def _handle_query_sql(args: dict) -> list[TextContent]:
             return_metadata=True
         )
 
+        # Post-filter by allowed channels
+        if ALLOWED_CHANNEL_IDS:
+            loaded_content = _filter_loaded_content_by_channel(loaded_content, ALLOWED_CHANNEL_IDS)
+
         # Format results
         formatted = format_context_data(loaded_content)
         total_pages = sum(len(pages) for pages in loaded_content.values())
@@ -304,6 +357,10 @@ async def _handle_query_vector(args: dict) -> list[TextContent]:
             verbose=False,
             skip_confirmation=True
         )
+
+        # Post-filter by allowed channels
+        if ALLOWED_CHANNEL_IDS:
+            loaded_content = _filter_loaded_content_by_channel(loaded_content, ALLOWED_CHANNEL_IDS)
 
         # Format results
         formatted = format_context_data(loaded_content)
@@ -379,6 +436,13 @@ async def _handle_query_source(args: dict) -> list[TextContent]:
             database_config=db_config,
             days=days
         )
+
+        # Post-filter by allowed channels for Slack/Discord sources
+        if ALLOWED_CHANNEL_IDS and db_config.source_type in ("slack", "discord"):
+            pre_count = len(pages)
+            pages = _filter_pages_by_channel(pages, ALLOWED_CHANNEL_IDS)
+            if pre_count != len(pages):
+                logger.info(f"Channel filter: {pre_count} → {len(pages)} pages")
 
         # Format results
         formatted = format_context_data({database: pages})
@@ -566,15 +630,25 @@ async def _handle_write_journal(args: dict) -> list[TextContent]:
 
 async def main():
     """Run the MCP server"""
-    global WORKSPACE, AGENT_CONFIG
+    global WORKSPACE, AGENT_CONFIG, ALLOWED_CHANNEL_IDS
 
     parser = argparse.ArgumentParser(description="Promaia Query Tools MCP Server")
     parser.add_argument("--workspace", required=True, help="Workspace name (e.g., 'koii')")
     parser.add_argument("--agent-id", required=False, help="Agent ID for permission enforcement")
+    parser.add_argument("--allowed-channels", required=False,
+                        help="JSON list of channel IDs this agent may access (omit for all)")
     args = parser.parse_args()
 
     WORKSPACE = args.workspace
     logger.info(f"Starting Promaia MCP server for workspace: {WORKSPACE}")
+
+    # Parse channel restrictions
+    if args.allowed_channels:
+        try:
+            ALLOWED_CHANNEL_IDS = json.loads(args.allowed_channels)
+            logger.info(f"Channel restrictions active: {ALLOWED_CHANNEL_IDS}")
+        except Exception as e:
+            logger.warning(f"Could not parse --allowed-channels: {e}")
 
     # Load agent config if provided (for permission enforcement)
     if args.agent_id:

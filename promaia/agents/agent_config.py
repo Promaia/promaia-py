@@ -82,6 +82,10 @@ class AgentConfig:
     messaging_enabled: bool = False  # Agent can use messaging tools
     conversation_timeout_minutes: int = 15  # Minutes before conversation timeout
 
+    # Channel-level permissions: restrict which Slack/Discord channels this agent
+    # can respond in and query messages from.  None = all channels (backwards compat).
+    allowed_channel_ids: Optional[List[str]] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return asdict(self)
@@ -164,6 +168,16 @@ class AgentConfig:
             ]
         else:
             return []  # Legacy mode: no write permissions
+
+    def can_access_channel(self, channel_id: str) -> bool:
+        """Check if agent is allowed to operate in a given channel.
+
+        Returns True when the allowlist is None (legacy/unrestricted) or
+        when *channel_id* is explicitly listed.
+        """
+        if self.allowed_channel_ids is None:
+            return True
+        return channel_id in self.allowed_channel_ids
 
     def can_query_source(self, source_name: str, days: int) -> bool:
         """Check if agent can query this source with given time range"""

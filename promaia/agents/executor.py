@@ -1528,13 +1528,20 @@ Current time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
 
         # Launch Promaia MCP server if agent has permission
         if self.config.mcp_tools and "promaia" in self.config.mcp_tools:
+            promaia_args = [
+                "-m", "promaia.mcp.query_tools_server",
+                "--workspace", self.config.workspace,
+                "--agent-id", self.config.agent_id or self.config.name,
+            ]
+            # Pass channel restrictions so query results are filtered
+            if self.config.allowed_channel_ids:
+                import json as _json
+                promaia_args.extend([
+                    "--allowed-channels", _json.dumps(self.config.allowed_channel_ids)
+                ])
             mcp_servers["promaia"] = {
                 "command": sys.executable,
-                "args": [
-                    "-m", "promaia.mcp.query_tools_server",
-                    "--workspace", self.config.workspace,
-                    "--agent-id", self.config.agent_id or self.config.name
-                ],
+                "args": promaia_args,
                 "env": {}
             }
             logger.info(f"✓ Configured Promaia MCP server (query tools)")

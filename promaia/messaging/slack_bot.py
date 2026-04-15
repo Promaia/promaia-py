@@ -94,19 +94,28 @@ def parse_agent_request(text: str, available_agents: list, bot_user_id: str) -> 
     return (None, cleaned)
 
 
-def select_agent(requested_agent: str | None, available_agents: list, default_agent: str) -> str | None:
+def select_agent(
+    requested_agent: str | None,
+    available_agents: list,
+    default_agent: str,
+    channel_id: str | None = None,
+    agent_configs: dict | None = None,
+) -> str | None:
     """
     Determine which agent to use with smart fallback.
 
     Priority:
-    1. Requested agent (if valid)
-    2. Only agent (if only one exists)
-    3. Default agent (from config)
+    1. Requested agent (if valid and allowed in channel)
+    2. Only agent allowed in this channel
+    3. Default agent (if allowed in channel)
+    4. First agent allowed in this channel
 
     Args:
         requested_agent: Agent name from user message
         available_agents: List of valid agent names
         default_agent: Default agent name
+        channel_id: Slack channel ID for permission filtering
+        agent_configs: Dict of agent name → AgentConfig for channel checks
 
     Returns:
         Agent name to use, or None if requested agent invalid
@@ -119,12 +128,24 @@ def select_agent(requested_agent: str | None, available_agents: list, default_ag
             # Invalid agent - caller should return error
             return None
 
-    # If only one agent exists, use it
-    if len(available_agents) == 1:
-        return available_agents[0]
+    # Filter agents to those allowed in this channel
+    if channel_id and agent_configs:
+        allowed = [
+            name for name in available_agents
+            if agent_configs.get(name) and agent_configs[name].can_access_channel(channel_id)
+        ]
+    else:
+        allowed = available_agents
 
-    # Use default
-    return default_agent
+    if len(allowed) == 1:
+        return allowed[0]
+
+    # Prefer default agent if it's allowed
+    if default_agent in allowed:
+        return default_agent
+
+    # Fall back to first allowed agent
+    return allowed[0] if allowed else default_agent
 
 
 async def _save_dm_to_history(conv_manager, state, summary: str = None):
@@ -277,6 +298,8 @@ def create_slack_bot():
     from promaia.agents.agent_config import load_agents
     agents = load_agents()
     available_agent_names = [a.name or a.agent_id for a in agents if a.name or a.agent_id]
+    # Lookup from agent name → AgentConfig for channel permission checks
+    agent_configs = {(a.name or a.agent_id): a for a in agents if a.name or a.agent_id}
 
     if not available_agent_names:
         logger.warning("No agents configured! Bot will have limited functionality.")
@@ -574,8 +597,17 @@ def create_slack_bot():
             # Handle special commands (respond inline, not in thread)
             if query.lower() in ['list agents', 'who are you', 'who are you?', 'list agents?']:
                 if available_agent_names:
-                    agent_list = ", ".join(available_agent_names)
-                    await say(f"Available agents: {agent_list}\n\nDefault agent: {default_agent}")
+                    # Only show agents allowed in this channel
+                    visible = [
+                        name for name in available_agent_names
+                        if not agent_configs.get(name)
+                        or agent_configs[name].can_access_channel(channel_id)
+                    ]
+                    if visible:
+                        agent_list = ", ".join(visible)
+                        await say(f"Available agents: {agent_list}\n\nDefault agent: {default_agent}")
+                    else:
+                        await say("No agents are available in this channel.")
                 else:
                     await say("No agents are currently configured.")
                 return
@@ -593,8 +625,11 @@ def create_slack_bot():
                     )
                     return
 
-            # Select agent to use
-            agent_to_use = select_agent(requested_agent, available_agent_names, default_agent)
+            # Select agent to use (channel-aware)
+            agent_to_use = select_agent(
+                requested_agent, available_agent_names, default_agent,
+                channel_id=channel_id, agent_configs=agent_configs,
+            )
 
             if requested_agent and not agent_to_use:
                 agent_list = ", ".join(available_agent_names)
@@ -603,6 +638,17 @@ def create_slack_bot():
 
             if not agent_to_use:
                 await say("No agents are configured. Please set up an agent first.")
+                return
+
+            # Enforce channel permissions — if the user explicitly requested
+            # an agent that isn't allowed here, tell them.
+            cfg = agent_configs.get(agent_to_use)
+            if cfg and not cfg.can_access_channel(channel_id):
+                await client.chat_postEphemeral(
+                    channel=channel_id,
+                    user=user_id,
+                    text=f"Agent *{agent_to_use}* isn't available in this channel.",
+                )
                 return
 
             logger.info(f"Routing to agent: {agent_to_use}")
@@ -944,10 +990,23 @@ def create_slack_bot():
                     )
                     return
 
+                # Filter to agents allowed in this channel
+                visible_agents = [
+                    name for name in available_agent_names
+                    if not agent_configs.get(name)
+                    or agent_configs[name].can_access_channel(channel_id)
+                ]
+                if not visible_agents:
+                    await client.chat_postEphemeral(
+                        channel=channel_id, user=user_id,
+                        text="No agents are available in this channel."
+                    )
+                    return
+
                 # Build agent list message
                 lines = ["*Choose an agent to chat with:*\n"]
                 emoji_to_agent = {}
-                for i, agent_name in enumerate(available_agent_names):
+                for i, agent_name in enumerate(visible_agents):
                     if i >= len(AGENT_EMOJIS):
                         break
                     lines.append(f"{i + 1}. {agent_name}")

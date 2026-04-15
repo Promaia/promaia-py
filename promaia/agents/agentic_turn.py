@@ -2393,6 +2393,15 @@ AGENT_TOOL_DEFINITIONS = [
                         "(send_message, start_conversation, etc.)."
                     )
                 },
+                "allowed_channel_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Slack/Discord channel IDs this agent can respond in "
+                        "and query messages from. Pass empty array to remove "
+                        "restrictions (allow all channels). Omit to leave unchanged."
+                    )
+                },
             },
             "required": ["name"]
         }
@@ -2464,6 +2473,14 @@ AGENT_TOOL_DEFINITIONS = [
                 "messaging_enabled": {
                     "type": "boolean",
                     "description": "Whether this agent can use messaging tools"
+                },
+                "allowed_channel_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Slack/Discord channel IDs this agent can respond in "
+                        "and query messages from. Omit for unrestricted access."
+                    )
                 },
             },
             "required": ["name"]
@@ -7325,6 +7342,10 @@ class ToolExecutor:
             if "messaging_enabled" in tool_input:
                 agent.messaging_enabled = bool(tool_input["messaging_enabled"])
                 changes.append("messaging_enabled")
+            if "allowed_channel_ids" in tool_input:
+                ids = tool_input["allowed_channel_ids"]
+                agent.allowed_channel_ids = ids if ids else None
+                changes.append("allowed_channel_ids")
 
             if not changes:
                 return "No fields to update were provided."
@@ -7442,6 +7463,11 @@ class ToolExecutor:
             # Set messaging permission if provided
             if tool_input.get("messaging_enabled"):
                 agent_config.messaging_enabled = True
+
+            # Set channel restrictions if provided
+            if "allowed_channel_ids" in tool_input:
+                ids = tool_input["allowed_channel_ids"]
+                agent_config.allowed_channel_ids = ids if ids else None
 
             # Validate
             errors = agent_config.validate()

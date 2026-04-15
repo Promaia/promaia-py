@@ -28,6 +28,10 @@ current configuration. Present it clearly.
    - **Schedule**: Interval in minutes
    - **Max iterations**: Per-run iteration limit
    - **Messaging**: Enable/disable messaging tools (send_message, start_conversation)
+   - **Channel permissions**: Restrict which Slack/Discord channels the \
+agent can respond in and query. Use `list_channels` to show available \
+channels. Pass channel IDs as `allowed_channel_ids` via `update_agent`. \
+Pass an empty array to remove restrictions.
    - **Name**: Rename the agent (uses `rename_agent`)
    - **Enable/Disable**: Toggle the agent on/off
 
