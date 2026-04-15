@@ -25,6 +25,7 @@ from promaia.storage.files import save_page_to_file
 from promaia.utils.config_loader import get_notion_database_id
 from promaia.ai.models import GOOGLE_MODELS, LLAMA_MODELS
 from promaia.utils.display import print_text, print_markdown, print_separator
+from promaia.ocr.markdown_to_notion import parse_inline_markdown
 
 # Load environment variables
 load_environment()
@@ -675,7 +676,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
                         "object": "block",
                         "type": "heading_1",
                         "heading_1": {
-                            "rich_text": [{"type": "text", "text": {"content": line[2:]}}]
+                            "rich_text": parse_inline_markdown(line[2:])
                         }
                     })
                 elif line.startswith('## '):
@@ -683,7 +684,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
                         "object": "block",
                         "type": "heading_2",
                         "heading_2": {
-                            "rich_text": [{"type": "text", "text": {"content": line[3:]}}]
+                            "rich_text": parse_inline_markdown(line[3:])
                         }
                     })
                 elif line.startswith('### '):
@@ -691,7 +692,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
                         "object": "block",
                         "type": "heading_3",
                         "heading_3": {
-                            "rich_text": [{"type": "text", "text": {"content": line[4:]}}]
+                            "rich_text": parse_inline_markdown(line[4:])
                         }
                     })
                 
@@ -701,7 +702,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
                         "object": "block",
                         "type": "bulleted_list_item",
                         "bulleted_list_item": {
-                            "rich_text": [{"type": "text", "text": {"content": line[2:]}}]
+                            "rich_text": parse_inline_markdown(line[2:])
                         }
                     })
                 
@@ -712,7 +713,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
                         "object": "block",
                         "type": "numbered_list_item",
                         "numbered_list_item": {
-                            "rich_text": [{"type": "text", "text": {"content": content}}]
+                            "rich_text": parse_inline_markdown(content)
                         }
                     })
                 
@@ -743,7 +744,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
                         "object": "block",
                         "type": "quote",
                         "quote": {
-                            "rich_text": [{"type": "text", "text": {"content": line[2:]}}]
+                            "rich_text": parse_inline_markdown(line[2:])
                         }
                     })
                 
@@ -753,7 +754,7 @@ async def write_blog_post(days=None, custom_prompt=None, push_to_notion=True, ma
                         "object": "block",
                         "type": "paragraph",
                         "paragraph": {
-                            "rich_text": [{"type": "text", "text": {"content": line}}]
+                            "rich_text": parse_inline_markdown(line)
                         }
                     })
                 
