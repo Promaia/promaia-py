@@ -1167,7 +1167,17 @@ async def start_slack_bot_async():
             from promaia.config.workspaces import get_workspace_manager
             slack_int = get_integration("slack")
             ws = get_workspace_manager().get_default_workspace()
-            creds = slack_int.get_slack_credentials(ws)
+            creds = slack_int.get_slack_credentials(ws) if ws else None
+            if not creds:
+                from promaia.utils.env_writer import get_data_dir
+                creds_dir = get_data_dir() / "credentials"
+                if creds_dir.is_dir():
+                    for sub in sorted(creds_dir.iterdir()):
+                        if sub.is_dir():
+                            trial = slack_int.get_slack_credentials(sub.name)
+                            if trial and trial.get("app_token"):
+                                creds = trial
+                                break
             if creds:
                 app_token = creds.get("app_token")
         except Exception:
