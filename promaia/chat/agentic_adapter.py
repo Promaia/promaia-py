@@ -441,10 +441,18 @@ def build_agentic_system_prompt(
         )
 
     # Build workflow awareness section
+    # Onboarding-only workflows are hidden — maia should use the direct
+    # tools (create_agent, update_agent) instead of start_interview for
+    # agent management since the interview sentinel flow doesn't work in
+    # Slack conversations.
+    _ONBOARDING_ONLY_WORKFLOWS = {"create_agent", "onboarding_agent", "onboard_tutorial"}
     workflow_section = ""
     try:
         from promaia.chat.workflows import list_workflows
-        workflows = list_workflows()
+        workflows = [
+            wf for wf in list_workflows()
+            if wf["name"] not in _ONBOARDING_ONLY_WORKFLOWS
+        ]
         if workflows:
             lines = [
                 "## Configuration Interviews\n",
@@ -456,6 +464,10 @@ def build_agentic_system_prompt(
             ]
             for wf in workflows:
                 lines.append(f"- **{wf['name']}**: {wf['description']}")
+            lines.append(
+                "\nTo create or edit agents, use the `create_agent` and "
+                "`update_agent` tools directly — do NOT use start_interview."
+            )
             workflow_section = "\n".join(lines)
     except Exception as e:
         logger.debug(f"Could not load workflows: {e}")
