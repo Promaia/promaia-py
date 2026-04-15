@@ -2755,8 +2755,8 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     # Channel tools — always available
     tools.extend(CHANNEL_TOOL_DEFINITIONS)
 
-    # Interview tools — always available
-    tools.extend(_build_interview_tool_definitions())
+    # Interview tools — disabled outside onboarding flow
+    # tools.extend(_build_interview_tool_definitions())
 
     # UI tools — always available
     tools.append(SHOW_SELECTION_TOOL_DEFINITION)
@@ -2869,7 +2869,7 @@ def _build_tool_suite_registry(agent, has_platform: bool = False) -> Dict[str, D
         + list(AGENT_TOOL_DEFINITIONS)
         + list(CHANNEL_TOOL_DEFINITIONS)
         + list(WORKFLOW_TOOL_DEFINITIONS)
-        + list(_build_interview_tool_definitions())
+        # + list(_build_interview_tool_definitions())  # disabled outside onboarding
         + [SHOW_SELECTION_TOOL_DEFINITION]
         + [SYNC_DATABASE_TOOL_DEFINITION, LIST_DATABASES_TOOL_DEFINITION, RENAME_DATABASE_TOOL_DEFINITION]
         + [WORKSPACE_FILES_TOOL_DEFINITION]
@@ -2916,26 +2916,8 @@ def _build_suite_index(suite_registry: Dict, mcp_suites: Dict = None, workspace:
     except Exception:
         pass
 
-    # Interview workflows (guided configuration flows)
-    # Onboarding-only workflows are hidden — agent should use create_agent /
-    # update_agent tools directly (the interview sentinel flow doesn't work
-    # in Slack conversations).
-    _ONBOARDING_ONLY = {"create_agent", "onboarding_agent", "onboard_tutorial"}
-    try:
-        from promaia.chat.workflows import list_workflows
-        interviews = [wf for wf in list_workflows() if wf["name"] not in _ONBOARDING_ONLY]
-        if interviews:
-            lines.append("")
-            lines.append("## Configuration Interviews\n")
-            lines.append("Use `start_interview(workflow=\"name\")` to begin.\n")
-            for wf in interviews:
-                lines.append(f"- **{wf['name']}**: {wf['description']}")
-            lines.append(
-                "\nTo create or edit agents, use the `create_agent` and "
-                "`update_agent` tools directly — do NOT use start_interview."
-            )
-    except Exception:
-        pass
+    # Interview workflows disabled outside onboarding flow.
+    # start_interview tool is not available — use create_agent / update_agent directly.
 
     return "\n".join(lines)
 
@@ -8243,8 +8225,8 @@ async def agentic_turn(
             for td in WORKFLOW_TOOL_DEFINITIONS:
                 if td["name"] in ("list_saved_workflows", "get_workflow_details"):
                     iteration_tools.append(td)
-            # Interview tools available in Think mode (launching guided flows)
-            iteration_tools.extend(_build_interview_tool_definitions())
+            # Interview tools disabled outside onboarding flow
+            # iteration_tools.extend(_build_interview_tool_definitions())
             iteration_tools.append(ACT_TOOL_DEFINITION)
 
         elif use_think_act and act_mode:

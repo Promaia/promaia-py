@@ -440,37 +440,8 @@ def build_agentic_system_prompt(
             "to share links — do not construct Notion URLs manually."
         )
 
-    # Build workflow awareness section
-    # Onboarding-only workflows are hidden — maia should use the direct
-    # tools (create_agent, update_agent) instead of start_interview for
-    # agent management since the interview sentinel flow doesn't work in
-    # Slack conversations.
-    _ONBOARDING_ONLY_WORKFLOWS = {"create_agent", "onboarding_agent", "onboard_tutorial"}
+    # Interview workflows disabled outside onboarding flow.
     workflow_section = ""
-    try:
-        from promaia.chat.workflows import list_workflows
-        workflows = [
-            wf for wf in list_workflows()
-            if wf["name"] not in _ONBOARDING_ONLY_WORKFLOWS
-        ]
-        if workflows:
-            lines = [
-                "## Configuration Interviews\n",
-                "You can guide the user through these configuration workflows. "
-                "When the user wants to set up or configure something, call "
-                "`start_interview` with the appropriate workflow name. "
-                "The interview system will provide step-by-step guidance.\n",
-                "Available workflows:",
-            ]
-            for wf in workflows:
-                lines.append(f"- **{wf['name']}**: {wf['description']}")
-            lines.append(
-                "\nTo create or edit agents, use the `create_agent` and "
-                "`update_agent` tools directly — do NOT use start_interview."
-            )
-            workflow_section = "\n".join(lines)
-    except Exception as e:
-        logger.debug(f"Could not load workflows: {e}")
 
     # Apply template substitutions
     filled = template.replace("{agent_name}", "Maia")
