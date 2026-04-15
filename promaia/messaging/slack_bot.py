@@ -272,7 +272,19 @@ def create_slack_bot():
         from promaia.config.workspaces import get_workspace_manager
         slack_int = get_integration("slack")
         ws = get_workspace_manager().get_default_workspace()
-        creds = slack_int.get_slack_credentials(ws)
+        creds = slack_int.get_slack_credentials(ws) if ws else None
+        # If no default workspace, scan credential directories for Slack tokens
+        if not creds:
+            from promaia.utils.env_writer import get_data_dir
+            creds_dir = get_data_dir() / "credentials"
+            if creds_dir.is_dir():
+                for sub in sorted(creds_dir.iterdir()):
+                    if sub.is_dir():
+                        trial = slack_int.get_slack_credentials(sub.name)
+                        if trial and trial.get("bot_token"):
+                            creds = trial
+                            logger.info(f"Found Slack credentials in workspace: {sub.name}")
+                            break
         if creds:
             bot_token = creds.get("bot_token")
             app_token = creds.get("app_token")
