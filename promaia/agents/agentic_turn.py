@@ -2917,15 +2917,23 @@ def _build_suite_index(suite_registry: Dict, mcp_suites: Dict = None, workspace:
         pass
 
     # Interview workflows (guided configuration flows)
+    # Onboarding-only workflows are hidden — agent should use create_agent /
+    # update_agent tools directly (the interview sentinel flow doesn't work
+    # in Slack conversations).
+    _ONBOARDING_ONLY = {"create_agent", "onboarding_agent", "onboard_tutorial"}
     try:
         from promaia.chat.workflows import list_workflows
-        interviews = list_workflows()
+        interviews = [wf for wf in list_workflows() if wf["name"] not in _ONBOARDING_ONLY]
         if interviews:
             lines.append("")
             lines.append("## Configuration Interviews\n")
             lines.append("Use `start_interview(workflow=\"name\")` to begin.\n")
             for wf in interviews:
                 lines.append(f"- **{wf['name']}**: {wf['description']}")
+            lines.append(
+                "\nTo create or edit agents, use the `create_agent` and "
+                "`update_agent` tools directly — do NOT use start_interview."
+            )
     except Exception:
         pass
 
