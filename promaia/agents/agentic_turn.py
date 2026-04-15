@@ -7405,13 +7405,11 @@ class ToolExecutor:
             return f"Error running agent: {e}"
 
     async def _create_agent(self, tool_input: Dict) -> str:
-        # TODO: replace with tier-based permission check once agent ranks
-        # exist — master agent (rank 1) will be allowed to create sub-agents
-        # (rank ≥ 2). For now, agent creation is a human-only action.
-        return (
-            "Refused: agents cannot create other agents. "
-            "This is a human-only action for now."
-        )
+        # Only the default agent (maia) can create other agents.
+        if not getattr(self.agent, 'is_default_agent', False):
+            return (
+                "Refused: only the default agent (maia) can create other agents."
+            )
         name = tool_input.get("name", "").strip()
         if not name:
             return "Error: agent name is required."
