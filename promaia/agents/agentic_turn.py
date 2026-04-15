@@ -8546,6 +8546,13 @@ async def agentic_turn(
                 # Execute tool
                 result_text = await tool_executor.execute(tool_use.name, tool_use.input)
 
+            # Log tool call and result for debugging
+            logger.info(
+                f"[agentic] tool={tool_use.name} "
+                f"input={str(tool_use.input)[:200]} "
+                f"result={str(result_text)[:300]}"
+            )
+
             # Handle Think/Act mode switching sentinels (stay in loop)
             if result_text.startswith("__ACT__:"):
                 # Parse: __ACT__:suite1,suite2|["step1","step2"]
@@ -8773,6 +8780,46 @@ async def agentic_turn(
             pass
 
     new_msgs = internal_messages[_initial_msg_count:]
+
+    # Log full turn conversation for debugging
+    try:
+        from promaia.utils.env_writer import get_data_dir
+        import datetime as _dt_log2
+        log_dir = get_data_dir() / "context_logs" / "agentic_turn_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        ts = _dt_log2.datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_path = log_dir / f"{ts}_agentic_full_turn.md"
+        parts = [f"# Agentic Turn Log — {ts}\n"]
+        parts.append(f"Iterations: {max_iterations}, Tool calls: {len(all_tool_calls)}\n")
+        for i, msg in enumerate(new_msgs):
+            role = msg.get("role", "?")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        btype = block.get("type", "?")
+                        if btype == "tool_use":
+                            parts.append(f"## [{i}] {role} → tool_use: {block.get('name')}")
+                            parts.append(f"```json\n{str(block.get('input', ''))[:500]}\n```\n")
+                        elif btype == "tool_result":
+                            result_content = block.get("content", "")
+                            if isinstance(result_content, list):
+                                result_content = " ".join(
+                                    b.get("text", "")[:500] for b in result_content if isinstance(b, dict)
+                                )
+                            parts.append(f"## [{i}] {role} → tool_result ({block.get('tool_use_id', '')[:12]})")
+                            parts.append(f"```\n{str(result_content)[:1000]}\n```\n")
+                        elif btype == "text":
+                            parts.append(f"## [{i}] {role} → text")
+                            parts.append(f"{str(block.get('text', ''))[:500]}\n")
+            elif isinstance(content, str) and content:
+                parts.append(f"## [{i}] {role}")
+                parts.append(f"{content[:500]}\n")
+        log_path.write_text("\n".join(parts))
+        logger.info(f"Full turn log: {log_path}")
+    except Exception as log_err:
+        logger.debug(f"Failed to write turn log: {log_err}")
+
     return AgenticTurnResult(
         response_text=last_text,
         tool_calls_made=all_tool_calls,
