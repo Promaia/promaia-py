@@ -671,9 +671,9 @@ async def run_agentic_turn(
         mcp_tools=mcp_tools,
         agent_calendars=agent_calendars,
     )
-    # Reflect the permission on the shim so downstream code that reads
-    # agent.messaging_enabled sees the truth.
+    # Reflect permissions on the shim so downstream code sees the truth.
     shim.messaging_enabled = messaging_enabled
+    shim.is_default_agent = True  # conversation path is always the default agent (maia)
 
     # Initialize messaging platform if the agent has permission. Reuses the
     # same helper the scheduled/calendar-triggered path uses, so both code
