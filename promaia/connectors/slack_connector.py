@@ -513,17 +513,18 @@ class SlackConnector(BaseConnector):
             self.logger.info("Discovering accessible Slack channels...")
             
             response = self.client.conversations_list(
-                types="public_channel,private_channel,im",
+                types="public_channel,private_channel",
                 exclude_archived=True
             )
-            
+
             channels = response['channels']
             accessible_channels = []
-            
+
             for channel in channels:
+                name = channel.get('name') or channel.get('id')
                 accessible_channels.append({
                     'id': channel['id'],
-                    'name': channel['name'],
+                    'name': name,
                     'is_private': channel.get('is_private', False),
                     'is_member': channel.get('is_member', False),
                     'discovered_at': datetime.now().isoformat()
