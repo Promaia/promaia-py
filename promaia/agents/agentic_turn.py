@@ -7020,7 +7020,8 @@ class ToolExecutor:
 
         definitions = []
         for tool in tools:
-            namespaced = f"mcp__{tool.server_name}__{tool.name}"
+            safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", tool.server_name)
+            namespaced = f"mcp__{safe_name}__{tool.name}"
             self._mcp_tool_map[namespaced] = (tool.server_name, tool.name)
             definitions.append({
                 "name": namespaced,
