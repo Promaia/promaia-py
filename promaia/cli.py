@@ -82,6 +82,9 @@ from promaia.cli.setup_commands import add_setup_commands
 # Import service management commands
 from promaia.cli.service_commands import add_service_commands
 
+# Import MCP management commands
+from promaia.cli.mcp_commands import add_mcp_commands
+
 # Import auth management commands
 from promaia.cli.auth_commands import add_auth_commands
 
@@ -3056,6 +3059,9 @@ def create_parser():
     # Add service management commands
     add_service_commands(subparsers)
 
+    # Add MCP management commands
+    add_mcp_commands(subparsers)
+
     # Add setup wizard command
     add_setup_commands(subparsers)
 
@@ -3525,6 +3531,15 @@ def main():
             args.func(args)
         else:
             print_text("Auth command requires a subcommand. Use 'maia auth --help' for options.", style="red")
+    elif args.command == "mcp":
+        # Handle MCP management commands
+        if hasattr(args, 'mcp_command') and args.mcp_command:
+            if hasattr(args, 'func'):
+                args.func(args)
+            else:
+                print_text(f"No function assigned to mcp command: {args.mcp_command}", style="red")
+        else:
+            print_text("MCP command requires a subcommand. Use 'maia mcp --help' for options.", style="red")
     elif args.command == "services":
         # Handle service management commands
         if hasattr(args, 'func'):

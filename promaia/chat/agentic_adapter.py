@@ -99,7 +99,7 @@ def _load_agent_calendars(workspace: str) -> Dict[str, str]:
         from promaia.gcal.google_calendar import GoogleCalendarManager, google_account_for_workspace
         account = google_account_for_workspace(workspace)
         gcal = GoogleCalendarManager(account=account)
-        calendar_id = gcal.create_agent_calendar(
+        calendar_id = gcal.get_or_create_agent_calendar(
             agent_name="maia",
             description="Maia agent schedule — events created from maia chat",
         )
