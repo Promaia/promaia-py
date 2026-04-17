@@ -99,7 +99,7 @@ def _load_agent_calendars(workspace: str) -> Dict[str, str]:
         from promaia.gcal.google_calendar import GoogleCalendarManager, google_account_for_workspace
         account = google_account_for_workspace(workspace)
         gcal = GoogleCalendarManager(account=account)
-        calendar_id = gcal.create_agent_calendar(
+        calendar_id = gcal.get_or_create_agent_calendar(
             agent_name="maia",
             description="Maia agent schedule — events created from maia chat",
         )
@@ -440,37 +440,8 @@ def build_agentic_system_prompt(
             "to share links — do not construct Notion URLs manually."
         )
 
-    # Build workflow awareness section
-    # Onboarding-only workflows are hidden — maia should use the direct
-    # tools (create_agent, update_agent) instead of start_interview for
-    # agent management since the interview sentinel flow doesn't work in
-    # Slack conversations.
-    _ONBOARDING_ONLY_WORKFLOWS = {"create_agent", "onboarding_agent", "onboard_tutorial"}
+    # Interview workflows disabled outside onboarding flow.
     workflow_section = ""
-    try:
-        from promaia.chat.workflows import list_workflows
-        workflows = [
-            wf for wf in list_workflows()
-            if wf["name"] not in _ONBOARDING_ONLY_WORKFLOWS
-        ]
-        if workflows:
-            lines = [
-                "## Configuration Interviews\n",
-                "You can guide the user through these configuration workflows. "
-                "When the user wants to set up or configure something, call "
-                "`start_interview` with the appropriate workflow name. "
-                "The interview system will provide step-by-step guidance.\n",
-                "Available workflows:",
-            ]
-            for wf in workflows:
-                lines.append(f"- **{wf['name']}**: {wf['description']}")
-            lines.append(
-                "\nTo create or edit agents, use the `create_agent` and "
-                "`update_agent` tools directly — do NOT use start_interview."
-            )
-            workflow_section = "\n".join(lines)
-    except Exception as e:
-        logger.debug(f"Could not load workflows: {e}")
 
     # Apply template substitutions
     filled = template.replace("{agent_name}", "Maia")
@@ -700,9 +671,9 @@ async def run_agentic_turn(
         mcp_tools=mcp_tools,
         agent_calendars=agent_calendars,
     )
-    # Reflect the permission on the shim so downstream code that reads
-    # agent.messaging_enabled sees the truth.
+    # Reflect permissions on the shim so downstream code sees the truth.
     shim.messaging_enabled = messaging_enabled
+    shim.is_default_agent = True  # conversation path is always the default agent (maia)
 
     # Initialize messaging platform if the agent has permission. Reuses the
     # same helper the scheduled/calendar-triggered path uses, so both code

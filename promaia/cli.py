@@ -82,6 +82,9 @@ from promaia.cli.setup_commands import add_setup_commands
 # Import service management commands
 from promaia.cli.service_commands import add_service_commands
 
+# Import MCP management commands
+from promaia.cli.mcp_commands import add_mcp_commands
+
 # Import auth management commands
 from promaia.cli.auth_commands import add_auth_commands
 
@@ -3058,6 +3061,9 @@ def create_parser():
 
     # Add service management commands
     add_service_commands(subparsers)
+
+    # Add MCP management commands
+    add_mcp_commands(subparsers)
 
     # Add setup wizard command
     add_setup_commands(subparsers)

@@ -2436,6 +2436,8 @@ AGENT_TOOL_DEFINITIONS = [
         "description": (
             "Create a new scheduled agent. Provide a name and optionally "
             "databases, mcp_tools, description, prompt, schedule, and messaging config. "
+            "Use allowed_channel_ids to restrict which Slack/Discord channels "
+            "the agent can respond in and read from — get IDs from list_channels first. "
             "Workspace defaults to current. Always confirm with the user first."
         ),
         "input_schema": {
@@ -2478,8 +2480,9 @@ AGENT_TOOL_DEFINITIONS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Slack/Discord channel IDs this agent can respond in "
-                        "and query messages from. Omit for unrestricted access."
+                        "Slack/Discord channel IDs (e.g. ['C0ABC123']) this agent "
+                        "can respond in and query messages from. Get IDs from "
+                        "list_channels. Omit for unrestricted access."
                     )
                 },
             },
@@ -2755,8 +2758,8 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     # Channel tools — always available
     tools.extend(CHANNEL_TOOL_DEFINITIONS)
 
-    # Interview tools — always available
-    tools.extend(_build_interview_tool_definitions())
+    # Interview tools — disabled outside onboarding flow
+    # tools.extend(_build_interview_tool_definitions())
 
     # UI tools — always available
     tools.append(SHOW_SELECTION_TOOL_DEFINITION)
@@ -2869,7 +2872,7 @@ def _build_tool_suite_registry(agent, has_platform: bool = False) -> Dict[str, D
         + list(AGENT_TOOL_DEFINITIONS)
         + list(CHANNEL_TOOL_DEFINITIONS)
         + list(WORKFLOW_TOOL_DEFINITIONS)
-        + list(_build_interview_tool_definitions())
+        # + list(_build_interview_tool_definitions())  # disabled outside onboarding
         + [SHOW_SELECTION_TOOL_DEFINITION]
         + [SYNC_DATABASE_TOOL_DEFINITION, LIST_DATABASES_TOOL_DEFINITION, RENAME_DATABASE_TOOL_DEFINITION]
         + [WORKSPACE_FILES_TOOL_DEFINITION]
@@ -2916,26 +2919,8 @@ def _build_suite_index(suite_registry: Dict, mcp_suites: Dict = None, workspace:
     except Exception:
         pass
 
-    # Interview workflows (guided configuration flows)
-    # Onboarding-only workflows are hidden — agent should use create_agent /
-    # update_agent tools directly (the interview sentinel flow doesn't work
-    # in Slack conversations).
-    _ONBOARDING_ONLY = {"create_agent", "onboarding_agent", "onboard_tutorial"}
-    try:
-        from promaia.chat.workflows import list_workflows
-        interviews = [wf for wf in list_workflows() if wf["name"] not in _ONBOARDING_ONLY]
-        if interviews:
-            lines.append("")
-            lines.append("## Configuration Interviews\n")
-            lines.append("Use `start_interview(workflow=\"name\")` to begin.\n")
-            for wf in interviews:
-                lines.append(f"- **{wf['name']}**: {wf['description']}")
-            lines.append(
-                "\nTo create or edit agents, use the `create_agent` and "
-                "`update_agent` tools directly — do NOT use start_interview."
-            )
-    except Exception:
-        pass
+    # Interview workflows disabled outside onboarding flow.
+    # start_interview tool is not available — use create_agent / update_agent directly.
 
     return "\n".join(lines)
 
@@ -7035,7 +7020,8 @@ class ToolExecutor:
 
         definitions = []
         for tool in tools:
-            namespaced = f"mcp__{tool.server_name}__{tool.name}"
+            safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", tool.server_name)
+            namespaced = f"mcp__{safe_name}__{tool.name}"
             self._mcp_tool_map[namespaced] = (tool.server_name, tool.name)
             definitions.append({
                 "name": namespaced,
@@ -7518,7 +7504,7 @@ class ToolExecutor:
                 cal_desc = f"Automated schedule for {name} agent"
                 if description:
                     cal_desc += f"\n\n{description}"
-                calendar_id = calendar_mgr.create_agent_calendar(
+                calendar_id = calendar_mgr.get_or_create_agent_calendar(
                     agent_name=name, description=cal_desc
                 )
                 if calendar_id:
@@ -8243,8 +8229,8 @@ async def agentic_turn(
             for td in WORKFLOW_TOOL_DEFINITIONS:
                 if td["name"] in ("list_saved_workflows", "get_workflow_details"):
                     iteration_tools.append(td)
-            # Interview tools available in Think mode (launching guided flows)
-            iteration_tools.extend(_build_interview_tool_definitions())
+            # Interview tools disabled outside onboarding flow
+            # iteration_tools.extend(_build_interview_tool_definitions())
             iteration_tools.append(ACT_TOOL_DEFINITION)
 
         elif use_think_act and act_mode:
@@ -8561,6 +8547,13 @@ async def agentic_turn(
                 # Execute tool
                 result_text = await tool_executor.execute(tool_use.name, tool_use.input)
 
+            # Log tool call and result for debugging
+            logger.info(
+                f"[agentic] tool={tool_use.name} "
+                f"input={str(tool_use.input)[:200]} "
+                f"result={str(result_text)[:300]}"
+            )
+
             # Handle Think/Act mode switching sentinels (stay in loop)
             if result_text.startswith("__ACT__:"):
                 # Parse: __ACT__:suite1,suite2|["step1","step2"]
@@ -8788,6 +8781,46 @@ async def agentic_turn(
             pass
 
     new_msgs = internal_messages[_initial_msg_count:]
+
+    # Log full turn conversation for debugging
+    try:
+        from promaia.utils.env_writer import get_data_dir
+        import datetime as _dt_log2
+        log_dir = get_data_dir() / "context_logs" / "agentic_turn_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        ts = _dt_log2.datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_path = log_dir / f"{ts}_agentic_full_turn.md"
+        parts = [f"# Agentic Turn Log — {ts}\n"]
+        parts.append(f"Iterations: {max_iterations}, Tool calls: {len(all_tool_calls)}\n")
+        for i, msg in enumerate(new_msgs):
+            role = msg.get("role", "?")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        btype = block.get("type", "?")
+                        if btype == "tool_use":
+                            parts.append(f"## [{i}] {role} → tool_use: {block.get('name')}")
+                            parts.append(f"```json\n{str(block.get('input', ''))[:500]}\n```\n")
+                        elif btype == "tool_result":
+                            result_content = block.get("content", "")
+                            if isinstance(result_content, list):
+                                result_content = " ".join(
+                                    b.get("text", "")[:500] for b in result_content if isinstance(b, dict)
+                                )
+                            parts.append(f"## [{i}] {role} → tool_result ({block.get('tool_use_id', '')[:12]})")
+                            parts.append(f"```\n{str(result_content)[:1000]}\n```\n")
+                        elif btype == "text":
+                            parts.append(f"## [{i}] {role} → text")
+                            parts.append(f"{str(block.get('text', ''))[:500]}\n")
+            elif isinstance(content, str) and content:
+                parts.append(f"## [{i}] {role}")
+                parts.append(f"{content[:500]}\n")
+        log_path.write_text("\n".join(parts))
+        logger.info(f"Full turn log: {log_path}")
+    except Exception as log_err:
+        logger.debug(f"Failed to write turn log: {log_err}")
+
     return AgenticTurnResult(
         response_text=last_text,
         tool_calls_made=all_tool_calls,

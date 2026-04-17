@@ -1,8 +1,8 @@
 """
 CLI commands for MCP (Model Context Protocol) server management.
 
-Provides `maia mcp test` to verify connectivity and tool discovery
-for configured MCP servers.
+Provides `maia mcp test`, `maia mcp list`, and `maia mcp remove` to manage
+configured MCP servers.
 """
 import asyncio
 import json
@@ -60,10 +60,23 @@ def add_mcp_commands(subparsers):
     )
     list_parser.set_defaults(func=handle_mcp_list)
 
+    # maia mcp remove <server_name>
+    remove_parser = mcp_subparsers.add_parser(
+        "remove",
+        help="Remove an MCP server from configuration",
+    )
+    remove_parser.add_argument(
+        "server_name",
+        nargs="?",
+        default=None,
+        help="Name of the server to remove (interactive picker if omitted)",
+    )
+    remove_parser.set_defaults(func=handle_mcp_remove)
+
     return mcp_parser
 
 
-# ── helpers ──────────────────────────────────────────────────────────
+# -- helpers ---------------------------------------------------------------
 
 def _find_mcp_config_path() -> Optional[Path]:
     """Locate mcp_servers.json using the shared search logic."""
@@ -100,7 +113,7 @@ def _validate_config(config) -> list:
     return errors
 
 
-# ── maia mcp list ────────────────────────────────────────────────────
+# -- maia mcp list ---------------------------------------------------------
 
 def handle_mcp_list(args):
     """List configured MCP servers and their status."""
@@ -149,7 +162,74 @@ def handle_mcp_list(args):
     console.print(table)
 
 
-# ── maia mcp test ────────────────────────────────────────────────────
+# -- maia mcp remove -------------------------------------------------------
+
+def handle_mcp_remove(args):
+    """Remove an MCP server from the configuration file."""
+    from rich.console import Console
+
+    console = Console()
+    config_path = _find_mcp_config_path()
+
+    if not config_path:
+        console.print("[red]No mcp_servers.json found.[/red]")
+        return
+
+    from promaia.config.mcp_servers import McpServerManager
+
+    manager = McpServerManager(str(config_path))
+    name = args.server_name
+
+    if name is None:
+        # Interactive selection
+        available = sorted(manager.servers.keys())
+        if not available:
+            console.print("[yellow]No MCP servers configured.[/yellow]")
+            return
+
+        console.print("\nConfigured MCP servers:\n")
+        for i, srv in enumerate(available, 1):
+            cfg = manager.servers[srv]
+            desc = f"  [dim]{cfg.description}[/dim]" if cfg.description else ""
+            console.print(f"  {i}. [bold]{srv}[/bold]{desc}")
+
+        console.print()
+        try:
+            choice = input(f"Select server to remove (1-{len(available)}), or 'q' to cancel: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]Cancelled.[/dim]")
+            return
+
+        if choice.lower() in ("q", ""):
+            console.print("[dim]Cancelled.[/dim]")
+            return
+
+        try:
+            idx = int(choice) - 1
+            if not 0 <= idx < len(available):
+                raise ValueError
+            name = available[idx]
+        except ValueError:
+            console.print(f"[red]Invalid selection: {choice}[/red]")
+            return
+
+    if name not in manager.servers:
+        console.print(f"[red]Server '{name}' not found.[/red]")
+        available = sorted(manager.servers.keys())
+        if available:
+            console.print(f"Available servers: {', '.join(available)}")
+        return
+
+    manager.remove_server(name)
+    console.print(f"[green]Removed[/green] MCP server [bold]{name}[/bold]")
+    remaining = sorted(manager.servers.keys())
+    if remaining:
+        console.print(f"Remaining servers: {', '.join(remaining)}")
+    else:
+        console.print("[dim]No MCP servers remaining.[/dim]")
+
+
+# -- maia mcp test ----------------------------------------------------------
 
 def handle_mcp_test(args):
     """Test MCP server connectivity: handshake + list tools."""
@@ -191,7 +271,6 @@ async def _run_mcp_test(args):
             return
         to_test = {target_name: servers[target_name]}
     else:
-        # Test all enabled servers
         to_test = {
             n: c for n, c in servers.items() if c.get("enabled", True)
         }
@@ -204,7 +283,7 @@ async def _run_mcp_test(args):
 
     for name, cfg in to_test.items():
         await _test_single_server(console, name, cfg, timeout, verbose)
-        console.print()  # blank line between servers
+        console.print()
 
 
 async def _test_single_server(console, name: str, cfg: dict, timeout: int, verbose: bool):
@@ -216,7 +295,7 @@ async def _test_single_server(console, name: str, cfg: dict, timeout: int, verbo
     transport = cfg.get("transport", "stdio")
     description = cfg.get("description", "")
 
-    console.print(f"[bold]● {name}[/bold]", end="")
+    console.print(f"[bold]\u25cf {name}[/bold]", end="")
     if description:
         console.print(f"  [dim]{description}[/dim]")
     else:
@@ -224,16 +303,15 @@ async def _test_single_server(console, name: str, cfg: dict, timeout: int, verbo
 
     if transport == "streamable_http":
         url = cfg.get("url", "")
-        console.print(f"  Transport: streamable_http → {url}")
+        console.print(f"  Transport: streamable_http \u2192 {url}")
     else:
         cmd = cfg.get("command", [])
         extra_args = cfg.get("args", [])
         display_cmd = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
         if extra_args:
             display_cmd += " " + " ".join(extra_args)
-        console.print(f"  Transport: stdio → {display_cmd}")
+        console.print(f"  Transport: stdio \u2192 {display_cmd}")
 
-    # Build a McpServerConfig so we can use get_resolved_env()
     server_config = McpServerConfig(
         name=name,
         description=description,
@@ -247,15 +325,13 @@ async def _test_single_server(console, name: str, cfg: dict, timeout: int, verbo
         url=cfg.get("url"),
     )
 
-    # Validate config
     errors = _validate_config(server_config)
     if errors:
         for err in errors:
             console.print(f"  [red]Config error:[/red] {err}")
-        console.print(f"  [red]FAIL[/red] — config validation failed")
+        console.print(f"  [red]FAIL[/red] \u2014 config validation failed")
         return
 
-    # Attempt connection
     protocol = McpProtocolClient()
     connect_kwargs = {
         "transport": transport,
@@ -276,33 +352,30 @@ async def _test_single_server(console, name: str, cfg: dict, timeout: int, verbo
         success = await protocol.connect(**connect_kwargs)
     except Exception as exc:
         elapsed = time.monotonic() - t0
-        console.print(f"  [red]FAIL[/red] — connection error ({elapsed:.1f}s): {exc}")
+        console.print(f"  [red]FAIL[/red] \u2014 connection error ({elapsed:.1f}s): {exc}")
         return
 
     elapsed = time.monotonic() - t0
 
     if not success:
-        console.print(f"  [red]FAIL[/red] — could not connect ({elapsed:.1f}s)")
+        console.print(f"  [red]FAIL[/red] \u2014 could not connect ({elapsed:.1f}s)")
         await protocol.disconnect()
         return
 
-    # Connection succeeded — show server info
     info = protocol.get_server_info() or {}
     server_name_reported = info.get("name", "unknown")
-    server_version = info.get("version", "—")
+    server_version = info.get("version", "\u2014")
     console.print(
-        f"  [green]Connected[/green] in {elapsed:.1f}s — "
+        f"  [green]Connected[/green] in {elapsed:.1f}s \u2014 "
         f"server: {server_name_reported} v{server_version}"
     )
 
-    # Show capabilities summary
     caps = protocol.get_capabilities() or {}
     if verbose and caps:
         cap_keys = [k for k, v in caps.items() if v]
         if cap_keys:
             console.print(f"  Capabilities: {', '.join(cap_keys)}")
 
-    # List tools
     try:
         tools = await protocol.list_tools()
     except Exception as exc:
@@ -321,7 +394,6 @@ async def _test_single_server(console, name: str, cfg: dict, timeout: int, verbo
         for tool in tools:
             tool_name = tool.get("name", "?")
             tool_desc = tool.get("description", "")
-            # Truncate long descriptions unless verbose
             if not verbose and len(tool_desc) > 80:
                 tool_desc = tool_desc[:77] + "..."
 
@@ -336,7 +408,7 @@ async def _test_single_server(console, name: str, cfg: dict, timeout: int, verbo
                         param_strs.append(f"{pname}{marker}")
                     params = ", ".join(param_strs)
                 else:
-                    params = "—"
+                    params = "\u2014"
                 table.add_row(tool_name, tool_desc, params)
             else:
                 table.add_row(tool_name, tool_desc)
@@ -345,6 +417,5 @@ async def _test_single_server(console, name: str, cfg: dict, timeout: int, verbo
     elif tools is not None:
         console.print("  Tools: [dim]none advertised[/dim]")
 
-    # Clean up
     await protocol.disconnect()
-    console.print(f"  [green]OK[/green] — server is reachable and responding")
+    console.print(f"  [green]OK[/green] \u2014 server is reachable and responding")

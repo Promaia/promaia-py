@@ -229,6 +229,14 @@ class McpServerManager:
         self._save()
         return server
 
+    def remove_server(self, name: str) -> bool:
+        """Remove a server by name and persist to disk.  Returns True if removed."""
+        if name not in self.servers:
+            return False
+        del self.servers[name]
+        self._save()
+        return True
+
     def _save(self) -> None:
         """Write current server configs back to disk."""
         data = {"servers": {}}
