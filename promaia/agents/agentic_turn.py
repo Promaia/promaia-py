@@ -8247,14 +8247,25 @@ async def agentic_turn(
                 budget_note += "\n".join(instr_lines)
 
             # Act mode tools: loaded suites + notepad + memory + mark_step_done + done
+            # Dedupe by tool name: suites can overlap (e.g. "google" aggregates
+            # gmail/calendar/sheets/drive, so act(suites=["google","sheets"]) would
+            # otherwise send sheets tools twice and fail with "tools: Tool names
+            # must be unique").
             iteration_tools = []
+            seen_tool_names: set[str] = set()
+            def _add_tool(td: Dict) -> None:
+                name = td.get("name")
+                if name and name not in seen_tool_names:
+                    seen_tool_names.add(name)
+                    iteration_tools.append(td)
             for suite_name in act_suites:
-                iteration_tools.extend(_get_suite_tools(suite_name, suite_registry, mcp_suites))
-            iteration_tools.append(NOTEPAD_TOOL_DEFINITION)
-            iteration_tools.append(MEMORY_TOOL_DEFINITION)
+                for td in _get_suite_tools(suite_name, suite_registry, mcp_suites):
+                    _add_tool(td)
+            _add_tool(NOTEPAD_TOOL_DEFINITION)
+            _add_tool(MEMORY_TOOL_DEFINITION)
             if act_instructions:
-                iteration_tools.append(MARK_STEP_DONE_TOOL_DEFINITION)
-            iteration_tools.append(DONE_TOOL_DEFINITION)
+                _add_tool(MARK_STEP_DONE_TOOL_DEFINITION)
+            _add_tool(DONE_TOOL_DEFINITION)
 
         else:
             # Legacy mode (no suite registry): all tools, all context
