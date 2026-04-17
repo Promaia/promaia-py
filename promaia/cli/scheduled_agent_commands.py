@@ -546,7 +546,7 @@ async def handle_agent_add(args):
         if agent_config.description:
             calendar_description += f"\n\n{agent_config.description}"
 
-        calendar_id = calendar_mgr.create_agent_calendar(
+        calendar_id = calendar_mgr.get_or_create_agent_calendar(
             agent_name=agent_config.name,
             description=calendar_description
         )
@@ -866,23 +866,15 @@ async def handle_agent_reset_default(args):
             if google_account:
                 calendar_mgr = get_calendar_manager(account=google_account)
 
-                # Check for existing maia calendar to avoid duplicates
-                existing_calendars = calendar_mgr.list_agent_calendars()
-                maia_cal = next((c for c in existing_calendars if c.get("summary") == "maia"), None)
-
-                if maia_cal:
-                    agent.calendar_id = maia_cal["id"]
-                    console.print(f"   📅 Reusing existing 'maia' calendar: {maia_cal['id'][:20]}...")
+                calendar_id = calendar_mgr.get_or_create_agent_calendar(
+                    agent_name="maia",
+                    description="Maia agent schedule — events created from maia chat",
+                )
+                if calendar_id:
+                    agent.calendar_id = calendar_id
+                    console.print(f"   📅 Calendar ready: {calendar_id[:20]}...")
                 else:
-                    calendar_id = calendar_mgr.create_agent_calendar(
-                        agent_name="maia",
-                        description="Maia agent schedule — events created from maia chat",
-                    )
-                    if calendar_id:
-                        agent.calendar_id = calendar_id
-                        console.print(f"   📅 Created new calendar: {calendar_id[:20]}...")
-                    else:
-                        console.print("   ⚠️  Could not create calendar (auth issue?)", style="yellow")
+                    console.print("   ⚠️  Could not create calendar (auth issue?)", style="yellow")
             else:
                 console.print("   ℹ️  No Google account found — skipping calendar", style="dim")
         except Exception as e:
@@ -1279,7 +1271,7 @@ async def handle_calendar_sync(args):
             if agent.description:
                 calendar_description += f"\n\n{agent.description}"
 
-            calendar_id = calendar_mgr.create_agent_calendar(
+            calendar_id = calendar_mgr.get_or_create_agent_calendar(
                 agent_name=agent.name,
                 description=calendar_description
             )

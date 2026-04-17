@@ -468,6 +468,32 @@ class GoogleCalendarManager:
             logger.error(f"Error creating calendar: {e}")
             return None
 
+    def get_or_create_agent_calendar(
+        self,
+        agent_name: str,
+        description: str = ""
+    ) -> Optional[str]:
+        """
+        Return the id of an owned calendar whose summary matches agent_name,
+        or create one if none exists. Prevents duplicate calendars when setup
+        or sync flows re-run.
+        """
+        if not self.service:
+            if not self.authenticate():
+                return None
+
+        try:
+            calendar_list = self.service.calendarList().list().execute()
+            for cal in calendar_list.get('items', []):
+                if cal.get('summary') == agent_name and cal.get('accessRole') == 'owner':
+                    cid = cal.get('id')
+                    logger.info(f"Reusing existing calendar '{agent_name}' with ID: {cid}")
+                    return cid
+        except Exception as e:
+            logger.error(f"Error checking for existing calendar: {e}")
+
+        return self.create_agent_calendar(agent_name=agent_name, description=description)
+
     def delete_agent_calendar(self, calendar_id: str) -> bool:
         """
         Delete an agent's calendar.

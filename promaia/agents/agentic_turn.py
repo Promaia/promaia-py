@@ -7504,7 +7504,7 @@ class ToolExecutor:
                 cal_desc = f"Automated schedule for {name} agent"
                 if description:
                     cal_desc += f"\n\n{description}"
-                calendar_id = calendar_mgr.create_agent_calendar(
+                calendar_id = calendar_mgr.get_or_create_agent_calendar(
                     agent_name=name, description=cal_desc
                 )
                 if calendar_id:
