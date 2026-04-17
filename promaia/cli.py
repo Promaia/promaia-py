@@ -88,9 +88,6 @@ from promaia.cli.mcp_commands import add_mcp_commands
 # Import auth management commands
 from promaia.cli.auth_commands import add_auth_commands
 
-# Import MCP management commands
-from promaia.cli.mcp_commands import add_mcp_commands
-
 # Import conversation management commands
 from promaia.cli.conversation_commands import (
     add_conversation_commands, add_conversation_commands_to_existing_parser
@@ -3070,9 +3067,6 @@ def create_parser():
 
     # Add auth management commands
     add_auth_commands(subparsers)
-
-    # Add MCP management commands
-    add_mcp_commands(subparsers)
 
     # Help alias (so `maia help` doesn't error)
     subparsers.add_parser('help', help='Show this help message')
