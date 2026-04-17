@@ -77,18 +77,19 @@ jobs:
           script: |
             set -euo pipefail
             cd /root/promaia
-            docker compose down --remove-orphans || true
+            docker compose pull
+            # Recreate every service except maia-mail so mail sessions stay up.
+            SERVICES=$(docker compose config --services | grep -v '^maia-mail$' | tr '\n' ' ')
+            docker compose up -d --no-deps --force-recreate --remove-orphans $SERVICES
             docker builder prune -f
             docker image prune -a -f
             df -h /
-            docker compose pull
-            docker compose up -d --remove-orphans
             sleep 5
             RUNNING=$(docker compose ps --status running -q | wc -l)
-            EXPECTED=$(docker compose ps -q | wc -l)
+            EXPECTED=$(docker compose config --services | wc -l)
             if [ "$RUNNING" -lt "$EXPECTED" ]; then
-              echo "ERROR: Only $RUNNING/$EXPECTED containers running"
+              echo "ERROR: Only $RUNNING/$EXPECTED services running"
               docker compose ps
               exit 1
             fi
-            echo "Deployed $RUNNING containers from $(docker inspect --format='{{.Id}}' ghcr.io/promaia/promaia-py:latest | head -c 12)"
+            echo "Deployed $RUNNING services from $(docker inspect --format='{{.Id}}' ghcr.io/promaia/promaia-py:latest | head -c 12)"
