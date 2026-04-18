@@ -848,6 +848,16 @@ def create_slack_bot():
         """Acknowledge message_changed events (from our edits) to suppress warnings."""
         pass
 
+    @app.event({"type": "message", "subtype": "file_share"})
+    async def handle_file_share(event, say, client):
+        """Route file_share events (image uploads in DMs/threads) through handle_message.
+
+        Slack Bolt's @app.message() matcher only fires on subtype-less messages,
+        so without this handler file_share events would 404 and images would be
+        silently dropped.
+        """
+        await handle_message(event, say, client)
+
     # NOTE: reaction_added handler is defined below, after /maia command,
     # as handle_reaction_added_v2 (handles both agent picks and t2c controls)
 
