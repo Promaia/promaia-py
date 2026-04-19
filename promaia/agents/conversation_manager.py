@@ -1173,6 +1173,36 @@ class ConversationManager:
         else:
             return [context_msg]
 
+    async def get_dm_conversation(
+        self,
+        platform: str,
+        channel_id: str,
+    ) -> Optional[ConversationState]:
+        """Look up the most-recent non-stopped DM conversation for a channel.
+
+        In DMs, successive root-level messages from the user should land on
+        the same conversation — a 1:1 DM is one ongoing exchange, not many
+        per-message threads. Same thread, same conversation: for DMs the
+        channel IS the thread.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT * FROM conversations
+                WHERE platform = ? AND channel_id = ?
+                AND conversation_type = 'tag_to_chat'
+                AND status IN ('dormant', 'active', 'paused')
+                ORDER BY last_message_at DESC
+                LIMIT 1
+            """, (platform, channel_id))
+
+            row = cursor.fetchone()
+            if row:
+                return self._row_to_state(dict(row))
+            return None
+
     async def get_tag_to_chat_conversation(
         self,
         platform: str,
