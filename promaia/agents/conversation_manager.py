@@ -1178,12 +1178,13 @@ class ConversationManager:
         platform: str,
         channel_id: str,
     ) -> Optional[ConversationState]:
-        """Look up the most-recent non-stopped DM conversation for a channel.
+        """Look up the root-level DM conversation for a channel.
 
-        In DMs, successive root-level messages from the user should land on
-        the same conversation — a 1:1 DM is one ongoing exchange, not many
-        per-message threads. Same thread, same conversation: for DMs the
-        channel IS the thread.
+        Same thread, same conversation. In a 1:1 DM, the channel root scroll
+        is one conversation, and each Slack thread the user opens inside it
+        is its own separate conversation. Root-DM conversations are marked
+        by thread_id IS NULL (no Slack thread anchors them). Thread
+        conversations are routed separately via their thread_ts.
         """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -1192,6 +1193,7 @@ class ConversationManager:
             cursor.execute("""
                 SELECT * FROM conversations
                 WHERE platform = ? AND channel_id = ?
+                AND thread_id IS NULL
                 AND conversation_type = 'tag_to_chat'
                 AND status IN ('dormant', 'active', 'paused')
                 ORDER BY last_message_at DESC

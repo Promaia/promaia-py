@@ -533,8 +533,9 @@ def create_slack_bot():
                     logger.info(f"Woke dormant thread {thread_ts[:12]} with new message")
                     return
 
-            # 2b. Dormant DM conversation? Wake the most recent one for this channel
-            # so successive root DMs stay in one continuous conversation.
+            # 2b. Dormant root-DM conversation? Wake it for continuity.
+            # Only matches rows with thread_id IS NULL — Slack threads inside
+            # this DM are their own conversations routed via thread_ts above.
             if is_1on1_dm:
                 dm_conv = await conv_manager.get_dm_conversation(
                     platform='slack', channel_id=channel_id,
@@ -543,14 +544,12 @@ def create_slack_bot():
                     loop = _start_loop(
                         conversation_id=dm_conv.conversation_id,
                         channel_id=channel_id,
-                        thread_id=dm_conv.thread_id or channel_id,
+                        thread_id=None,
                         agent_id=dm_conv.agent_id,
                         is_wake=True,
                         is_dm=True,
                         loop_key=channel_id,
                     )
-                    if dm_conv.context and dm_conv.context.get('thread_parent_message_id'):
-                        loop.thread_parent_message_id = dm_conv.context['thread_parent_message_id']
                     username = await _get_username(client, user_id)
                     loop.add_message(
                         user_id=user_id,
@@ -560,18 +559,19 @@ def create_slack_bot():
                         images=images,
                     )
                     asyncio.create_task(loop.run())
-                    logger.info(f"Woke dormant DM {dm_conv.conversation_id[:24]}")
+                    logger.info(f"Woke dormant root-DM {dm_conv.conversation_id[:24]}")
                     return
 
-            # 3. DMs: no existing conversation — create a new one
+            # 3. DMs: no existing root conversation — create one at the channel root.
+            # thread_id=None so replies post un-threaded and future root messages
+            # in this channel wake this conversation via path 2b.
             if is_1on1_dm and default_agent:
                 username = await _get_username(client, user_id)
-                dm_thread_id = message['ts']  # User's message becomes the thread parent
 
                 conv_id = f"slack_dm_{channel_id}_{int(datetime.now(timezone.utc).timestamp())}"
                 agent_id = default_agent
 
-                logger.info(f"New DM from {user_id} ({username}), threading off {dm_thread_id[:12]}")
+                logger.info(f"New root-DM from {user_id} ({username}) in {channel_id}")
                 now = datetime.now(timezone.utc).isoformat()
                 dm_conversation = ConversationState(
                     conversation_id=conv_id,
@@ -579,7 +579,7 @@ def create_slack_bot():
                     platform='slack',
                     channel_id=channel_id,
                     user_id=user_id,
-                    thread_id=dm_thread_id,
+                    thread_id=None,
                     status='active',
                     last_message_at=now,
                     messages=[],
@@ -595,7 +595,7 @@ def create_slack_bot():
                 loop = _start_loop(
                     conversation_id=conv_id,
                     channel_id=channel_id,
-                    thread_id=dm_thread_id,
+                    thread_id=None,
                     agent_id=agent_id,
                     is_dm=True,
                     loop_key=channel_id,
