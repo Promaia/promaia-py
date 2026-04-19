@@ -343,6 +343,37 @@ def create_slack_bot():
         """Remove loop from registry when it goes dormant/stopped."""
         active_loops.pop(thread_id, None)
 
+    async def _save_to_kb(message: dict, channel_id: str, username: str) -> None:
+        """Persist a Slack message to the KB synchronously (save-at-send-time).
+
+        Ensures thread context never races the periodic sync — every message
+        the bot receives or posts is in the KB before the next response turn
+        reads thread history. Silently no-ops on failure; the periodic sync
+        remains as backup.
+        """
+        try:
+            from promaia.connectors.slack_connector import SlackConnector
+            from promaia.storage.unified_storage import get_unified_storage
+            from promaia.config.databases import get_database_config
+
+            db_config = get_database_config("slack", workspace=None)
+            if not db_config:
+                return
+            storage = get_unified_storage()
+            connector = SlackConnector({
+                "database_id": db_config.database_id,
+                "bot_token": bot_token,
+            })
+            await connector.save_one_message(
+                message=message,
+                channel_id=channel_id,
+                storage=storage,
+                db_config=db_config,
+                username=username,
+            )
+        except Exception as e:
+            logger.debug(f"save-at-send-time failed (non-fatal): {e}")
+
     async def _get_username(client, user_id: str) -> str:
         """Resolve Slack user ID to display name."""
         try:
@@ -493,12 +524,18 @@ def create_slack_bot():
 
             logger.info(f"Message from {user_id} in {channel_id}: {text[:50]}...")
 
+            # Resolve username once and persist the inbound message to the KB
+            # before routing. Save-at-send-time keeps thread history durable
+            # across dormancy gaps without waiting on the periodic sync.
+            username = await _get_username(client, user_id)
+            if is_1on1_dm or thread_ts:
+                await _save_to_kb(message, channel_id, username)
+
             # 1. Active tag-to-chat loop? Feed message directly.
             loop_key = thread_ts
             if loop_key and loop_key in active_loops:
                 loop = active_loops[loop_key]
                 if loop.state.status != "stopped":
-                    username = await _get_username(client, user_id)
                     loop.add_message(
                         user_id=user_id,
                         username=username,
@@ -513,7 +550,6 @@ def create_slack_bot():
             if thread_ts:
                 loop = await _wake_dormant_thread(thread_ts, channel_id)
                 if loop:
-                    username = await _get_username(client, user_id)
                     loop.add_message(
                         user_id=user_id,
                         username=username,
@@ -527,7 +563,6 @@ def create_slack_bot():
 
             # 3. DMs: thread off the user's message (like channel @mentions)
             if is_1on1_dm and default_agent:
-                username = await _get_username(client, user_id)
                 dm_thread_id = message['ts']  # User's message becomes the thread parent
 
                 conv_id = f"slack_dm_{channel_id}_{int(datetime.now(timezone.utc).timestamp())}"
@@ -602,6 +637,11 @@ def create_slack_bot():
             bot_user_id = auth_result['user_id']
 
             logger.info(f"Bot mentioned in {channel_id} by {user_id}: {text[:50]}...")
+
+            # Persist the mention to the KB immediately so the thread history
+            # is durable before the response loop reads it.
+            mention_username = await _get_username(client, user_id)
+            await _save_to_kb(event, channel_id, mention_username)
 
             # Parse agent name from message
             requested_agent, query = parse_agent_request(text, available_agent_names, bot_user_id)

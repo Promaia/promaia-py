@@ -770,27 +770,30 @@ class TagToChatLoop:
     async def _generate_response(self, on_tool_activity=None) -> str:
         """Generate the actual AI response using the conversation manager."""
         try:
-            # Sync this channel/DM to KB before generating response
+            # Sync this channel/DM to KB as a safety net — save-at-send-time
+            # already wrote the current turn's inbound/outbound messages, so
+            # this only backfills anything the event path missed.
             await self._sync_channel_to_kb()
 
             # Load context from KB
             thread_context = await self._build_thread_context()
 
-            # Inject channel/DM history as a named source so the agent sees it
+            # Refresh the thread/DM history source every turn so the agent
+            # sees the latest messages. Previously this only seeded on the
+            # first turn, which froze stale (often empty) context forever.
             if thread_context:
                 state = await self.conv_manager._load_state(self.state.conversation_id)
                 if state:
                     source_name = f"slack_{'thread' if self.state.thread_id else 'dm'}"
-                    existing_sources = state.context.get('source_states', {})
-                    if source_name not in existing_sources:
-                        existing_sources[source_name] = {
-                            "content": thread_context,
-                            "on": True,
-                            "page_count": thread_context.count('\n') + 1,
-                            "source": "channel_context",
-                        }
-                        state.context['source_states'] = existing_sources
-                        await self.conv_manager._save_state(state)
+                    sources = state.context.get('source_states', {})
+                    sources[source_name] = {
+                        "content": thread_context,
+                        "on": True,
+                        "page_count": thread_context.count('\n') + 1,
+                        "source": "channel_context",
+                    }
+                    state.context['source_states'] = sources
+                    await self.conv_manager._save_state(state)
 
             response = await self.conv_manager.handle_batched_messages(
                 conversation_id=self.state.conversation_id,
@@ -917,6 +920,7 @@ class TagToChatLoop:
                 channel_id=self.state.channel_id,
                 content=content,
                 thread_id=self.state.thread_id,
+                transient=True,
             )
             return meta.message_id
         except Exception as e:
