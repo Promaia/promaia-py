@@ -405,14 +405,8 @@ def create_slack_bot():
         agent_id: str,
         is_wake: bool = False,
         is_dm: bool = False,
-        loop_key: Optional[str] = None,
     ) -> TagToChatLoop:
-        """Create and register a TagToChatLoop, return it (caller starts it).
-
-        loop_key controls the active_loops routing key. Defaults to thread_id.
-        DMs pass channel_id so successive root-level DM messages route back
-        to the same loop without a Slack thread.
-        """
+        """Create and register a TagToChatLoop, return it (caller starts it)."""
         loop = TagToChatLoop(
             conversation_id=conversation_id,
             channel_id=channel_id,
@@ -424,9 +418,9 @@ def create_slack_bot():
             is_wake=is_wake,
             is_dm=is_dm,
         )
-        registry_key = loop_key or thread_id
-        active_loops[registry_key] = loop
-        loop.on_done(lambda: active_loops.pop(registry_key, None))
+        loop_key = thread_id
+        active_loops[loop_key] = loop
+        loop.on_done(lambda: active_loops.pop(loop_key, None))
         return loop
 
     async def _wake_dormant_thread(
@@ -500,11 +494,9 @@ def create_slack_bot():
             logger.info(f"Message from {user_id} in {channel_id}: {text[:50]}...")
 
             # 1. Active tag-to-chat loop? Feed message directly.
-            # For DMs without a thread, route by channel_id so successive root
-            # DMs land on the same loop.
-            active_key = thread_ts or (channel_id if is_1on1_dm else None)
-            if active_key and active_key in active_loops:
-                loop = active_loops[active_key]
+            loop_key = thread_ts
+            if loop_key and loop_key in active_loops:
+                loop = active_loops[loop_key]
                 if loop.state.status != "stopped":
                     username = await _get_username(client, user_id)
                     loop.add_message(
@@ -514,7 +506,7 @@ def create_slack_bot():
                         timestamp=message['ts'],
                         images=images,
                     )
-                    logger.info(f"Fed message to active loop for {active_key[:12]}")
+                    logger.info(f"Fed message to active loop for {loop_key[:12]}")
                     return
 
             # 2. Dormant tag-to-chat thread? Wake it up.
@@ -533,45 +525,15 @@ def create_slack_bot():
                     logger.info(f"Woke dormant thread {thread_ts[:12]} with new message")
                     return
 
-            # 2b. Dormant root-DM conversation? Wake it for continuity.
-            # Only matches rows with thread_id IS NULL — Slack threads inside
-            # this DM are their own conversations routed via thread_ts above.
-            if is_1on1_dm:
-                dm_conv = await conv_manager.get_dm_conversation(
-                    platform='slack', channel_id=channel_id,
-                )
-                if dm_conv:
-                    loop = _start_loop(
-                        conversation_id=dm_conv.conversation_id,
-                        channel_id=channel_id,
-                        thread_id=None,
-                        agent_id=dm_conv.agent_id,
-                        is_wake=True,
-                        is_dm=True,
-                        loop_key=channel_id,
-                    )
-                    username = await _get_username(client, user_id)
-                    loop.add_message(
-                        user_id=user_id,
-                        username=username,
-                        text=text,
-                        timestamp=message['ts'],
-                        images=images,
-                    )
-                    asyncio.create_task(loop.run())
-                    logger.info(f"Woke dormant root-DM {dm_conv.conversation_id[:24]}")
-                    return
-
-            # 3. DMs: no existing root conversation — create one at the channel root.
-            # thread_id=None so replies post un-threaded and future root messages
-            # in this channel wake this conversation via path 2b.
+            # 3. DMs: thread off the user's message (like channel @mentions)
             if is_1on1_dm and default_agent:
                 username = await _get_username(client, user_id)
+                dm_thread_id = message['ts']  # User's message becomes the thread parent
 
                 conv_id = f"slack_dm_{channel_id}_{int(datetime.now(timezone.utc).timestamp())}"
                 agent_id = default_agent
 
-                logger.info(f"New root-DM from {user_id} ({username}) in {channel_id}")
+                logger.info(f"New DM from {user_id} ({username}), threading off {dm_thread_id[:12]}")
                 now = datetime.now(timezone.utc).isoformat()
                 dm_conversation = ConversationState(
                     conversation_id=conv_id,
@@ -579,7 +541,7 @@ def create_slack_bot():
                     platform='slack',
                     channel_id=channel_id,
                     user_id=user_id,
-                    thread_id=None,
+                    thread_id=dm_thread_id,
                     status='active',
                     last_message_at=now,
                     messages=[],
@@ -595,10 +557,9 @@ def create_slack_bot():
                 loop = _start_loop(
                     conversation_id=conv_id,
                     channel_id=channel_id,
-                    thread_id=None,
+                    thread_id=dm_thread_id,
                     agent_id=agent_id,
                     is_dm=True,
-                    loop_key=channel_id,
                 )
 
                 loop.add_message(
