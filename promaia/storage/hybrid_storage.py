@@ -219,6 +219,49 @@ class HybridContentRegistry:
                 )
             """)
 
+            # Chunked Slack DM embeddings for semantic search over conversation history.
+            # Each row is one chunk (12-message core with 2-msg overlap each side).
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS slack_dm_chunks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    page_id TEXT UNIQUE NOT NULL,  -- = chunk_id, for unified view compatibility
+                    chunk_id TEXT UNIQUE NOT NULL,  -- "{conversation_id}_chunk_{k}"
+                    conversation_id TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    workspace TEXT NOT NULL,
+                    database_id TEXT NOT NULL,
+
+                    channel_id TEXT NOT NULL,
+                    thread_id TEXT,  -- NULL for root-DM conversations
+                    participants TEXT,  -- JSON array of display names
+
+                    message_count INTEGER NOT NULL,  -- core message count
+                    core_start_idx INTEGER NOT NULL,
+                    core_end_idx INTEGER NOT NULL,
+                    window_start_idx INTEGER NOT NULL,
+                    window_end_idx INTEGER NOT NULL,
+
+                    start_ts TEXT,
+                    end_ts TEXT,
+
+                    file_path TEXT NOT NULL,
+                    title TEXT,
+
+                    created_time TEXT,
+                    last_edited_time TEXT,
+                    synced_time TEXT NOT NULL,
+
+                    file_size INTEGER,
+                    checksum TEXT,
+
+                    UNIQUE(chunk_id)
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_slack_dm_chunks_conv
+                ON slack_dm_chunks(conversation_id, chunk_index)
+            """)
+
             # Create generic content table for unknown/new content types
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS generic_content (
@@ -627,6 +670,44 @@ class HybridContentRegistry:
                 FROM conversation_content
                 """)
 
+                # 2b. Slack DM chunks (always included) — per-chunk rows for
+                # semantic search over ongoing DM history.
+                view_parts.append("""
+                SELECT
+                    page_id,
+                    workspace,
+                    database_id,
+                    'slack_dms' as database_name,
+                    'slack_dm_chunk' as content_type,
+                    file_path,
+                    title,
+                    created_time,
+                    last_edited_time,
+                    synced_time,
+                    file_size,
+                    checksum,
+                    NULL as status,
+                    NULL as sender_email,
+                    NULL as sender_name,
+                    NULL as has_attachments,
+                    NULL as is_unread,
+                    NULL as featured,
+                    NULL as priority,
+                    NULL as category,
+                    NULL as email_date,
+                    json_object(
+                        'conversation_id', conversation_id,
+                        'chunk_index', chunk_index,
+                        'channel_id', channel_id,
+                        'thread_id', thread_id,
+                        'participants', participants,
+                        'message_count', message_count,
+                        'start_ts', start_ts,
+                        'end_ts', end_ts
+                    ) as metadata
+                FROM slack_dm_chunks
+                """)
+
                 # 3. Add all Notion tables (workspace-specific and legacy)
                 for table_name in notion_tables:
                     # Get the table schema to determine available columns
@@ -825,6 +906,64 @@ class HybridContentRegistry:
 
         except Exception as e:
             logger.error(f"Error adding conversation content: {e}")
+            return False
+
+    def add_slack_dm_chunk(self, chunk_data: Dict[str, Any]) -> bool:
+        """Upsert a single Slack DM chunk row.
+
+        chunk_data keys: chunk_id, conversation_id, chunk_index, workspace,
+        database_id, channel_id, thread_id (optional), participants (list or
+        JSON str), message_count, core_start_idx, core_end_idx,
+        window_start_idx, window_end_idx, start_ts, end_ts, file_path, title,
+        created_time, last_edited_time, synced_time, file_size, checksum.
+        """
+        try:
+            with self._connect() as conn:
+                cursor = conn.cursor()
+                participants = chunk_data.get('participants')
+                if isinstance(participants, (list, dict)):
+                    participants = json.dumps(participants)
+                cursor.execute("""
+                    INSERT OR REPLACE INTO slack_dm_chunks (
+                        page_id, chunk_id, conversation_id, chunk_index,
+                        workspace, database_id,
+                        channel_id, thread_id, participants,
+                        message_count, core_start_idx, core_end_idx,
+                        window_start_idx, window_end_idx,
+                        start_ts, end_ts,
+                        file_path, title,
+                        created_time, last_edited_time, synced_time,
+                        file_size, checksum
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    chunk_data['chunk_id'],
+                    chunk_data['chunk_id'],
+                    chunk_data['conversation_id'],
+                    chunk_data['chunk_index'],
+                    chunk_data['workspace'],
+                    chunk_data.get('database_id', 'slack_dms'),
+                    chunk_data['channel_id'],
+                    chunk_data.get('thread_id'),
+                    participants,
+                    chunk_data['message_count'],
+                    chunk_data['core_start_idx'],
+                    chunk_data['core_end_idx'],
+                    chunk_data['window_start_idx'],
+                    chunk_data['window_end_idx'],
+                    chunk_data.get('start_ts'),
+                    chunk_data.get('end_ts'),
+                    chunk_data['file_path'],
+                    chunk_data.get('title'),
+                    chunk_data.get('created_time'),
+                    chunk_data.get('last_edited_time'),
+                    chunk_data['synced_time'],
+                    chunk_data.get('file_size'),
+                    chunk_data.get('checksum'),
+                ))
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Error adding slack_dm chunk: {e}")
             return False
 
     def query_conversations_by_workspace(self, workspaces: List[str]) -> List[Dict[str, Any]]:

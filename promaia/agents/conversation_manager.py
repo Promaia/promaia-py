@@ -22,6 +22,39 @@ from promaia.agents.messaging.base import BaseMessagingPlatform
 
 logger = logging.getLogger(__name__)
 
+
+def _fire_vectorize(state, *, include_partial: bool = False) -> None:
+    """Fire-and-forget: kick off Slack DM chunk vectorization after a turn.
+
+    Runs only for Slack tag_to_chat conversations; skips incognito. Never
+    raises — vectorization errors are logged and swallowed so they can't
+    disrupt chat flow.
+    """
+    try:
+        if getattr(state, "platform", None) != "slack":
+            return
+        if getattr(state, "conversation_type", None) != "tag_to_chat":
+            return
+        if state.context and state.context.get("incognito"):
+            return
+
+        from promaia.storage.conversation_vectorizer import vectorize_conversation_from_state
+
+        async def _runner():
+            try:
+                await vectorize_conversation_from_state(state, include_partial=include_partial)
+            except Exception as e:
+                logger.warning(f"[vectorizer] background task failed: {e}")
+
+        try:
+            asyncio.get_running_loop().create_task(_runner())
+        except RuntimeError:
+            # No running loop — likely called from a sync path; skip.
+            pass
+    except Exception as e:
+        logger.debug(f"[vectorizer] _fire_vectorize skipped: {e}")
+
+
 # Callback type for conversation end events
 # Takes (conversation_id: str, transcript: List[Dict], reason: str) -> None
 ConversationEndCallback = Callable[[str, List[Dict[str, Any]], str], Awaitable[None]]
@@ -499,6 +532,7 @@ class ConversationManager:
 
         await self._save_state(state)
 
+        _fire_vectorize(state)
         logger.debug(f"Handled message in {conversation_id}, turn {state.turn_count}")
         return response
 
@@ -1130,6 +1164,7 @@ class ConversationManager:
         state.last_message_at = datetime.now(timezone.utc).isoformat()
         await self._save_state(state)
 
+        _fire_vectorize(state)
         logger.debug(f"Handled batched messages in {conversation_id}, turn {state.turn_count}")
         return response
 

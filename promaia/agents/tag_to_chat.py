@@ -1018,6 +1018,16 @@ class TagToChatLoop:
         # after successful responses in _do_thinking_and_respond().
         await self._update_db_status("dormant")
 
+        # Flush any trailing partial chunk to the vector index so short
+        # conversations still get searchable. No-op for non-Slack/incognito.
+        try:
+            fresh = await self.conv_manager._load_state(self.state.conversation_id)
+            if fresh:
+                from promaia.agents.conversation_manager import _fire_vectorize
+                _fire_vectorize(fresh, include_partial=True)
+        except Exception as e:
+            logger.debug(f"[vectorizer] dormant flush skipped: {e}")
+
         if announce:
             await self._announce_leave()
 
