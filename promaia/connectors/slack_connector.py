@@ -758,6 +758,72 @@ class SlackConnector(BaseConnector):
             date_filter=date_filter,
         )
 
+    async def save_one_message(
+        self,
+        message: Dict[str, Any],
+        channel_id: str,
+        storage,
+        db_config,
+        username: Optional[str] = None,
+        channel_name: Optional[str] = None,
+    ) -> bool:
+        """Persist a single Slack message to the KB synchronously.
+
+        Used for save-at-send-time so thread context never races the periodic
+        sync. `username` and `channel_name` are passed in pre-resolved by the
+        Slack bot to avoid per-message API lookups.
+        """
+        ts = message.get('ts')
+        if not ts:
+            return False
+
+        if channel_name is None:
+            channel_name = await self._get_channel_name(channel_id)
+        if username is None:
+            username = await self._get_username(message.get('user', ''))
+
+        data = {
+            'id': f"msg_{ts}",
+            'ts': ts,
+            'user': message.get('user', ''),
+            'username': username,
+            'channel': channel_id,
+            'channel_name': channel_name,
+            'text': message.get('text', ''),
+            'thread_ts': message.get('thread_ts'),
+            'reply_count': message.get('reply_count', 0),
+            'reactions': json.dumps(message.get('reactions', [])),
+            'files': json.dumps(message.get('files', [])),
+            'edited': 'edited' in message,
+            'timestamp': datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat(),
+        }
+
+        page_data = self._prepare_page_for_storage(data, db_config)
+
+        try:
+            import copy
+            from promaia.storage.unified_storage import UnifiedStorage
+            safe_channel_name = "".join(
+                c if c.isalnum() or c in " -_" else "_" for c in channel_name
+            ).strip("_").replace(" ", "_")
+            scoped_config = copy.deepcopy(db_config)
+            resolved_md_dir = UnifiedStorage._resolve_md_dir(scoped_config)
+            channel_md_dir = os.path.join(resolved_md_dir, safe_channel_name)
+            scoped_config.markdown_directory = channel_md_dir
+            os.makedirs(channel_md_dir, exist_ok=True)
+
+            saved = storage.save_content(
+                page_id=page_data["page_id"],
+                title=page_data["metadata"]["title"],
+                content_data=page_data["metadata"],
+                database_config=scoped_config,
+                markdown_content=page_data["content"],
+            )
+            return bool(saved)
+        except Exception as e:
+            self.logger.warning(f"save_one_message failed for {ts}: {e}")
+            return False
+
     async def cleanup(self):
         """Clean up Slack connector."""
         # No persistent connections to clean up

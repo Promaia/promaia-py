@@ -9036,114 +9036,174 @@ async def agentic_turn(
     )
 
 
+_COUNT_VERBS = ("Found", "Loaded", "Retrieved", "Wrote", "Created", "Updated", "Sent", "Queued")
+
+
+def _is_error(result: str) -> bool:
+    """Detect whether a tool result indicates failure."""
+    if not result:
+        return False
+    head = result.lstrip()[:200]
+    lowered = head.lower()
+    if head.startswith("❌") or head.startswith("Error") or "error:" in lowered[:40]:
+        return True
+    return any(needle in lowered for needle in (
+        "query failed",
+        "permission denied",
+        "(error)",
+    ))
+
+
+def _error_snippet(result: str, max_len: int = 80) -> str:
+    """Return a short, clean error snippet from a failed tool result."""
+    if not result:
+        return "error"
+    line = result.splitlines()[0].lstrip()
+    # Drop leading noise prefixes so the cause lands front-and-center. We
+    # iterate because real-world results stack them (e.g. "❌ Query failed:
+    # X") and the user only wants "X".
+    changed = True
+    prefixes = ("❌ ", "❌", "Error: ", "Error:", "Query failed: ", "Query failed:")
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if line.startswith(prefix):
+                line = line[len(prefix):]
+                changed = True
+                break
+    line = line.strip()
+    if len(line) > max_len:
+        line = line[: max_len - 1].rstrip() + "…"
+    return line or "error"
+
+
+def _extract_count_phrase(result: str, verbs: tuple = _COUNT_VERBS) -> str:
+    """Find the first line in `result` that reads like "Found 12 ..." and
+    return it lowercased. Skips the leading "✅ Vector Search: ..." headers
+    that just echo the call.
+    """
+    if not result:
+        return ""
+    for line in result.splitlines()[:6]:
+        stripped = line.strip().lstrip("✅").strip()
+        if not stripped:
+            continue
+        first = stripped.split(maxsplit=1)[0]
+        if first in verbs:
+            # Cap length so the summary stays one-liner friendly.
+            return stripped[:120].lower()
+    return ""
+
+
 def _summarize_tool_result(
     tool_name: str, tool_input: Dict, result: str
 ) -> str:
-    """Create a short human-readable summary of a tool call."""
+    """Create a short human-readable summary of a tool call.
+
+    Format convention: "<verb phrase> → <outcome>" on success, "<verb phrase>
+    ✗ <brief error>" on failure. Query echoes are kept out of the summary
+    because the caller's UI already displays the tool input above the result.
+    """
+    errored = _is_error(result)
+    err = _error_snippet(result) if errored else ""
+
+    def _vs(verb: str, outcome: str) -> str:
+        if errored:
+            return f"{verb} ✗ {err}"
+        return f"{verb} → {outcome}" if outcome else f"{verb} ✓"
+
     if tool_name == "query_sql":
-        query = tool_input.get("query", "")
-        if "Found" in result:
-            count_part = result.split("\n")[0]
-            return f'Searched "{query}" ({count_part.lower()})'
-        if "no results" in result.lower():
-            return f'Searched "{query}" (no results)'
-        return f'Searched "{query}"'
+        phrase = _extract_count_phrase(result)
+        outcome = phrase or ("no results" if "no results" in result.lower() else "ok")
+        return _vs("SQL search", outcome)
 
     elif tool_name == "query_vector":
-        query = tool_input.get("query", "")
-        if "Found" in result:
-            count_part = result.split("\n")[0]
-            return f'Semantic search "{query}" ({count_part.lower()})'
-        if "no results" in result.lower():
-            return f'Semantic search "{query}" (no results)'
-        return f'Semantic search "{query}"'
+        phrase = _extract_count_phrase(result)
+        outcome = phrase or ("no results" if "no results" in result.lower() else "ok")
+        return _vs("Semantic search", outcome)
 
     elif tool_name == "query_source":
-        db = tool_input.get("database", "")
+        db = tool_input.get("database", "?")
         days = tool_input.get("days", "all")
-        if "Loaded" in result:
-            count_part = result.split("\n")[0]
-            return f"Loaded {db}:{days} ({count_part.lower()})"
-        return f"Loaded {db}:{days}"
+        phrase = _extract_count_phrase(result)
+        return _vs(f"Load {db}:{days}", phrase or "ok")
 
     elif tool_name == "write_agent_journal":
-        return "Wrote agent journal entry"
+        return _vs("Agent journal", "noted")
 
     elif tool_name == "send_email":
         to = tool_input.get("to", "")
         subj = tool_input.get("subject", "")
-        return f'Sent email to {to}: "{subj}"'
+        return _vs("Send email", f'to {to}: "{subj}"')
 
     elif tool_name == "create_email_draft":
         subj = tool_input.get("subject", "")
-        return f'Created draft: "{subj}"'
+        return _vs("Email draft", f'"{subj}"')
 
     elif tool_name == "reply_to_email":
-        return f"Replied to thread {tool_input.get('thread_id', '')[:12]}"
+        tid = tool_input.get("thread_id", "")[:12]
+        return _vs("Email reply", f"thread {tid}" if tid else "sent")
 
     elif tool_name == "draft_reply_to_email":
-        return f"Draft reply created in thread {tool_input.get('thread_id', '')[:12]}"
+        tid = tool_input.get("thread_id", "")[:12]
+        return _vs("Email draft reply", f"thread {tid}" if tid else "drafted")
 
     elif tool_name == "schedule_self":
-        return f"Self-scheduled: {tool_input.get('summary', '')} at {tool_input.get('start_time', '')}"
+        return _vs(
+            "Self-schedule",
+            f"{tool_input.get('summary', '')} @ {tool_input.get('start_time', '')}",
+        )
 
     elif tool_name == "schedule_agent_event":
-        agent = tool_input.get('agent', '')
+        agent = tool_input.get("agent", "")
         agent_label = f" ({agent})" if agent else ""
-        return f"Agent-scheduled{agent_label}: {tool_input.get('summary', '')} at {tool_input.get('start_time', '')}"
+        return _vs(
+            f"Agent-schedule{agent_label}",
+            f"{tool_input.get('summary', '')} @ {tool_input.get('start_time', '')}",
+        )
 
     elif tool_name == "create_calendar_event":
-        return f"Created event: {tool_input.get('summary', '')}"
+        return _vs("Create event", tool_input.get("summary", ""))
 
     elif tool_name == "update_calendar_event":
-        return f"Updated event {tool_input.get('event_id', '')[:12]}"
+        return _vs("Update event", tool_input.get("event_id", "")[:12])
 
     elif tool_name == "delete_calendar_event":
-        return f"Deleted event {tool_input.get('event_id', '')[:12]}"
+        return _vs("Delete event", tool_input.get("event_id", "")[:12])
 
     elif tool_name == "send_message":
         target = tool_input.get("channel_id", "")
-        return f"Sent message to {target}"
+        return _vs("Send message", target)
 
     elif tool_name == "notion_search":
-        if "Error:" in result:
-            return f"Error searching Notion for '{tool_input.get('query', '')}'"
-        return f"Searched Notion for '{tool_input.get('query', '')}'"
+        phrase = _extract_count_phrase(result)
+        outcome = phrase or ("no results" if "no results" in result.lower() else "ok")
+        return _vs("Notion search", outcome)
 
     elif tool_name == "notion_create_page":
-        if "Error:" in result:
-            return f"Error creating Notion page (error)"
-        return f"Created Notion page: {tool_input.get('title', '')}"
+        return _vs("Create Notion page", tool_input.get("title", ""))
 
     elif tool_name == "notion_update_page":
-        if "Error:" in result:
-            return f"Error updating Notion page {tool_input.get('page_id', '')[:12]} (error)"
-        return f"Updated Notion page {tool_input.get('page_id', '')[:12]}"
+        return _vs("Update Notion page", tool_input.get("page_id", "")[:12])
 
     elif tool_name == "notion_query_database":
-        if "Error:" in result:
-            return f"Notion database {tool_input.get('database_id', '')[:12]} (error)"
-        return f"Queried Notion database {tool_input.get('database_id', '')[:12]}"
+        phrase = _extract_count_phrase(result)
+        outcome = phrase or f"db {tool_input.get('database_id', '')[:12]}"
+        return _vs("Notion DB query", outcome)
 
     elif tool_name == "web_search":
-        query = tool_input.get("query", "")
-        if "Error:" in result:
-            return f'Web search "{query}" (error)'
-        return f'Web search "{query}"'
+        phrase = _extract_count_phrase(result)
+        return _vs("Web search", phrase or "ok")
 
     elif tool_name == "web_fetch":
         url = tool_input.get("url", "")
-        display_url = url[:60] + "..." if len(url) > 60 else url
-        if "Error:" in result:
-            return f"Fetch {display_url} (error)"
-        char_count = len(result)
-        return f"Fetched {display_url} ({char_count:,} chars)"
+        display_url = url[:60] + "…" if len(url) > 60 else url
+        if errored:
+            return f"Web fetch {display_url} ✗ {err}"
+        return f"Web fetch {display_url} → {len(result):,} chars"
 
     elif tool_name == "task_queue_add":
-        task = tool_input.get("task", "")
-        return f'Queued task: "{task}"'
+        return _vs("Queue task", tool_input.get("task", ""))
 
     else:
-        if result.startswith("Error") or result.startswith("Error:"):
-            return f"{tool_name} (error)"
-        return f"{tool_name} completed"
+        return _vs(tool_name, "")

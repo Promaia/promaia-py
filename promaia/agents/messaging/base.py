@@ -47,17 +47,22 @@ class BaseMessagingPlatform(ABC):
         channel_id: str,
         content: str,
         thread_id: Optional[str] = None,
-        blocks: Optional[List[Dict]] = None
+        blocks: Optional[List[Dict]] = None,
+        transient: bool = False,
     ) -> MessageMetadata:
         """
         Send a message to the platform.
-        
+
         Args:
             channel_id: Platform-specific channel identifier
             content: Message text content
             thread_id: Optional thread/conversation ID for replies
             blocks: Optional rich formatting blocks (platform-specific)
-        
+            transient: If True, the caller expects the message to be edited or
+                deleted before the turn completes. Platforms may skip
+                save-at-send-time KB writes for transient messages so they
+                don't show up as thread history.
+
         Returns:
             MessageMetadata with information about the sent message
         """
