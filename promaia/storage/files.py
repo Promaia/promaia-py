@@ -1147,59 +1147,6 @@ def _load_shopify_direct(database_config, days) -> List[Dict[str, Any]]:
     return results
 
 
-def _load_calendar_direct(database_config, days) -> List[Dict[str, Any]]:
-    """Load calendar events directly from calendar_events table."""
-    from promaia.utils.env_writer import get_db_path
-
-    db_path = str(get_db_path())
-
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
-        where = ["workspace = ?"]
-        params: list = [database_config.workspace]
-
-        if database_config.database_id:
-            where.append("database_id = ?")
-            params.append(database_config.database_id)
-
-        if days and not (isinstance(days, str) and days.lower() == "all"):
-            try:
-                days_int = int(days) if isinstance(days, str) else days
-                cutoff = days_ago_utc(days_int).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                where.append("updated_at >= ?")
-                params.append(cutoff)
-            except (ValueError, TypeError):
-                pass
-
-        query = f"SELECT * FROM calendar_events WHERE {' AND '.join(where)} ORDER BY updated_at DESC"
-        cursor.execute(query, params)
-
-        results = []
-        for row in cursor.fetchall():
-            row_dict = dict(row)
-            metadata = {}
-            if row_dict.get("properties"):
-                try:
-                    metadata = json.loads(row_dict["properties"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            results.append({
-                "page_id": row_dict.get("page_id", ""),
-                "title": row_dict.get("title", ""),
-                "content": row_dict.get("content", ""),
-                "metadata": metadata,
-                "filename": row_dict.get("title", ""),
-                "date": row_dict.get("updated_at", ""),
-            })
-
-    if not results:
-        print(f"No calendar events found for {database_config.workspace}")
-
-    return results
-
-
 def _load_sheets_direct(database_config, days) -> List[Dict[str, Any]]:
     """Load Google Sheets data directly from google_sheets table."""
     from promaia.utils.env_writer import get_db_path
@@ -1295,8 +1242,6 @@ def load_database_pages_with_filters(
         # Direct query bypass — these sources use dedicated SQLite tables, not unified_content
         if database_config.source_type == "shopify":
             return _load_shopify_direct(database_config, days)
-        if database_config.source_type in ("calendar", "google_calendar"):
-            return _load_calendar_direct(database_config, days)
         if database_config.source_type == "google_sheets":
             return _load_sheets_direct(database_config, days)
 
