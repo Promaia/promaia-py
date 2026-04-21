@@ -74,7 +74,8 @@ class DiscordPlatform(BaseMessagingPlatform):
         channel_id: str,
         content: str,
         thread_id: Optional[str] = None,
-        blocks: Optional[List[Dict]] = None
+        blocks: Optional[List[Dict]] = None,
+        transient: bool = False,
     ) -> MessageMetadata:
         """
         Send message to Discord channel.
