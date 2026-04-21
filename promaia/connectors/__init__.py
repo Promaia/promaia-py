@@ -52,13 +52,9 @@ try:
 except ImportError:
     shopify_available = False
 
-# Try to import Google Calendar connector (requires google-api-python-client)
-try:
-    from .google_calendar_connector import GoogleCalendarConnector
-    ConnectorRegistry.register("google_calendar", GoogleCalendarConnector)
-    google_calendar_available = True
-except ImportError:
-    google_calendar_available = False
+# Google Calendar connector removed — calendar data is now accessed exclusively
+# via live Google API through the list_calendar_events / list_self_calendar_events
+# / list_agent_calendar_events chat tools. No sync, no local calendar_events table.
 
 # Try to import Google Sheets connector (requires google-api-python-client)
 try:
@@ -92,9 +88,6 @@ if ocr_available:
 
 if shopify_available:
     __all__.append('ShopifyConnector')
-
-if google_calendar_available:
-    __all__.append('GoogleCalendarConnector')
 
 if google_sheets_available:
     __all__.append('GoogleSheetsConnector')

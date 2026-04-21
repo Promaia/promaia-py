@@ -45,8 +45,7 @@ QUERY_TOOL_DEFINITIONS = [
         "description": (
             "Search your data sources using natural language (converted to SQL). "
             "Use for exact text/keyword searches when you know what you're looking for. "
-            "Examples: 'emails from Federico this week', 'tasks due today', "
-            "'calendar events tomorrow'"
+            "Examples: 'emails from Federico this week', 'tasks due today'"
         ),
         "input_schema": {
             "type": "object",
@@ -101,7 +100,7 @@ QUERY_TOOL_DEFINITIONS = [
         "description": (
             "Load pages from a specific database with time filtering. "
             "Use to expand context or load different time ranges. "
-            "Available databases include: agent_journal, gmail, stories, tasks, calendar, "
+            "Available databases include: agent_journal, gmail, stories, tasks, "
             "and any Discord/Slack channel sources."
         ),
         "input_schema": {
@@ -111,7 +110,7 @@ QUERY_TOOL_DEFINITIONS = [
                     "type": "string",
                     "description": (
                         "Database name (e.g., 'agent_journal', 'gmail', 'stories', "
-                        "'tasks', 'calendar')"
+                        "'tasks')"
                     )
                 },
                 "days": {
@@ -682,8 +681,9 @@ CALENDAR_TOOL_DEFINITIONS = [
     {
         "name": "create_calendar_event",
         "description": (
-            "Create a new calendar event. "
-            "Use query_sql with calendar source to check for conflicts first."
+            "Create a new event on the user's calendar (or any calendar via `calendar_id`). "
+            "To schedule on your own agent calendar, use schedule_self instead. "
+            "Check for conflicts with list_calendar_events first."
         ),
         "input_schema": {
             "type": "object",
@@ -721,7 +721,8 @@ CALENDAR_TOOL_DEFINITIONS = [
         "name": "update_calendar_event",
         "description": (
             "Update an existing calendar event. "
-            "Use query_sql with calendar source to find the event_id."
+            "Get the event_id from list_calendar_events / list_self_calendar_events / "
+            "list_agent_calendar_events."
         ),
         "input_schema": {
             "type": "object",
@@ -748,7 +749,8 @@ CALENDAR_TOOL_DEFINITIONS = [
         "name": "delete_calendar_event",
         "description": (
             "Delete a calendar event. "
-            "Use query_sql with calendar source to find the event_id."
+            "Get the event_id from list_calendar_events / list_self_calendar_events / "
+            "list_agent_calendar_events."
         ),
         "input_schema": {
             "type": "object",
@@ -839,12 +841,109 @@ SCHEDULE_AGENT_EVENT_TOOL_DEFINITION = {
     },
 }
 
+LIST_SELF_CALENDAR_EVENTS_TOOL_DEFINITION = {
+    "name": "list_self_calendar_events",
+    "description": (
+        "List events on **your own** dedicated agent calendar — the one "
+        "schedule_self writes to and that triggers your future runs. "
+        "Use this when the user asks about your scheduled work, recurring "
+        "triggers, or events on 'the agent calendar'."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "days_ahead": {
+                "type": "integer",
+                "description": "Number of days ahead to look (default 7)",
+                "default": 7
+            },
+            "days_back": {
+                "type": "integer",
+                "description": "Number of days back to look (default 0)",
+                "default": 0
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional search text to filter events"
+            },
+        }
+    },
+}
+
+GET_SELF_CALENDAR_EVENT_TOOL_DEFINITION = {
+    "name": "get_self_calendar_event",
+    "description": "Get details of an event on your own agent calendar.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "event_id": {"type": "string", "description": "Calendar event ID"}
+        },
+        "required": ["event_id"]
+    },
+}
+
+LIST_AGENT_CALENDAR_EVENTS_TOOL_DEFINITION = {
+    "name": "list_agent_calendar_events",
+    "description": (
+        "List events on another agent's dedicated calendar. Use this when "
+        "the user asks about a specific named agent's schedule."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "agent": {
+                "type": "string",
+                "description": (
+                    "Agent name (required when multiple agents have "
+                    "calendars, optional when only one)"
+                )
+            },
+            "days_ahead": {
+                "type": "integer",
+                "description": "Number of days ahead to look (default 7)",
+                "default": 7
+            },
+            "days_back": {
+                "type": "integer",
+                "description": "Number of days back to look (default 0)",
+                "default": 0
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional search text to filter events"
+            },
+        }
+    },
+}
+
+GET_AGENT_CALENDAR_EVENT_TOOL_DEFINITION = {
+    "name": "get_agent_calendar_event",
+    "description": "Get details of an event on a named agent's dedicated calendar.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "event_id": {"type": "string", "description": "Calendar event ID"},
+            "agent": {
+                "type": "string",
+                "description": (
+                    "Agent name (required when multiple agents have "
+                    "calendars, optional when only one)"
+                )
+            },
+        },
+        "required": ["event_id"]
+    },
+}
+
 CALENDAR_READ_TOOL_DEFINITIONS = [
     {
         "name": "list_calendar_events",
         "description": (
-            "List upcoming calendar events. "
-            "Optionally filter by date range or search query."
+            "List upcoming calendar events on the user's primary calendar "
+            "(or any calendar by ID). "
+            "Optionally filter by date range or search query. "
+            "To read an agent calendar, prefer list_self_calendar_events / "
+            "list_agent_calendar_events, which auto-resolve the calendar ID."
         ),
         "input_schema": {
             "type": "object",
@@ -862,19 +961,34 @@ CALENDAR_READ_TOOL_DEFINITIONS = [
                 "query": {
                     "type": "string",
                     "description": "Optional search text to filter events"
+                },
+                "calendar_id": {
+                    "type": "string",
+                    "description": (
+                        "Calendar ID to read from (default: primary). "
+                        "Use list_calendars to discover IDs."
+                    )
                 }
             }
         }
     },
     {
         "name": "get_calendar_event",
-        "description": "Get details of a specific calendar event by ID.",
+        "description": (
+            "Get details of a specific calendar event by ID. "
+            "To read from an agent calendar, prefer get_self_calendar_event / "
+            "get_agent_calendar_event."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "event_id": {
                     "type": "string",
                     "description": "Calendar event ID"
+                },
+                "calendar_id": {
+                    "type": "string",
+                    "description": "Calendar ID the event lives on (default: primary)"
                 }
             },
             "required": ["event_id"]
@@ -2722,9 +2836,14 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
         tools.extend(CALENDAR_MANAGEMENT_TOOL_DEFINITIONS)
         if getattr(agent, 'calendar_id', None):
             tools.append(SCHEDULE_SELF_TOOL_DEFINITION)
-        # Always include schedule_agent_event — calendar may be created mid-session
-        # by create_agent. The executor returns a clear error if no calendars exist.
+            tools.append(LIST_SELF_CALENDAR_EVENTS_TOOL_DEFINITION)
+            tools.append(GET_SELF_CALENDAR_EVENT_TOOL_DEFINITION)
+        # Always include schedule_agent_event + agent-calendar reads — calendars
+        # may be created mid-session by create_agent. The executor returns a
+        # clear error if no calendars exist.
         tools.append(SCHEDULE_AGENT_EVENT_TOOL_DEFINITION)
+        tools.append(LIST_AGENT_CALENDAR_EVENTS_TOOL_DEFINITION)
+        tools.append(GET_AGENT_CALENDAR_EVENT_TOOL_DEFINITION)
     if "notion" in mcp_tools:
         tools.extend(NOTION_TOOL_DEFINITIONS)
         tools.extend(NOTION_BLOCK_TOOL_DEFINITIONS)
@@ -2810,11 +2929,15 @@ def _build_tool_suite_registry(agent, has_platform: bool = False) -> Dict[str, D
     if "calendar" in mcp_tools:
         tools = list(CALENDAR_TOOL_DEFINITIONS) + list(CALENDAR_READ_TOOL_DEFINITIONS) + list(CALENDAR_MANAGEMENT_TOOL_DEFINITIONS)
         tools.append(SCHEDULE_AGENT_EVENT_TOOL_DEFINITION)
+        tools.append(LIST_AGENT_CALENDAR_EVENTS_TOOL_DEFINITION)
+        tools.append(GET_AGENT_CALENDAR_EVENT_TOOL_DEFINITION)
         if getattr(agent, 'calendar_id', None):
             tools.append(SCHEDULE_SELF_TOOL_DEFINITION)
+            tools.append(LIST_SELF_CALENDAR_EVENTS_TOOL_DEFINITION)
+            tools.append(GET_SELF_CALENDAR_EVENT_TOOL_DEFINITION)
         registry["calendar"] = {
             "tools": tools,
-            "description": "events, scheduling, calendar management (list/create/delete calendars)",
+            "description": "events, scheduling, reading agent calendars, calendar management (list/create/delete calendars)",
             "count": len(tools),
         }
 
@@ -3043,6 +3166,14 @@ class ToolExecutor:
                 return await self._list_calendar_events(tool_input)
             elif tool_name == "get_calendar_event":
                 return await self._get_calendar_event(tool_input)
+            elif tool_name == "list_self_calendar_events":
+                return await self._list_self_calendar_events(tool_input)
+            elif tool_name == "get_self_calendar_event":
+                return await self._get_self_calendar_event(tool_input)
+            elif tool_name == "list_agent_calendar_events":
+                return await self._list_agent_calendar_events(tool_input)
+            elif tool_name == "get_agent_calendar_event":
+                return await self._get_agent_calendar_event(tool_input)
             # Calendar management
             elif tool_name == "list_calendars":
                 return await self._list_calendars(tool_input)
@@ -4221,6 +4352,55 @@ class ToolExecutor:
         summary = tool_input.get("summary", "")
         return f"Scheduled on {agent_name}'s calendar: '{summary}' at {start}\n{result}"
 
+    # ── Agent-calendar read wrappers (auto-resolve calendar_id) ─────────────
+
+    def _resolve_agent_calendar_id(self, tool_input: Dict) -> str:
+        """Resolve which agent calendar to read. Returns calendar_id string
+        on success, or an error message string starting with 'Error:' on failure.
+        Mirrors the resolution logic in _schedule_agent_event."""
+        if not self._agent_calendars:
+            return "Error: No agent calendars available."
+        agent_name = tool_input.get("agent")
+        if len(self._agent_calendars) == 1:
+            agent_name = next(iter(self._agent_calendars))
+        elif not agent_name:
+            names = ", ".join(sorted(self._agent_calendars.keys()))
+            return f"Error: Multiple agent calendars available ({names}). Please specify the 'agent' parameter."
+        if agent_name not in self._agent_calendars:
+            names = ", ".join(sorted(self._agent_calendars.keys()))
+            return f"Error: No calendar for agent '{agent_name}'. Available: {names}"
+        return self._agent_calendars[agent_name]
+
+    async def _list_self_calendar_events(self, tool_input: Dict) -> str:
+        if not self._agent_calendar_id:
+            return "Error: No dedicated calendar configured for this agent."
+        merged = dict(tool_input)
+        merged["calendar_id"] = self._agent_calendar_id
+        return await self._list_calendar_events(merged)
+
+    async def _get_self_calendar_event(self, tool_input: Dict) -> str:
+        if not self._agent_calendar_id:
+            return "Error: No dedicated calendar configured for this agent."
+        merged = dict(tool_input)
+        merged["calendar_id"] = self._agent_calendar_id
+        return await self._get_calendar_event(merged)
+
+    async def _list_agent_calendar_events(self, tool_input: Dict) -> str:
+        resolved = self._resolve_agent_calendar_id(tool_input)
+        if resolved.startswith("Error:"):
+            return resolved
+        merged = dict(tool_input)
+        merged["calendar_id"] = resolved
+        return await self._list_calendar_events(merged)
+
+    async def _get_agent_calendar_event(self, tool_input: Dict) -> str:
+        resolved = self._resolve_agent_calendar_id(tool_input)
+        if resolved.startswith("Error:"):
+            return resolved
+        merged = dict(tool_input)
+        merged["calendar_id"] = resolved
+        return await self._get_calendar_event(merged)
+
     async def _create_calendar_event(self, tool_input: Dict) -> str:
         await self._ensure_calendar()
         calendar_id = tool_input.get("calendar_id", "primary")
@@ -4295,13 +4475,14 @@ class ToolExecutor:
         days_ahead = tool_input.get("days_ahead", 7)
         days_back = tool_input.get("days_back", 0)
         query = tool_input.get("query")
+        calendar_id = tool_input.get("calendar_id", "primary")
 
         now = _dt.now(_tz.utc)
         time_min = (now - _td(days=days_back)).isoformat()
         time_max = (now + _td(days=days_ahead)).isoformat()
 
         kwargs = {
-            "calendarId": "primary",
+            "calendarId": calendar_id,
             "timeMin": time_min,
             "timeMax": time_max,
             "singleEvents": True,
@@ -4311,11 +4492,22 @@ class ToolExecutor:
         if query:
             kwargs["q"] = query
 
+        logger.info(
+            "list_calendar_events: calendar_id=%r time_min=%s time_max=%s "
+            "query=%r days_ahead=%s days_back=%s",
+            calendar_id, time_min, time_max, query, days_ahead, days_back,
+        )
         try:
             result = await asyncio.to_thread(
                 self._calendar_service.events().list(**kwargs).execute
             )
             events = result.get('items', [])
+            logger.info(
+                "list_calendar_events: returned %d events for calendar_id=%r "
+                "(summary=%r, accessRole=%r)",
+                len(events), calendar_id,
+                result.get('summary'), result.get('accessRole'),
+            )
             if not events:
                 return "No calendar events found for the specified range."
 
@@ -4342,11 +4534,12 @@ class ToolExecutor:
         event_id = tool_input.get("event_id", "")
         if not event_id:
             return "Error: missing 'event_id' parameter"
+        calendar_id = tool_input.get("calendar_id", "primary")
 
         try:
             event = await asyncio.to_thread(
                 self._calendar_service.events().get(
-                    calendarId="primary", eventId=event_id
+                    calendarId=calendar_id, eventId=event_id
                 ).execute
             )
             start = event.get('start', {})
