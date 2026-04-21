@@ -2767,6 +2767,37 @@ def _resolve_spreadsheet_id(identifier: str, workspace: str) -> str:
     raise ValueError(f"Could not resolve spreadsheet: '{identifier}'")
 
 
+def _format_event_time(time_obj: Dict, display_tz: str) -> str:
+    """Format a Google Calendar event start/end dict as a human-readable string.
+
+    Google returns events with either `dateTime` (timed events) or `date`
+    (all-day events). When events().list is called with timeZone=X, dateTime
+    values come back with the matching offset — we parse and render them with
+    the zone abbreviation so the model never has to reason about UTC math.
+    """
+    date_only = time_obj.get('date')
+    if date_only:
+        return f"{date_only} (all-day)"
+
+    dt_str = time_obj.get('dateTime')
+    if not dt_str:
+        return '?'
+
+    try:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+        parsed = _dt.fromisoformat(dt_str.replace('Z', '+00:00'))
+        try:
+            local = parsed.astimezone(ZoneInfo(display_tz))
+            zone_label = local.strftime('%Z') or display_tz
+        except Exception:
+            local = parsed
+            zone_label = display_tz
+        return local.strftime(f"%Y-%m-%d %I:%M %p {zone_label}").replace(' 0', ' ')
+    except Exception:
+        return dt_str
+
+
 def _hex_to_rgb(hex_color: str) -> Dict[str, float]:
     """Convert '#RRGGBB' to Google Sheets RGB float dict."""
     h = hex_color.lstrip("#")
@@ -4476,6 +4507,7 @@ class ToolExecutor:
         days_back = tool_input.get("days_back", 0)
         query = tool_input.get("query")
         calendar_id = tool_input.get("calendar_id", "primary")
+        tz = self._calendar_tz or 'UTC'
 
         now = _dt.now(_tz.utc)
         time_min = (now - _td(days=days_back)).isoformat()
@@ -4485,6 +4517,7 @@ class ToolExecutor:
             "calendarId": calendar_id,
             "timeMin": time_min,
             "timeMax": time_max,
+            "timeZone": tz,
             "singleEvents": True,
             "orderBy": "startTime",
             "maxResults": 50,
@@ -4494,8 +4527,8 @@ class ToolExecutor:
 
         logger.info(
             "list_calendar_events: calendar_id=%r time_min=%s time_max=%s "
-            "query=%r days_ahead=%s days_back=%s",
-            calendar_id, time_min, time_max, query, days_ahead, days_back,
+            "query=%r days_ahead=%s days_back=%s tz=%s",
+            calendar_id, time_min, time_max, query, days_ahead, days_back, tz,
         )
         try:
             result = await asyncio.to_thread(
@@ -4509,14 +4542,14 @@ class ToolExecutor:
                 result.get('summary'), result.get('accessRole'),
             )
             if not events:
-                return "No calendar events found for the specified range."
+                return f"No calendar events found for the specified range ({tz})."
 
-            lines = [f"Found {len(events)} events:\n"]
+            lines = [f"Found {len(events)} events (times in {tz}):\n"]
             for ev in events:
                 start = ev.get('start', {})
-                start_str = start.get('dateTime') or start.get('date', '?')
+                start_str = _format_event_time(start, tz)
                 end = ev.get('end', {})
-                end_str = end.get('dateTime') or end.get('date', '?')
+                end_str = _format_event_time(end, tz)
                 summary = ev.get('summary', '(No title)')
                 location = ev.get('location', '')
                 loc_str = f" | Location: {location}" if location else ""
@@ -4535,11 +4568,12 @@ class ToolExecutor:
         if not event_id:
             return "Error: missing 'event_id' parameter"
         calendar_id = tool_input.get("calendar_id", "primary")
+        tz = self._calendar_tz or 'UTC'
 
         try:
             event = await asyncio.to_thread(
                 self._calendar_service.events().get(
-                    calendarId=calendar_id, eventId=event_id
+                    calendarId=calendar_id, eventId=event_id, timeZone=tz
                 ).execute
             )
             start = event.get('start', {})
@@ -4549,8 +4583,8 @@ class ToolExecutor:
 
             parts = [
                 f"**{event.get('summary', '(No title)')}**",
-                f"Start: {start.get('dateTime') or start.get('date', '?')}",
-                f"End: {end.get('dateTime') or end.get('date', '?')}",
+                f"Start: {_format_event_time(start, tz)}",
+                f"End: {_format_event_time(end, tz)}",
             ]
             if event.get('location'):
                 parts.append(f"Location: {event['location']}")
