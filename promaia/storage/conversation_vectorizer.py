@@ -344,31 +344,25 @@ def ensure_database_registered(workspace: str) -> None:
 
 
 def _grant_source_access_to_maia(workspace: str) -> None:
-    """Best-effort: add slack_dms to the maia agent's source_access with QUERY perm."""
-    from promaia.agents.agent_config import (
-        load_agents,
-        save_agent,
-        SourceAccess,
-        SourcePermission,
-    )
+    """Best-effort: add slack_dms to the maia agent's databases field.
+
+    agent_config's `get_queryable_sources()` falls back to the `databases`
+    list whenever `source_access` is None, which is the prevailing config on
+    kb today. So the simplest grant is an idempotent append to `databases`.
+    """
+    from promaia.agents.agent_config import load_agents, save_agent
 
     for a in load_agents():
         if (a.agent_id or a.name) != "maia":
             continue
-        access = list(a.source_access or [])
-        if any(sa.source_name == DATABASE_NAME for sa in access):
+        dbs = list(a.databases or [])
+        # Accept either bare "slack_dms" or qualified "slack_dms:N"
+        if any(d.split(":")[0] == DATABASE_NAME for d in dbs):
             return
-        access.append(
-            SourceAccess(
-                source_name=DATABASE_NAME,
-                initial_days=None,
-                permissions=[SourcePermission.QUERY],
-                max_query_days=None,
-            )
-        )
-        a.source_access = access
+        dbs.append(DATABASE_NAME)
+        a.databases = dbs
         save_agent(a)
-        logger.info(f"[vectorizer] granted maia agent QUERY access to {DATABASE_NAME}")
+        logger.info(f"[vectorizer] granted maia agent query access to {DATABASE_NAME} via databases list")
         return
 
 
