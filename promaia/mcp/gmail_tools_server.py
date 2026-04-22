@@ -40,12 +40,20 @@ server = Server("promaia-gmail-tools")
 WORKSPACE = None
 AGENT_CONFIG = None
 GMAIL_CONNECTOR = None
+ALLOWED_TOOLS = None  # Optional[set[str]] — when set, only these tools are advertised/dispatched
+
+
+def _filter_tools_by_permission(tools: list) -> list:
+    """Drop any tools not in ALLOWED_TOOLS (None means no restriction)."""
+    if ALLOWED_TOOLS is None:
+        return tools
+    return [t for t in tools if t.name in ALLOWED_TOOLS]
 
 
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """List available Gmail write tools"""
-    return [
+    all_tools = [
         Tool(
             name="send_message",
             description="Send a new email message. Use Promaia query tools to read emails.",
@@ -100,12 +108,18 @@ async def list_tools() -> list[Tool]:
             }
         )
     ]
+    return _filter_tools_by_permission(all_tools)
 
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Execute a Gmail tool"""
     logger.info(f"Tool call: {name}")
+
+    if ALLOWED_TOOLS is not None and name not in ALLOWED_TOOLS:
+        msg = f"❌ Permission denied: tool '{name}' is not enabled for this agent"
+        logger.warning(msg)
+        return [TextContent(type="text", text=msg)]
 
     try:
         await _ensure_connected()
@@ -229,11 +243,13 @@ async def _handle_draft_reply(args: dict) -> list[TextContent]:
 
 async def main():
     """Run the MCP server"""
-    global WORKSPACE, AGENT_CONFIG
+    global WORKSPACE, AGENT_CONFIG, ALLOWED_TOOLS
 
     parser = argparse.ArgumentParser(description="Gmail Tools MCP Server (Write-Only)")
     parser.add_argument("--workspace", required=True, help="Workspace name")
     parser.add_argument("--agent-id", required=False, help="Agent ID")
+    parser.add_argument("--allowed-tools", required=False,
+                        help="JSON list of tool names this agent may call (omit for all)")
     args = parser.parse_args()
 
     WORKSPACE = args.workspace
@@ -247,6 +263,14 @@ async def main():
                 logger.info(f"Agent: {args.agent_id}")
         except Exception as e:
             logger.warning(f"Could not load agent config: {e}")
+
+    if args.allowed_tools:
+        import json as _json
+        try:
+            ALLOWED_TOOLS = set(_json.loads(args.allowed_tools))
+            logger.info(f"Tool restrictions active: {sorted(ALLOWED_TOOLS)}")
+        except Exception as e:
+            logger.warning(f"Could not parse --allowed-tools: {e}")
 
     logger.info("Tools: send_message, create_draft, reply_to_message, draft_reply")
     logger.info("Note: Use Promaia query tools for reading emails")

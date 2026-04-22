@@ -243,6 +243,17 @@ def _show_agent_summary(agent: AgentConfig, console):
     else:
         console.print(f"MCP Tools: [dim]None[/dim]")
 
+    # Per-server tool permissions
+    if agent.tool_permissions:
+        console.print("Tool Permissions:")
+        for server, allowed in agent.tool_permissions.items():
+            if allowed is None:
+                console.print(f"  • {server}: [dim]all enabled[/dim]")
+            elif not allowed:
+                console.print(f"  • {server}: [yellow]all blocked[/yellow]")
+            else:
+                console.print(f"  • {server}: [cyan]{', '.join(allowed)}[/cyan]")
+
     if agent.description:
         console.print(f"Description: [dim]{agent.description}[/dim]")
 
@@ -393,6 +404,7 @@ async def handle_agent_add(args):
 
     # Step 7: MCP tools (optional, interactive)
     mcp_tools = []
+    tool_permissions: dict = {}  # server_name -> [allowed_tool_names]
     console.print()  # Spacing
     console.print("🛠️  MCP Tools (Model Context Protocol)", style="bold cyan")
     console.print("   Enable external tools for your agent:", style="dim")
@@ -415,7 +427,7 @@ async def handle_agent_add(args):
         logger.warning(f"Could not load MCP servers: {e}")
 
     # Add built-in integrations that have tool support
-    for builtin in ("gmail", "calendar"):
+    for builtin in ("promaia", "gmail", "calendar"):
         if builtin not in available_tools:
             available_tools.append(builtin)
 
@@ -433,6 +445,43 @@ async def handle_agent_add(args):
     else:
         console.print("   No MCP servers configured", style="yellow")
         console.print("   Configure in maia-data/mcp_servers.json", style="dim")
+
+    # Step 7b: Granular per-server tool permissions (built-in servers only)
+    if mcp_tools:
+        from promaia.agents.agent_config import BUILTIN_TOOL_CATALOG
+        from promaia.cli.agent_creation_selector import select_server_tools
+
+        servers_with_catalog = [s for s in mcp_tools if s in BUILTIN_TOOL_CATALOG]
+        if servers_with_catalog:
+            console.print()  # Spacing
+            console.print("🔐 Per-tool permissions", style="bold cyan")
+            console.print(
+                "   For each enabled server, choose which specific tools the agent may call.",
+                style="dim",
+            )
+            console.print(
+                "   Press ENTER to confirm; ESC to keep all tools enabled (no restriction).",
+                style="dim",
+            )
+            for server in servers_with_catalog:
+                catalog = BUILTIN_TOOL_CATALOG[server]
+                tool_pairs = list(catalog.items())  # [(tool_name, description), ...]
+                selection = await select_server_tools(server, tool_pairs)
+                if selection is None:
+                    # User skipped — leave server unrestricted
+                    console.print(f"   • {server}: all tools enabled (no restriction)", style="dim")
+                    continue
+                tool_permissions[server] = selection
+                if not selection:
+                    console.print(f"   • {server}: ALL tools blocked", style="yellow")
+                elif len(selection) == len(catalog):
+                    console.print(f"   • {server}: all {len(selection)} tools enabled", style="dim")
+                else:
+                    console.print(
+                        f"   • {server}: {len(selection)}/{len(catalog)} tools enabled — "
+                        f"{', '.join(selection)}",
+                        style="dim",
+                    )
 
     # Step 8: Messaging platform (auto-detect from env vars)
     messaging_platform = None
@@ -492,9 +541,9 @@ async def handle_agent_add(args):
         schedule=None,  # No schedule grid - use calendar events or interval
         interval_minutes=interval_minutes,  # Optional interval
         mcp_tools=mcp_tools,
+        tool_permissions=tool_permissions or None,
         max_iterations=40,
         journal_memory_days=journal_memory_days,
-        messaging_platform=messaging_platform,
         messaging_enabled=messaging_enabled,
         enabled=True,
         description=description,
@@ -2005,6 +2054,48 @@ async def handle_agent_edit(args):
             agent.mcp_tools = selected_tools
             tools_display = ', '.join(selected_tools) if selected_tools else "None"
             console.print(f"✓ Updated MCP tools: [cyan]{tools_display}[/cyan]", style="dim")
+
+            # Drop tool_permissions entries for servers no longer enabled and
+            # offer a granular re-selection for the still-enabled built-in
+            # servers. Skipping the prompt leaves existing permissions intact.
+            from promaia.agents.agent_config import BUILTIN_TOOL_CATALOG
+            from promaia.cli.agent_creation_selector import select_server_tools
+
+            if agent.tool_permissions:
+                agent.tool_permissions = {
+                    s: v for s, v in agent.tool_permissions.items()
+                    if s in selected_tools
+                } or None
+
+            servers_with_catalog = [s for s in selected_tools if s in BUILTIN_TOOL_CATALOG]
+            if servers_with_catalog:
+                edit_perms = input(
+                    "Edit per-tool permissions for built-in servers? (y/N): "
+                ).strip().lower()
+                if edit_perms == "y":
+                    perms = dict(agent.tool_permissions or {})
+                    for server in servers_with_catalog:
+                        catalog = BUILTIN_TOOL_CATALOG[server]
+                        existing = perms.get(server)
+                        # Pre-select existing allowlist (or all if unrestricted)
+                        preselected = existing if existing is not None else list(catalog.keys())
+                        selection = await select_server_tools(
+                            server, list(catalog.items()), preselected=preselected
+                        )
+                        if selection is None:
+                            # Skipped: keep existing entry as-is
+                            continue
+                        if len(selection) == len(catalog):
+                            # All enabled — drop restriction
+                            perms.pop(server, None)
+                        else:
+                            perms[server] = selection
+                    agent.tool_permissions = perms or None
+                    console.print(
+                        f"✓ Updated tool permissions: "
+                        f"[cyan]{agent.tool_permissions or 'no restrictions'}[/cyan]",
+                        style="dim",
+                    )
 
     if choice in ["5", "7"]:
         console.print(f"\nCurrent max iterations: [cyan]{agent.max_iterations}[/cyan]")

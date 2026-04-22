@@ -26,6 +26,39 @@ class SourceAccess:
     max_query_days: Optional[int] = None  # Max days for query_source (safety limit)
 
 
+# Catalog of built-in MCP servers and the tools they expose. Used by the
+# `maia agent add` flow to offer granular per-tool permissions. External
+# MCP servers (defined in mcp_servers.json) are not listed here — granular
+# permissions for them can still be configured by editing the agent JSON.
+BUILTIN_TOOL_CATALOG: Dict[str, Dict[str, str]] = {
+    "promaia": {
+        "query_sql": "Natural language → SQL keyword search",
+        "query_vector": "Semantic search using embeddings",
+        "query_source": "Load pages from a database with time filtering",
+        "write_agent_journal": "Write to your private agent journal",
+        "get_agent_messaging_config": "Read messaging configuration",
+        "update_agent_messaging_config": "Update messaging configuration",
+        "list_available_messaging_channels": "List Slack/Discord channels",
+    },
+    "gmail": {
+        "send_message": "Send a new email message",
+        "create_draft": "Create an email draft (not sent)",
+        "reply_to_message": "Reply to an existing email",
+        "draft_reply": "Draft a reply to an existing email (not sent)",
+    },
+    "calendar": {
+        "create_event": "Create a calendar event",
+        "update_event": "Update a calendar event",
+        "delete_event": "Delete a calendar event",
+    },
+}
+
+
+def builtin_tool_names(server: str) -> List[str]:
+    """Return the catalog tool names for a built-in MCP server (or [])."""
+    return list(BUILTIN_TOOL_CATALOG.get(server, {}).keys())
+
+
 @dataclass
 class AgentConfig:
     """Configuration for a scheduled agent."""
@@ -74,6 +107,18 @@ class AgentConfig:
     sdk_enabled: bool = True  # Use SDK for execution
     sdk_permission_mode: str = "bypassPermissions"  # or "default", "acceptEdits", "plan"
     sdk_allowed_tools: Optional[List[str]] = None  # Override default tools
+
+    # Granular per-server tool permissions.
+    # Maps MCP server name → list of allowed tool names within that server.
+    #   - server key absent OR value is None → all tools on that server allowed
+    #     (back-compat for agents created before this field existed)
+    #   - empty list → no tools allowed (server is fully blocked)
+    #   - non-empty list → only the listed tools are allowed
+    # Enforced in two places: the MCP server itself filters its `list_tools()`
+    # output based on this list (passed via --allowed-tools), AND the SDK
+    # `allowed_tools` is computed from this so the model never sees blocked
+    # tools.
+    tool_permissions: Optional[Dict[str, Optional[List[str]]]] = None
 
     # NEW: Agentic loop for conversations (tool use in tag-to-chat)
     agentic_loop_enabled: bool = True  # Use agentic turn with tools in conversations
@@ -178,6 +223,26 @@ class AgentConfig:
         if self.allowed_channel_ids is None:
             return True
         return channel_id in self.allowed_channel_ids
+
+    def get_allowed_tools_for_server(self, server: str) -> Optional[List[str]]:
+        """Return the explicit allowlist for an MCP server, or None for 'all allowed'.
+
+        - None / missing key → all tools on the server are allowed (back-compat)
+        - [] → no tools are allowed
+        - [...] → only listed tools are allowed
+        """
+        if not self.tool_permissions:
+            return None
+        if server not in self.tool_permissions:
+            return None
+        return self.tool_permissions.get(server)
+
+    def is_tool_allowed(self, server: str, tool: str) -> bool:
+        """Check whether *tool* on *server* is permitted for this agent."""
+        allow = self.get_allowed_tools_for_server(server)
+        if allow is None:
+            return True
+        return tool in allow
 
     def can_query_source(self, source_name: str, days: int) -> bool:
         """Check if agent can query this source with given time range"""

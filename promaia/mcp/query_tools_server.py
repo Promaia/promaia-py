@@ -44,6 +44,7 @@ server = Server("promaia-query-tools")
 WORKSPACE = None
 AGENT_CONFIG = None
 ALLOWED_CHANNEL_IDS = None  # Optional[List[str]] — restrict query results to these channels
+ALLOWED_TOOLS = None  # Optional[set[str]] — when set, only these tool names are advertised/dispatched
 
 
 def _filter_pages_by_channel(pages: list, allowed_ids: list) -> list:
@@ -94,10 +95,17 @@ def _filter_loaded_content_by_channel(
     return result
 
 
+def _filter_tools_by_permission(tools: list) -> list:
+    """Drop any tools not in ALLOWED_TOOLS (None means no restriction)."""
+    if ALLOWED_TOOLS is None:
+        return tools
+    return [t for t in tools if t.name in ALLOWED_TOOLS]
+
+
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     """List available query tools"""
-    return [
+    all_tools = [
         Tool(
             name="query_sql",
             description="Execute SQL queries using natural language to search for exact text/keywords in content. "
@@ -234,12 +242,18 @@ async def list_tools() -> list[Tool]:
             }
         )
     ]
+    return _filter_tools_by_permission(all_tools)
 
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Execute a query tool"""
     logger.info(f"Tool call: {name} with args: {arguments}")
+
+    if ALLOWED_TOOLS is not None and name not in ALLOWED_TOOLS:
+        msg = f"❌ Permission denied: tool '{name}' is not enabled for this agent"
+        logger.warning(msg)
+        return [TextContent(type="text", text=msg)]
 
     try:
         if name == "query_sql":
@@ -630,13 +644,15 @@ async def _handle_write_journal(args: dict) -> list[TextContent]:
 
 async def main():
     """Run the MCP server"""
-    global WORKSPACE, AGENT_CONFIG, ALLOWED_CHANNEL_IDS
+    global WORKSPACE, AGENT_CONFIG, ALLOWED_CHANNEL_IDS, ALLOWED_TOOLS
 
     parser = argparse.ArgumentParser(description="Promaia Query Tools MCP Server")
     parser.add_argument("--workspace", required=True, help="Workspace name (e.g., 'koii')")
     parser.add_argument("--agent-id", required=False, help="Agent ID for permission enforcement")
     parser.add_argument("--allowed-channels", required=False,
                         help="JSON list of channel IDs this agent may access (omit for all)")
+    parser.add_argument("--allowed-tools", required=False,
+                        help="JSON list of tool names this agent may call (omit for all)")
     args = parser.parse_args()
 
     WORKSPACE = args.workspace
@@ -649,6 +665,15 @@ async def main():
             logger.info(f"Channel restrictions active: {ALLOWED_CHANNEL_IDS}")
         except Exception as e:
             logger.warning(f"Could not parse --allowed-channels: {e}")
+
+    # Parse tool-level permissions
+    if args.allowed_tools:
+        try:
+            tool_list = json.loads(args.allowed_tools)
+            ALLOWED_TOOLS = set(tool_list)
+            logger.info(f"Tool restrictions active: {sorted(ALLOWED_TOOLS)}")
+        except Exception as e:
+            logger.warning(f"Could not parse --allowed-tools: {e}")
 
     # Load agent config if provided (for permission enforcement)
     if args.agent_id:

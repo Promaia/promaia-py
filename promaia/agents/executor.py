@@ -1526,6 +1526,15 @@ Current time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
         # Each agent gets its own MCP server subprocess for proper isolation and permission enforcement
         mcp_servers = {}
 
+        import json as _json
+
+        def _allowed_tools_arg(server_name: str) -> list[str]:
+            """Return ['--allowed-tools', json] iff the agent has restricted *server_name*."""
+            allow = self.config.get_allowed_tools_for_server(server_name)
+            if allow is None:
+                return []
+            return ["--allowed-tools", _json.dumps(allow)]
+
         # Launch Promaia MCP server if agent has permission
         if self.config.mcp_tools and "promaia" in self.config.mcp_tools:
             promaia_args = [
@@ -1535,42 +1544,58 @@ Current time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
             ]
             # Pass channel restrictions so query results are filtered
             if self.config.allowed_channel_ids:
-                import json as _json
                 promaia_args.extend([
                     "--allowed-channels", _json.dumps(self.config.allowed_channel_ids)
                 ])
+            promaia_args.extend(_allowed_tools_arg("promaia"))
             mcp_servers["promaia"] = {
                 "command": sys.executable,
                 "args": promaia_args,
                 "env": {}
             }
-            logger.info(f"✓ Configured Promaia MCP server (query tools)")
+            allow_log = self.config.get_allowed_tools_for_server("promaia")
+            logger.info(
+                f"✓ Configured Promaia MCP server (query tools) — "
+                f"tools: {allow_log if allow_log is not None else 'all'}"
+            )
 
         # Launch Gmail MCP server if agent has permission (write-only: send, draft, reply)
         if self.config.mcp_tools and "gmail" in self.config.mcp_tools:
+            gmail_args = [
+                "-m", "promaia.mcp.gmail_tools_server",
+                "--workspace", self.config.workspace,
+                "--agent-id", self.config.agent_id or self.config.name,
+            ]
+            gmail_args.extend(_allowed_tools_arg("gmail"))
             mcp_servers["gmail"] = {
                 "command": sys.executable,
-                "args": [
-                    "-m", "promaia.mcp.gmail_tools_server",
-                    "--workspace", self.config.workspace,
-                    "--agent-id", self.config.agent_id or self.config.name
-                ],
+                "args": gmail_args,
                 "env": {}
             }
-            logger.info(f"✓ Configured Gmail MCP server (write-only: send/draft/reply)")
+            allow_log = self.config.get_allowed_tools_for_server("gmail")
+            logger.info(
+                f"✓ Configured Gmail MCP server — tools: "
+                f"{allow_log if allow_log is not None else 'all (send/draft/reply)'}"
+            )
 
         # Launch Calendar MCP server if agent has permission (write-only: create, update, delete)
         if self.config.mcp_tools and "calendar" in self.config.mcp_tools:
+            calendar_args = [
+                "-m", "promaia.mcp.calendar_tools_server",
+                "--workspace", self.config.workspace,
+                "--agent-id", self.config.agent_id or self.config.name,
+            ]
+            calendar_args.extend(_allowed_tools_arg("calendar"))
             mcp_servers["calendar"] = {
                 "command": sys.executable,
-                "args": [
-                    "-m", "promaia.mcp.calendar_tools_server",
-                    "--workspace", self.config.workspace,
-                    "--agent-id", self.config.agent_id or self.config.name
-                ],
+                "args": calendar_args,
                 "env": {}
             }
-            logger.info(f"✓ Configured Calendar MCP server (write-only: create/update/delete)")
+            allow_log = self.config.get_allowed_tools_for_server("calendar")
+            logger.info(
+                f"✓ Configured Calendar MCP server — tools: "
+                f"{allow_log if allow_log is not None else 'all (create/update/delete)'}"
+            )
 
         # Log configured MCP tools
         if self.config.mcp_tools:

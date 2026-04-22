@@ -1176,3 +1176,126 @@ async def select_mcp_tools(available_tools: List[str], preselected: Optional[Lis
         return result_tools
     else:
         return []
+
+
+# ============================================================================
+# Per-Server Sub-Tool Selector (for granular tool permissions)
+# ============================================================================
+
+async def select_server_tools(
+    server_name: str,
+    tools: List[Tuple[str, str]],
+    preselected: Optional[List[str]] = None,
+) -> Optional[List[str]]:
+    """Interactive checkbox selector for which tools on *server_name* are enabled.
+
+    Args:
+        server_name: Display name (e.g. "promaia").
+        tools: List of (tool_name, description) tuples.
+        preselected: Optional list of tool names to start checked. If None,
+            all tools are checked by default.
+
+    Returns:
+        - List of selected tool names. Empty list means "block all tools on
+          this server".
+        - None if the user cancelled (caller should treat as 'no change').
+    """
+    console = Console()
+    if not tools:
+        return None
+
+    preselected_set = set(preselected) if preselected is not None else {t for t, _ in tools}
+    enabled_states = [(name in preselected_set) for name, _ in tools]
+    current_focus = 0
+    confirmed = False
+
+    def _status_line() -> str:
+        n = sum(enabled_states)
+        total = len(enabled_states)
+        return (
+            f"{server_name} | Enabled: {n}/{total} | "
+            f"↑↓:Navigate SPACE:Toggle a:All n:None ENTER:Confirm ESC:Skip"
+        )
+
+    def _entry_display(i: int) -> str:
+        checkbox = "☑" if enabled_states[i] else "☐"
+        name, desc = tools[i]
+        return f"{checkbox}  {name}  —  {desc}"
+
+    def _build_layout():
+        status_window = Window(
+            FormattedTextControl(text=_status_line),
+            height=1,
+        )
+        title_window = Window(
+            FormattedTextControl(text=_styled_header(f"Tools for '{server_name}'")),
+            height=1,
+            style="class:title",
+        )
+        entry_windows = []
+        for i in range(len(tools)):
+            entry_windows.append(
+                Window(
+                    FormattedTextControl(text=lambda i=i: _entry_display(i)),
+                    height=1,
+                    style=f"class:{'selected' if i == current_focus else 'unselected'}",
+                )
+            )
+        return Layout(HSplit([status_window, title_window, Window(height=1), *entry_windows]))
+
+    layout = _build_layout()
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.Up)
+    def _up(event):
+        nonlocal current_focus
+        if current_focus > 0:
+            current_focus -= 1
+            event.app.layout = _build_layout()
+
+    @bindings.add(Keys.Down)
+    def _down(event):
+        nonlocal current_focus
+        if current_focus < len(tools) - 1:
+            current_focus += 1
+            event.app.layout = _build_layout()
+
+    @bindings.add(' ')
+    def _toggle(event):
+        enabled_states[current_focus] = not enabled_states[current_focus]
+        event.app.layout = _build_layout()
+
+    @bindings.add('a')
+    def _all(event):
+        for i in range(len(enabled_states)):
+            enabled_states[i] = True
+        event.app.layout = _build_layout()
+
+    @bindings.add('n')
+    def _none(event):
+        for i in range(len(enabled_states)):
+            enabled_states[i] = False
+        event.app.layout = _build_layout()
+
+    @bindings.add(Keys.Enter)
+    def _confirm(event):
+        nonlocal confirmed
+        confirmed = True
+        event.app.exit()
+
+    @bindings.add(Keys.Escape)
+    def _cancel(event):
+        event.app.exit()
+
+    app = Application(
+        layout=layout,
+        key_bindings=bindings,
+        full_screen=False,
+        mouse_support=False,
+    )
+    await app.run_async()
+
+    if not confirmed:
+        return None
+
+    return [name for (name, _), on in zip(tools, enabled_states) if on]
