@@ -6655,21 +6655,44 @@ class ToolExecutor:
                     titles.append(title)
         return titles
 
+    def _sorted_sources(self) -> List[tuple]:
+        """Return (name, src) pairs with msg-anchored sources first, newest-msg first."""
+        indexed = []
+        unindexed = []
+        for name, src in self._sources.items():
+            if src.get("shelved_from_msg") is not None:
+                indexed.append((name, src))
+            else:
+                unindexed.append((name, src))
+        indexed.sort(key=lambda pair: pair[1]["shelved_from_msg"], reverse=True)
+        return indexed + unindexed
+
     def build_context_index(self) -> str:
-        """Build the context index string for the system prompt."""
+        """Build the context shelf index for the system prompt.
+
+        Sources produced by tool calls carry a @msg#N anchor matching the
+        stub that replaced their tool_result in message history. The model
+        can cross-reference the tool_use at message N with the body on
+        the shelf to see 'I did this, here's what came back.'
+        """
         if self._sources_muted or not self._sources:
             return ""
         lines = [
-            "## Your Context\n",
-            "Toggle sources ON/OFF with the `context` tool.",
-            "Check here BEFORE searching — the data you need may already be loaded.\n",
+            "## Context Shelf\n",
+            "Sources retrieved from tool calls in this conversation. Toggle ON/OFF with the `context` tool.",
+            "Shown newest first. `(from msg #N)` means the source was produced by the tool call at message N of this conversation — the stub at that message points back here.\n",
         ]
-        for name, src in self._sources.items():
+        for name, src in self._sorted_sources():
             state = "ON" if src["on"] else "OFF"
             origin = src.get("source", "unknown")
             count = src.get("page_count", 0)
             chars = len(src.get("content", ""))
-            lines.append(f"- [{state}] **{name}** ({count} entries, {chars // 1000}k chars, source: {origin})")
+            msg_ref = src.get("shelved_from_msg")
+            if msg_ref is not None:
+                anchor = f"from msg #{msg_ref}, via {origin}"
+            else:
+                anchor = f"via {origin}"
+            lines.append(f"- [{state}] **{name}** ({anchor}, {count} entries, {chars // 1000}k chars)")
             # OFF sources show titles so agent knows what's available without loading
             if not src["on"]:
                 titles = src.get("titles", [])
@@ -6678,11 +6701,15 @@ class ToolExecutor:
         return "\n".join(lines)
 
     def build_active_source_content(self) -> str:
-        """Build the combined content of all ON sources for the system prompt."""
+        """Build the combined content of all ON sources for the system prompt.
+
+        Follows the same newest-first order as the index so body position
+        matches the index listing.
+        """
         if self._sources_muted:
             return ""
         parts = []
-        for name, src in self._sources.items():
+        for name, src in self._sorted_sources():
             if src["on"] and src.get("content"):
                 parts.append(src["content"])
         return "\n\n".join(parts)
@@ -6712,15 +6739,22 @@ class ToolExecutor:
         Returns the number of results shelved. Stubs replace the inline
         content; the registered source is ON so think mode sees it
         immediately on its next turn.
+
+        Each shelved source records the message index it was produced at,
+        so the stub and the context shelf both carry a shared @msg#N
+        anchor — the model can cross-reference the tool_use in history
+        with the body on the shelf.
         """
         if not tool_use_ids:
             return 0
 
         id_set = set(tool_use_ids)
         shelved = 0
+        total = len(internal_messages)
 
         # Walk newest → oldest so multiple bursts behave predictably.
-        for msg in reversed(internal_messages):
+        for rev_idx, msg in enumerate(reversed(internal_messages)):
+            msg_idx = total - 1 - rev_idx
             if msg.get("role") != "user":
                 continue
             content = msg.get("content")
@@ -6740,7 +6774,7 @@ class ToolExecutor:
                 if len(result_text) < self._SHELVE_MIN_CHARS:
                     continue
                 # Skip if already a stub (idempotent)
-                if result_text.startswith("[tool result shelved]"):
+                if result_text.startswith("[tool result shelved"):
                     continue
 
                 tool_name = self._lookup_tool_name(internal_messages, tu_id)
@@ -6754,12 +6788,14 @@ class ToolExecutor:
                     "source": tool_name or "act_tool",
                     "titles": [title] if title else [],
                     "mounted_at_iteration": current_iteration,
+                    "shelved_from_msg": msg_idx,
                 }
 
                 stub = (
-                    f"[tool result shelved] source_id={source_id} "
+                    f"[tool result shelved @msg#{msg_idx}] source_id={source_id} "
                     f"tool={tool_name or 'unknown'} size={len(result_text)} chars\n"
-                    f"Call turn_on_source if you need to re-read this."
+                    f"The body is now on the Context Shelf under the same @msg#{msg_idx} "
+                    f"anchor. Call turn_on_source if it's been toggled off."
                 )
                 block["content"] = stub
                 shelved += 1
