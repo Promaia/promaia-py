@@ -106,6 +106,12 @@ LOOP_TICK_INTERVAL = 1
 # Seconds of recent typing activity that counts as "someone is typing"
 TYPING_RECENCY = 8
 
+# Feature flag: gate responses behind the typing-check + Haiku decision call.
+# When False, respond as soon as a message arrives (no wait-for-quiet, no
+# pre-flight decision). Flipped off so thinking isn't serialized behind a
+# typing grace period.
+RESPONSE_GATING_ENABLED = False
+
 # Ultimate timeout — stop loop if no activity for this long
 ULTIMATE_TIMEOUT = 600  # 10 minutes
 
@@ -309,26 +315,27 @@ class TagToChatLoop:
         if not self.state.pending_messages:
             return
 
-        # Someone is actively typing — defer
-        if self._is_typing_active(now):
-            logger.debug(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Typing detected, deferring")
-            return
-
-        # Scheduled wait hasn't elapsed
-        if now < self.state.next_check_in:
-            return
-
-        # Skip the Haiku decision call on first response — if someone just
-        # @mentioned us, they obviously want a response. Only use the decision
-        # call for follow-up messages after the first response.
-        if self._response_count > 0:
-            decision, _ = await self._make_decision()
-            thread_key = self.state.thread_id or self.state.channel_id or "dm"
-            logger.info(f"[tag2chat:{thread_key[:12]}] Decision: {decision}")
-
-            if decision == "wait":
-                self.state.next_check_in = now + 5
+        if RESPONSE_GATING_ENABLED:
+            # Someone is actively typing — defer
+            if self._is_typing_active(now):
+                logger.debug(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Typing detected, deferring")
                 return
+
+            # Scheduled wait hasn't elapsed
+            if now < self.state.next_check_in:
+                return
+
+            # Skip the Haiku decision call on first response — if someone just
+            # @mentioned us, they obviously want a response. Only use the
+            # decision call for follow-up messages after the first response.
+            if self._response_count > 0:
+                decision, _ = await self._make_decision()
+                thread_key = self.state.thread_id or self.state.channel_id or "dm"
+                logger.info(f"[tag2chat:{thread_key[:12]}] Decision: {decision}")
+
+                if decision == "wait":
+                    self.state.next_check_in = now + 5
+                    return
 
         # answer_now (or first response)
         await self._respond()
