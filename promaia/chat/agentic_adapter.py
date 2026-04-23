@@ -81,9 +81,33 @@ def _load_agent_calendars(workspace: str) -> Dict[str, str]:
         if not creds:
             return {}
 
-        # Find or create "maia" agent
+        # Find or create "maia" agent. Auto-creating only happens if there's
+        # no maia at all. If maia is missing because the config-wipe bug
+        # nuked her (see memory/project_config_wipe_bug.md), we'd rather
+        # FAIL LOUDLY than silently resurrect a bare-bones agent with
+        # databases=[] and a hardcoded mcp_tools list — that pattern was
+        # the smoking gun for today's nested-field wipe.
         maia_agent = next((a for a in agents if a.name == "maia"), None)
         if not maia_agent:
+            # Check whether agents.json has a maia we just failed to load —
+            # if so, refuse to overwrite, force human investigation.
+            try:
+                from promaia.config.atomic_io import read_section
+                section = read_section("agents") or {}
+                if isinstance(section, dict):
+                    on_disk = section.get("agents", [])
+                else:
+                    on_disk = section if isinstance(section, list) else []
+                if any(a.get("name") == "maia" for a in on_disk):
+                    logger.error(
+                        "Refusing to auto-create maia: agents.json HAS a maia "
+                        "but load_agents() did not return her. This is the "
+                        "config-wipe failure mode. NOT overwriting. See "
+                        "memory/project_config_wipe_bug.md."
+                    )
+                    return {}
+            except Exception:
+                logger.warning("agents.json check before auto-create failed", exc_info=True)
             maia_agent = AgentConfig(
                 name="maia",
                 agent_id="maia",

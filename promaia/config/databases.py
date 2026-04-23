@@ -171,147 +171,238 @@ class DatabaseManager:
             self.load_config()
     
     def load_config(self):
-        """Load configuration from file."""
+        """Load configuration from file.
+
+        Reads from databases.json (per-section, atomic, source of truth) when
+        present; falls back to the databases key in promaia.config.json for
+        unmigrated installs.
+        """
         if not os.path.exists(self.config_file):
             logger.info(f"Configuration file {self.config_file} not found. Creating default configuration.")
             self.create_default_config()
             return
-        
+
         try:
             # Load environment variables first
             load_env_file()
-            
+
+            # Try per-section file first (source of truth post-migration)
+            from promaia.config.atomic_io import read_section
+            section = read_section("databases")
+            databases_config: Optional[Dict[str, Any]] = None
+            if section is not None:
+                if isinstance(section, dict) and "databases" in section:
+                    databases_config = section["databases"]
+                elif isinstance(section, dict):
+                    # bare dict of {name: db_config}
+                    databases_config = section
+
+            # Always read the legacy blob for global settings + fallback dbs
             with open(self.config_file, 'r') as f:
                 config_data = json.load(f)
-            
-            # Resolve environment variables in configuration
             config_data = resolve_env_variables(config_data)
-            
-            # Load global settings
             self.global_settings = config_data.get("global", {})
-            
-            # Load database configurations
-            databases_config = config_data.get("databases", {})
+
+            if databases_config is None:
+                databases_config = config_data.get("databases", {})
+            else:
+                # Resolve env vars in the section data too
+                databases_config = resolve_env_variables({"databases": databases_config})["databases"]
+
             for name, db_config in databases_config.items():
                 self.databases[name] = DatabaseConfig(name, db_config)
-                
+
             logger.info(f"Loaded configuration for {len(self.databases)} databases")
-            
+
         except Exception as e:
             logger.error(f"Error loading configuration: {e}")
             self.create_default_config()
     
-    def save_config(self):
-        """Update config on disk — never add or remove databases.
+    def _read_config_or_quarantine(self, caller: str) -> Optional[Dict[str, Any]]:
+        """Read promaia.config.json, returning None if it's missing or corrupted.
 
-        Reads the current file from disk and only updates database entries that
-        are ALREADY present on disk.  It never adds entries from memory that are
-        absent on disk (avoids restoring deleted databases from stale in-memory
-        state), and never removes entries that are on disk but absent from memory
-        (deletions must go through remove_database()).
+        If the file exists but won't parse, back it up to a quarantine path
+        and log loudly. Returning None signals callers to abort their write
+        rather than overwrite the file (which would silently nuke top-level
+        keys this code doesn't know about — agents, mcp_servers, etc.).
 
-        For a completely fresh config file (no file exists yet), it falls back to
-        writing all in-memory databases so that create_default_config() works.
-
-        For adding a new database use _write_database_to_disk(); for deletions use
-        remove_database(); for single-field patches use save_database_field().
+        See memory/project_config_wipe_bug.md for the full incident history.
         """
-        is_fresh = not os.path.exists(self.config_file)
+        if not os.path.exists(self.config_file):
+            return None
+
         try:
             with open(self.config_file, 'r') as f:
-                file_data = json.load(f)
-        except Exception:
+                return json.load(f)
+        except Exception as e:
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            quarantine = f"{self.config_file}.corrupted-{ts}"
+            try:
+                import shutil
+                shutil.copy2(self.config_file, quarantine)
+            except Exception as copy_err:
+                logger.error(
+                    f"{caller}: config unparseable AND quarantine copy failed: "
+                    f"parse_err={e} copy_err={copy_err}"
+                )
+                raise RuntimeError(
+                    f"promaia.config.json is corrupted and could not be quarantined: {e}"
+                ) from e
+            logger.error(
+                f"{caller}: promaia.config.json is corrupted ({e}). "
+                f"Backed up to {quarantine}. Refusing to write — would silently "
+                f"drop unknown top-level keys (agents, mcp_servers, etc.). "
+                f"See memory/project_config_wipe_bug.md."
+            )
+            raise RuntimeError(
+                f"promaia.config.json is corrupted: {e}. Backed up to {quarantine}. "
+                f"Manual repair required before writes can resume."
+            ) from e
+
+    def _read_databases_section_for_write(self) -> Dict[str, Any]:
+        """Read the current databases section from disk.
+
+        Prefers databases.json (per-section, atomic). If it's missing OR
+        corrupted, falls back to the legacy blob via the quarantine helper —
+        which itself refuses to proceed on corruption (raises RuntimeError).
+        """
+        from promaia.config.atomic_io import read_section
+        section = read_section("databases")
+        if section is not None:
+            if isinstance(section, dict) and "databases" in section:
+                return dict(section["databases"])
+            if isinstance(section, dict):
+                return dict(section)
+        # Fall back to the legacy blob (quarantines on corruption)
+        file_data = self._read_config_or_quarantine("_read_databases_section_for_write")
+        if file_data is None:
+            return {}
+        return dict(file_data.get("databases", {}))
+
+    def _write_databases_section(self, databases_dict: Dict[str, Any]) -> None:
+        """Atomic-write the databases section, then mirror to legacy blob.
+
+        Source of truth is databases.json (atomic + backups). The legacy
+        blob mirror is best-effort for backward compat with code paths that
+        still read the blob directly.
+        """
+        from promaia.config.atomic_io import write_section
+        # Source of truth: per-section file, atomic + backups.
+        write_section("databases", {"databases": databases_dict})
+
+        # Mirror to legacy blob best-effort.
+        try:
+            file_data = self._read_config_or_quarantine("_write_databases_section[mirror]")
+        except RuntimeError as e:
+            logger.warning(
+                f"_write_databases_section: legacy blob mirror skipped "
+                f"(databases.json is authoritative): {e}"
+            )
+            return
+        if file_data is None:
             file_data = {}
-            is_fresh = True
-
         file_data["global"] = self.global_settings
-
-        file_databases = file_data.get("databases", {})
-        if is_fresh:
-            # No file yet — write everything so create_default_config() works.
-            for name, db in self.databases.items():
-                file_databases[name] = db.to_dict()
-        else:
-            # Existing file — only update entries already on disk.
-            # A stale long-running service calling save_config() will NOT restore
-            # a database that was removed from disk by remove_database().
-            for name in list(file_databases.keys()):
-                if name in self.databases:
-                    file_databases[name] = self.databases[name].to_dict()
-        file_data["databases"] = file_databases
-
+        file_data["databases"] = databases_dict
         try:
             with open(self.config_file, 'w') as f:
                 json.dump(file_data, f, indent=2)
-            logger.debug(f"Configuration saved to {self.config_file}")
         except Exception as e:
-            logger.error(f"Error saving configuration: {e}")
-    
-    def save_database_field(self, db_config: 'DatabaseConfig', field: str):
-        """Update a single field for one database in the config file.
+            logger.warning(
+                f"_write_databases_section: legacy blob mirror write failed "
+                f"(databases.json is authoritative): {e}"
+            )
 
-        Reads the current file from disk, patches only the specified field for
-        the given database, and writes back.  This avoids overwriting changes
-        made by concurrent processes (e.g. channel edits from another session).
+    def save_config(self):
+        """Update config on disk — never add or remove databases.
+
+        Reads the current databases section from disk and only updates entries
+        that are ALREADY present (deletions must go through remove_database();
+        additions through add_database() / _write_database_to_disk()).
+
+        Source of truth: databases.json (atomic per-section). Legacy blob is
+        mirrored best-effort.
         """
         try:
-            with open(self.config_file, 'r') as f:
-                file_data = json.load(f)
+            on_disk = self._read_databases_section_for_write()
+        except RuntimeError as e:
+            logger.error(f"save_config aborted: {e}")
+            return
+
+        if not on_disk:
+            # Fresh install — write everything from memory so create_default_config() works.
+            file_databases = {name: db.to_dict() for name, db in self.databases.items()}
+        else:
+            file_databases = dict(on_disk)
+            for name in list(file_databases.keys()):
+                if name in self.databases:
+                    file_databases[name] = self.databases[name].to_dict()
+
+        try:
+            self._write_databases_section(file_databases)
+            logger.debug(f"Configuration saved (databases.json + blob mirror)")
         except Exception as e:
-            logger.warning(f"save_database_field: could not read config, falling back to full save: {e}")
+            logger.error(f"Error saving configuration: {e}")
+
+    def save_database_field(self, db_config: 'DatabaseConfig', field: str):
+        """Update a single field for one database.
+
+        Patches only the specified field — no re-serialization of the whole
+        DatabaseConfig — so concurrent changes to other fields by other
+        sessions are preserved.
+        """
+        try:
+            file_databases = self._read_databases_section_for_write()
+        except RuntimeError as e:
+            logger.error(f"save_database_field aborted for '{db_config.name}.{field}': {e}")
+            return
+        if not file_databases:
+            logger.warning("save_database_field: no databases on disk, falling back to full save")
             self.save_config()
             return
 
-        databases = file_data.get("databases", {})
-
-        # Try to find the database key on disk — it may be stored under
+        # Try to find the database key — it may be stored under
         # db_config.name OR the qualified name (workspace.nickname).
         db_key = db_config.name
-        db_section = databases.get(db_key)
+        db_section = file_databases.get(db_key)
         if db_section is None:
             qualified = db_config.get_qualified_name()
-            if qualified in databases:
+            if qualified in file_databases:
                 db_key = qualified
-                db_section = databases[db_key]
+                db_section = file_databases[db_key]
 
         if db_section is None:
-            logger.debug(f"save_database_field: database '{db_config.name}' not found on disk, falling back to full save")
+            logger.debug(f"save_database_field: database '{db_config.name}' not on disk, falling back to full save")
             self.save_config()
             return
 
         value = getattr(db_config, field)
-        # For nested dict fields, convert DatabaseConfig attribute to serializable form
         if field == "property_filters":
             db_section[field] = dict(value) if value else {}
         else:
             db_section[field] = value
+        file_databases[db_key] = db_section
 
         try:
-            with open(self.config_file, 'w') as f:
-                json.dump(file_data, f, indent=2)
+            self._write_databases_section(file_databases)
             logger.debug(f"Patched {field} for database '{db_key}'")
         except Exception as e:
             logger.error(f"Error patching config field: {e}")
 
     def _write_database_to_disk(self, qualified_name: str):
-        """Add or overwrite a single database entry in the config file.
+        """Add or overwrite a single database entry.
 
         Used by add_database() so that new databases are written atomically
-        without touching any other database entry.
+        without touching other database entries.
         """
         try:
-            with open(self.config_file, 'r') as f:
-                file_data = json.load(f)
-        except Exception:
-            file_data = {}
-
-        file_databases = file_data.get("databases", {})
+            file_databases = self._read_databases_section_for_write()
+        except RuntimeError as e:
+            logger.error(f"_write_database_to_disk aborted for '{qualified_name}': {e}")
+            return
         file_databases[qualified_name] = self.databases[qualified_name].to_dict()
-        file_data["databases"] = file_databases
 
         try:
-            with open(self.config_file, 'w') as f:
-                json.dump(file_data, f, indent=2)
+            self._write_databases_section(file_databases)
             logger.debug(f"Wrote database '{qualified_name}' to disk")
         except Exception as e:
             logger.error(f"Error writing database '{qualified_name}' to disk: {e}")
@@ -573,13 +664,9 @@ class DatabaseManager:
             del self.databases[key_to_remove]
             # Patch the on-disk config directly for an atomic delete.
             try:
-                with open(self.config_file, 'r') as f:
-                    file_data = json.load(f)
-                file_databases = file_data.get("databases", {})
+                file_databases = self._read_databases_section_for_write()
                 file_databases.pop(key_to_remove, None)
-                file_data["databases"] = file_databases
-                with open(self.config_file, 'w') as f:
-                    json.dump(file_data, f, indent=2)
+                self._write_databases_section(file_databases)
             except Exception as e:
                 logger.warning(f"remove_database: direct patch failed, falling back to save_config: {e}")
                 self.save_config()
