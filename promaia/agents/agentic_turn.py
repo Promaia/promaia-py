@@ -8220,6 +8220,7 @@ async def agentic_turn(
     context_data_block: str = "",
     suite_registry: Optional[Dict] = None,
     mcp_suites: Optional[Dict] = None,
+    model: str = "claude-sonnet-4-6",
 ) -> AgenticTurnResult:
     """
     Run a self-contained agentic turn with tool use.
@@ -8410,8 +8411,9 @@ async def agentic_turn(
                 logger.debug(f"Failed to log agentic prompt: {log_err}")
 
         # Build API call kwargs
+        from promaia.ai.models import resolve_anthropic_model_id
         api_kwargs = dict(
-            model=f"{prefix}claude-sonnet-4-6",
+            model=f"{prefix}{resolve_anthropic_model_id(model)}",
             system=trimmed_system,
             messages=internal_messages,
             max_tokens=4096,

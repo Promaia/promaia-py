@@ -642,6 +642,17 @@ class ConversationManager:
             def _noop_print(*args, **kwargs):
                 pass
 
+            # Pick the LLM model:
+            #   1) honour an explicit per-conversation override (set via Slack `/model`)
+            #   2) otherwise Slack defaults to Claude Opus 4.6 (1M), other platforms to Sonnet
+            model_override = state.context.get("model_override")
+            if model_override:
+                model = model_override
+            elif state.platform == "slack":
+                model = "claude-opus-4-6-1m"
+            else:
+                model = None  # run_agentic_turn falls back to its default (Sonnet)
+
             result = await run_agentic_turn(
                 system_prompt=system_prompt,
                 messages=messages,
@@ -653,6 +664,7 @@ class ConversationManager:
                 source_states=source_states,
                 on_tool_activity=on_tool_activity,
                 messaging_enabled=getattr(agent, 'messaging_enabled', False),
+                model=model,
             )
 
             output = result.response_text

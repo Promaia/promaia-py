@@ -718,6 +718,7 @@ async def run_agentic_turn(
     source_states: Optional[Dict[str, Dict]] = None,
     on_tool_activity: Optional[Callable] = None,
     messaging_enabled: bool = False,
+    model: Optional[str] = None,
 ) -> AgenticTurnResult:
     """Run an agentic turn using the full autonomous tool loop.
 
@@ -888,7 +889,7 @@ async def run_agentic_turn(
 
     # Run the agentic loop
     try:
-        result = await agentic_turn(
+        agentic_kwargs = dict(
             system_prompt=enhanced_prompt,
             messages=messages,
             tools=tools,
@@ -899,6 +900,9 @@ async def run_agentic_turn(
             suite_registry=suite_registry,
             mcp_suites=mcp_suites if mcp_suites else None,
         )
+        if model:
+            agentic_kwargs["model"] = model
+        result = await agentic_turn(**agentic_kwargs)
     finally:
         await executor.disconnect_mcp_servers()
 
