@@ -27,7 +27,7 @@ current configuration. Present it clearly.
    - **Prompt**: System prompt / instructions
    - **Schedule**: Interval in minutes
    - **Max iterations**: Per-run iteration limit
-   - **Messaging**: Enable/disable messaging tools (send_message, start_conversation)
+   - **Messaging**: Enable/disable messaging tools (start_conversation, end_conversation)
    - **Channel permissions**: Restrict which Slack/Discord channels the \
 agent can respond in and query. Use `list_channels` to show available \
 channels. Pass channel IDs as `allowed_channel_ids` via `update_agent`. \

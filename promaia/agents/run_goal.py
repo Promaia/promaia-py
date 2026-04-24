@@ -112,12 +112,6 @@ def _summarize_tool_input(tool_name: str, tool_input: dict) -> str:
         db = tool_input.get("database", "")
         days = tool_input.get("days", "")
         return f"{db}" + (f" ({days}d)" if days else "")
-    elif tool_name == "send_message":
-        user = tool_input.get("user", "")
-        ch = tool_input.get("channel_id", "")
-        target = f"DM {user}" if user else ch
-        content = tool_input.get("content", "")
-        return f"→ {target}: {content[:60]}" if content else f"→ {target}"
     elif tool_name == "send_email":
         to = tool_input.get("to", "")
         subj = tool_input.get("subject", "")

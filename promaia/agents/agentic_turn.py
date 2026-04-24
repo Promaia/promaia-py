@@ -451,54 +451,11 @@ GMAIL_READ_TOOL_DEFINITIONS = [
 
 MESSAGING_TOOL_DEFINITIONS = [
     {
-        "name": "send_message",
-        "description": (
-            "Send a one-way message (no reply expected). "
-            "Use 'user' to DM someone by name, or 'channel_id' for a channel. "
-            "For back-and-forth conversations, use start_conversation instead."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "channel_id": {
-                    "type": "string",
-                    "description": (
-                        "The channel ID to send the message to. "
-                        "Use 'current' to send to the current conversation's channel. "
-                        "Omit if using 'user' to send a DM instead."
-                    )
-                },
-                "user": {
-                    "type": "string",
-                    "description": (
-                        "The user's name to send a direct message to. "
-                        "Looks up the user by display name, real name, or username "
-                        "and opens a DM channel automatically."
-                    )
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The message content to send."
-                },
-                "thread_id": {
-                    "type": "string",
-                    "description": (
-                        "Optional thread ID to reply in a specific thread. "
-                        "Omit to post in the channel."
-                    )
-                }
-            },
-            "required": ["content"]
-        }
-    },
-    {
         "name": "start_conversation",
         "description": (
-            "Start a back-and-forth DM conversation with a user. "
-            "Sends the initial message, then waits for their reply. "
-            "Returns the user's response so you can continue the conversation. "
-            "Use this when you need a reply (e.g. asking a question, confirming something). "
-            "For one-way notifications, use send_message instead."
+            "Start a DM conversation with a user. "
+            "Sends the initial message and listens for their reply, "
+            "returning the user's response so you can continue the conversation."
         ),
         "input_schema": {
             "type": "object",
@@ -2504,7 +2461,7 @@ AGENT_TOOL_DEFINITIONS = [
                     "type": "boolean",
                     "description": (
                         "Whether this agent can use messaging tools "
-                        "(send_message, start_conversation, etc.)."
+                        "(start_conversation, end_conversation, etc.)."
                     )
                 },
                 "allowed_channel_ids": {
@@ -3138,8 +3095,6 @@ class ToolExecutor:
             elif tool_name == "write_agent_journal":
                 return await self._write_journal(tool_input)
             # Messaging tools
-            elif tool_name == "send_message":
-                return await self._send_message(tool_input)
             elif tool_name == "start_conversation":
                 return await self._start_conversation(tool_input)
             elif tool_name == "end_conversation":
@@ -3576,122 +3531,6 @@ class ToolExecutor:
             return await self.platform.find_user_by_name(user_name)
 
         return None
-
-    async def _send_message(self, tool_input: Dict) -> str:
-        if not self.platform:
-            return "Error: messaging is not available in this context (no platform)."
-
-        content = tool_input.get("content", "")
-        if not content:
-            return "Error: missing 'content' parameter"
-
-        user_name = tool_input.get("user")
-        channel_id = tool_input.get("channel_id")
-        thread_id = tool_input.get("thread_id")
-
-        # DM by user name — resolve to channel via conversations.open
-        if user_name:
-            user_info = await self._resolve_user(user_name)
-            if not user_info:
-                return f"Error: could not find user matching '{user_name}'"
-            dm_channel = await self.platform.open_dm(user_info["id"])
-            if not dm_channel:
-                return f"Error: could not open DM with {user_info['real_name'] or user_name}"
-            channel_id = dm_channel
-            target_desc = f"DM to {user_info.get('real_name') or user_info.get('name', user_name)}"
-        elif channel_id == "current" or (not channel_id and not user_name):
-            if not self.channel_context:
-                return "Error: no current channel context available. Use 'user' to DM someone or provide a channel_id."
-            channel_id = self.channel_context["channel_id"]
-            thread_id = thread_id or self.channel_context.get("thread_id")
-            target_desc = f"channel {channel_id}"
-        else:
-            target_desc = f"channel {channel_id}"
-
-        if not channel_id:
-            return "Error: must provide either 'user' or 'channel_id'"
-
-        meta = await self.platform.send_message(
-            channel_id=channel_id,
-            content=content,
-            thread_id=thread_id,
-        )
-
-        # For top-level DMs, register a dormant conversation so replies
-        # can be routed back with full context of the original message.
-        if user_name and not thread_id:
-            await self._register_dormant_dm(
-                meta=meta,
-                user_info=user_info,
-                dm_channel=channel_id,
-                content=content,
-            )
-
-        if thread_id:
-            target_desc += f" (thread {thread_id[:12]})"
-        return f"Message sent to {target_desc}"
-
-    async def _register_dormant_dm(
-        self, meta, user_info: Dict, dm_channel: str, content: str,
-    ) -> None:
-        """Create a dormant ConversationState for a DM so replies are routable."""
-        try:
-            from promaia.agents.conversation_manager import (
-                ConversationManager, ConversationState,
-            )
-            from datetime import datetime, timezone
-
-            conv_manager = ConversationManager()
-            platform_name = getattr(self.platform, "platform_name", "slack")
-
-            if platform_name not in conv_manager.platforms:
-                conv_manager.register_platform(platform_name, self.platform)
-
-            agent_id = (
-                getattr(self.agent, "agent_id", None)
-                or getattr(self.agent, "name", "agent")
-            )
-            real_name = (
-                user_info.get("real_name")
-                or user_info.get("name")
-                or "unknown"
-            )
-
-            now = datetime.now(timezone.utc).isoformat()
-            msg_ts = str(int(datetime.now(timezone.utc).timestamp()))
-            conversation_id = f"{platform_name}_{dm_channel}_{msg_ts}"
-            dm_thread_id = meta.message_id
-
-            state = ConversationState(
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                platform=platform_name,
-                channel_id=dm_channel,
-                user_id=user_info["id"],
-                thread_id=dm_thread_id,
-                status="dormant",
-                last_message_at=now,
-                messages=[{
-                    "role": "assistant",
-                    "content": content,
-                    "timestamp": now,
-                }],
-                context={"is_dm": True, "user_name": real_name},
-                timeout_seconds=600,
-                max_turns=None,
-                turn_count=0,
-                created_at=now,
-                conversation_type="tag_to_chat",
-                is_active=True,
-                conversation_partner=real_name,
-            )
-            await conv_manager._save_state(state)
-            logger.info(
-                f"Registered dormant DM conversation {conversation_id} "
-                f"(thread {dm_thread_id[:12]}) for replies from {real_name}"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to register dormant DM conversation: {e}")
 
     async def _start_conversation(self, tool_input: Dict) -> str:
         """Start a real interactive DM conversation and wait for it to complete.
@@ -9240,10 +9079,6 @@ def _summarize_tool_result(
 
     elif tool_name == "delete_calendar_event":
         return _vs("Delete event", tool_input.get("event_id", "")[:12])
-
-    elif tool_name == "send_message":
-        target = tool_input.get("channel_id", "")
-        return _vs("Send message", target)
 
     elif tool_name == "notion_search":
         phrase = _extract_count_phrase(result)

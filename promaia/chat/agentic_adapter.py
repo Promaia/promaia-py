@@ -240,12 +240,11 @@ def build_agentic_system_prompt(
     if has_platform:
         tool_sections_parts.append(
             "## Messaging Tools\n\n"
-            "- **send_message**: Send a one-way message (no reply expected).\n"
-            "  Use 'user' to DM someone by name, or 'channel_id' for a channel.\n"
-            "- **start_conversation**: Start a back-and-forth DM conversation.\n"
-            "  Sends your message and waits for the user's reply (up to 15 min).\n"
-            "  Returns the user's response. Use this when you need a reply.\n"
-            "  You can call it multiple times to continue the conversation."
+            "- **start_conversation**: DM a user. This is the only tool for "
+            "messaging a user directly — use it for questions, confirmations, "
+            "and notifications alike. Sends your message and listens for the "
+            "user's reply (up to 15 min), returning their response. "
+            "Call it again to continue the conversation."
         )
     if "gmail" in mcp_tools:
         tool_sections_parts.append(
