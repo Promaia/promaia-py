@@ -453,9 +453,13 @@ MESSAGING_TOOL_DEFINITIONS = [
     {
         "name": "start_conversation",
         "description": (
-            "Start a DM conversation with a user. "
-            "Sends the initial message and listens for their reply, "
-            "returning the user's response so you can continue the conversation."
+            "Send the opening message of a DM to a user and hand off. "
+            "The conversation is registered so that when the user replies, "
+            "the Slack reply handler picks it up and continues it using your "
+            "agent personality. This tool returns as soon as the message is "
+            "sent — do NOT expect a reply back from this call, and do not "
+            "call it again just to wait. Use it once per user you want to "
+            "reach, then conclude your turn."
         ),
         "input_schema": {
             "type": "object",
@@ -3533,14 +3537,13 @@ class ToolExecutor:
         return None
 
     async def _start_conversation(self, tool_input: Dict) -> str:
-        """Start a real interactive DM conversation and wait for it to complete.
+        """Send the opening message of a DM and hand off to the reply handler.
 
-        Creates a TagToChatLoop that drives a full back-and-forth conversation
-        using the agent's personality. The agentic turn suspends until the
-        conversation goes dormant (user stops replying), then resumes with
-        the full transcript.
+        Persists a ConversationState keyed by the message's thread_id. When the
+        user replies, the Slack bot's dormant-thread waker rehydrates a
+        TagToChatLoop in its own process and drives the conversation. This tool
+        returns immediately so the current agentic turn can conclude.
         """
-        import asyncio
         if not self.platform:
             return "Error: messaging is not available in this context (no platform)."
 
@@ -3553,12 +3556,10 @@ class ToolExecutor:
         if not message:
             return "Error: missing 'message' parameter"
 
-        # Resolve user
         user_info = await self._resolve_user(user_name)
         if not user_info:
             return f"Error: could not find user matching '{user_name}'"
 
-        # Open DM channel
         dm_channel = await self.platform.open_dm(user_info["id"])
         if not dm_channel:
             return f"Error: could not open DM with {user_info['real_name'] or user_name}"
@@ -3567,13 +3568,11 @@ class ToolExecutor:
             from promaia.agents.conversation_manager import (
                 ConversationManager, ConversationState,
             )
-            from promaia.agents.tag_to_chat import TagToChatLoop
             from datetime import datetime, timezone
 
             conv_manager = ConversationManager()
             platform_name = getattr(self.platform, "platform_name", "slack")
 
-            # Register platform so the Slack bot can route replies
             if platform_name not in conv_manager.platforms:
                 conv_manager.register_platform(platform_name, self.platform)
 
@@ -3583,13 +3582,11 @@ class ToolExecutor:
             )
             real_name = user_info.get("real_name") or user_info.get("name") or user_name
 
-            # Send message at top-level — this becomes the thread parent
             meta = await self.platform.send_message(
                 channel_id=dm_channel, content=message,
             )
             dm_thread_id = meta.message_id
 
-            # Create a real conversation state (not passive — agent personality drives it)
             now = datetime.now(timezone.utc).isoformat()
             msg_ts = str(int(datetime.now(timezone.utc).timestamp()))
             conversation_id = f"{platform_name}_{dm_channel}_{msg_ts}"
@@ -3601,7 +3598,7 @@ class ToolExecutor:
                 channel_id=dm_channel,
                 user_id=user_info["id"],
                 thread_id=dm_thread_id,
-                status="active",
+                status="dormant",
                 last_message_at=now,
                 messages=[{
                     "role": "assistant",
@@ -3618,54 +3615,16 @@ class ToolExecutor:
                 conversation_partner=real_name,
             )
             await conv_manager._save_state(state)
-
-            # Start a real TagToChatLoop — agent personality drives the conversation
-            loop = TagToChatLoop(
-                conversation_id=conversation_id,
-                channel_id=dm_channel,
-                thread_id=dm_thread_id,
-                platform=platform_name,
-                agent_id=agent_id,
-                platform_impl=self.platform,
-                conv_manager=conv_manager,
-                is_dm=True,
+            logger.info(
+                f"Started conversation {conversation_id} with {real_name} "
+                f"(dormant; reply handler will wake it)"
             )
 
-            # Dormancy signal — fires when the loop exits (dormant/stopped)
-            done_event = asyncio.Event()
-            loop.on_done(done_event.set)
-
-            # Start the conversation loop
-            asyncio.create_task(loop.run())
-            logger.info(f"Started interactive conversation {conversation_id} with {real_name}")
-
-            # Suspend the agentic turn until conversation goes dormant or times out
-            try:
-                await asyncio.wait_for(
-                    done_event.wait(),
-                    timeout=timeout_minutes * 60,
-                )
-            except asyncio.TimeoutError:
-                logger.info(f"Conversation {conversation_id} timed out after {timeout_minutes}min")
-                loop._stop_requested = True
-
-            # Load final transcript
-            final_state = await conv_manager._load_state(conversation_id)
-            if final_state and final_state.messages:
-                transcript_lines = []
-                for msg in final_state.messages:
-                    role = msg.get("role", "unknown")
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        text_parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
-                        content = "\n".join(text_parts)
-                    if isinstance(content, str) and content.strip():
-                        speaker = real_name if role == "user" else "You"
-                        transcript_lines.append(f"[{speaker}]: {content}")
-                transcript = "\n".join(transcript_lines)
-                return f"Conversation with {real_name} completed.\n\nTranscript:\n{transcript}"
-            else:
-                return f"Conversation with {real_name} ended (no messages exchanged)."
+            return (
+                f"Sent the opening message to {real_name}. "
+                f"The conversation is now live — when they reply, the Slack "
+                f"reply handler will continue it. Nothing more for you to do here."
+            )
 
         except Exception as e:
             logger.error(f"start_conversation error: {e}", exc_info=True)

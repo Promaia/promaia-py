@@ -242,9 +242,11 @@ def build_agentic_system_prompt(
             "## Messaging Tools\n\n"
             "- **start_conversation**: DM a user. This is the only tool for "
             "messaging a user directly — use it for questions, confirmations, "
-            "and notifications alike. Sends your message and listens for the "
-            "user's reply (up to 15 min), returning their response. "
-            "Call it again to continue the conversation."
+            "and notifications alike. It sends the opening message and hands "
+            "off to the Slack reply handler, which continues the conversation "
+            "when the user replies. The tool returns immediately; do not wait "
+            "for a reply inside your turn. Call it once per user you want to "
+            "reach, then wrap up."
         )
     if "gmail" in mcp_tools:
         tool_sections_parts.append(
