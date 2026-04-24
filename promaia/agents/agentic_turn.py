@@ -1559,6 +1559,18 @@ GOOGLE_SHEETS_FORMAT_TOOL_DEFINITIONS = [
     },
 ]
 
+# Loop-internal tool names. Results from these tools are acks, control
+# sentinels, or other model/loop plumbing — never user-visible data — so
+# they are NOT auto-shelved during act-mode uniform shelving.
+_CONTROL_TOOL_NAMES: frozenset = frozenset({
+    "context",
+    "notepad",
+    "memory",
+    "show_selection",
+    "mark_step_done",
+    "done",
+})
+
 NOTEPAD_TOOL_DEFINITION = {
     "name": "notepad",
     "description": (
@@ -1715,8 +1727,46 @@ MARK_STEP_DONE_TOOL_DEFINITION = {
 
 DONE_TOOL_DEFINITION = {
     "name": "done",
-    "description": "Exit Act mode and return to Think mode. Context and search tools become available again.",
-    "input_schema": {"type": "object", "properties": {}, "required": []}
+    "description": (
+        "Exit Act mode and return to Think mode. "
+        "Hand a concise prose report back to the Think-mode agent. "
+        "Optionally keep specific shelves by listing them in keep_shelves "
+        "(each with its own on/off state). Any burst shelf you do not list "
+        "is discarded — the report is the primary handoff. "
+        "Curate deliberately: a good report plus two carefully chosen "
+        "shelves beats twelve shelves the think agent has to sift through."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "report": {
+                "type": "string",
+                "description": (
+                    "Plain-text report for the Think-mode agent: what you did, "
+                    "what you found, what matters next. This is the only part "
+                    "of your burst the Think agent sees (plus any shelves you "
+                    "explicitly keep)."
+                ),
+            },
+            "keep_shelves": {
+                "type": "array",
+                "description": (
+                    "Optional curated list of shelves to preserve. Anything "
+                    "not listed is discarded. Omit this field entirely to "
+                    "discard all burst shelves."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "on": {"type": "boolean"},
+                    },
+                    "required": ["name", "on"],
+                },
+            },
+        },
+        "required": ["report"],
+    },
 }
 
 TASK_QUEUE_TOOL_DEFINITIONS = [
@@ -3118,9 +3168,15 @@ class ToolExecutor:
         # }
         self._sources = {}
         self._sources_muted = False
+        # When in an act burst, set to the iteration at entry. Shelves whose
+        # mounted_at_iteration >= this value are visible to the act agent even
+        # while muted. None when not in an act burst.
+        self._act_start_iteration: Optional[int] = None
         # Updated each iteration by the agentic loop so source-management
         # paths (shelving, _context_action) can stamp mounted_at_iteration.
         self._current_iteration = 0
+        # Per-tool counters for deterministic act-burst shelf naming.
+        self._tool_counters: Dict[str, int] = {}
         # External MCP server connections
         self._mcp_client = None        # McpClient instance
         self._mcp_tool_map = {}        # namespaced_name → (server_name, original_name)
@@ -3253,7 +3309,15 @@ class ToolExecutor:
                 step = tool_input.get("step", 0)
                 return f"__MARK_STEP__:{step}"
             elif tool_name == "done":
-                return "__DONE__"
+                # Carry the report + keep_shelves curation to the loop-level
+                # consumer. Payload is intentionally JSON so the loop can parse
+                # with a single json.loads call.
+                import json as _json_done
+                payload = {
+                    "report": tool_input.get("report", "") or "",
+                    "keep_shelves": tool_input.get("keep_shelves"),
+                }
+                return f"__DONE__:{_json_done.dumps(payload)}"
             # Config tools
             elif tool_name == "list_source_types":
                 return await self._list_source_types()
@@ -6882,16 +6946,30 @@ class ToolExecutor:
                     titles.append(title)
         return titles
 
+    def _is_source_visible(self, src: Dict) -> bool:
+        """Filter applied while muted. Burst shelves (mounted at or after
+        _act_start_iteration) stay visible to the act agent; pre-burst shelves
+        are hidden. When not muted, every source is visible."""
+        if not self._sources_muted:
+            return True
+        if self._act_start_iteration is None:
+            return False
+        return src.get("mounted_at_iteration", -1) >= self._act_start_iteration
+
     def build_context_index(self) -> str:
         """Build the context index string for the system prompt."""
-        if self._sources_muted or not self._sources:
+        if not self._sources:
+            return ""
+        items = [(name, src) for name, src in self._sources.items()
+                 if self._is_source_visible(src)]
+        if not items:
             return ""
         lines = [
             "## Your Context\n",
             "Toggle sources ON/OFF with the `context` tool.",
             "Check here BEFORE searching — the data you need may already be loaded.\n",
         ]
-        for name, src in self._sources.items():
+        for name, src in items:
             state = "ON" if src["on"] else "OFF"
             origin = src.get("source", "unknown")
             count = src.get("page_count", 0)
@@ -6906,149 +6984,141 @@ class ToolExecutor:
 
     def build_active_source_content(self) -> str:
         """Build the combined content of all ON sources for the system prompt."""
-        if self._sources_muted:
-            return ""
         parts = []
         for name, src in self._sources.items():
-            if src["on"] and src.get("content"):
-                parts.append(src["content"])
+            if not src.get("on") or not src.get("content"):
+                continue
+            if not self._is_source_visible(src):
+                continue
+            parts.append(src["content"])
         return "\n\n".join(parts)
 
-    # ── Act-mode tool result shelving ───────────────────────────────────
+    # ── Uniform act-mode tool-result shelving ──────────────────────────
     #
-    # When act mode exits via __DONE__, all tool_result blocks produced
-    # during the burst are moved into the _sources shelf system. The
-    # full payload is registered as an ON source (so think mode sees it
-    # immediately via build_active_source_content) and the inline
-    # tool_result block is replaced with a short stub. The matching
-    # tool_use block is left untouched, so workflow capture
-    # (all_tool_calls[]) is unaffected.
+    # During an act burst, every non-control tool result is shelved
+    # immediately: the full body lands in self._sources[name] with on=True
+    # and mounted_at_iteration stamped, and the inline tool_result content
+    # becomes a one-line stub. The agent sees the stubs in message history
+    # and the full bodies in the Context Shelf (filtered to the current
+    # burst by build_active_source_content / build_context_index).
     #
-    # Tiny results (control acks, "done", error strings) stay inline.
+    # Control tools (notepad, context, memory, show_selection,
+    # mark_step_done, done) return acks/sentinels consumed by the loop,
+    # never a body worth shelving — they pass through unchanged.
 
-    _SHELVE_MIN_CHARS = 500
-
-    def shelve_act_results(
+    def shelve_tool_result(
         self,
-        tool_use_ids: List[str],
-        internal_messages: List[Dict],
-        current_iteration: int,
-    ) -> int:
-        """Shelve every tool_result whose id is in tool_use_ids.
-
-        Returns the number of results shelved. Stubs replace the inline
-        content; the registered source is ON so think mode sees it
-        immediately on its next turn.
-        """
-        if not tool_use_ids:
-            return 0
-
-        id_set = set(tool_use_ids)
-        shelved = 0
-
-        # Walk newest → oldest so multiple bursts behave predictably.
-        for msg in reversed(internal_messages):
-            if msg.get("role") != "user":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") != "tool_result":
-                    continue
-                tu_id = block.get("tool_use_id")
-                if tu_id not in id_set:
-                    continue
-                result_text = block.get("content", "")
-                if not isinstance(result_text, str):
-                    continue
-                if len(result_text) < self._SHELVE_MIN_CHARS:
-                    continue
-                # Skip if already a stub (idempotent)
-                if result_text.startswith("[tool result shelved]"):
-                    continue
-
-                tool_name = self._lookup_tool_name(internal_messages, tu_id)
-                source_id = self._make_act_source_id(tool_name, tu_id)
-                title = self._make_act_source_title(tool_name, tu_id, internal_messages)
-
-                self._sources[source_id] = {
-                    "content": result_text,
-                    "on": True,
-                    "page_count": 1,
-                    "source": tool_name or "act_tool",
-                    "titles": [title] if title else [],
-                    "mounted_at_iteration": current_iteration,
-                }
-
-                stub = (
-                    f"[tool result shelved] source_id={source_id} "
-                    f"tool={tool_name or 'unknown'} size={len(result_text)} chars\n"
-                    f"Call turn_on_source if you need to re-read this."
-                )
-                block["content"] = stub
-                shelved += 1
-
-        if shelved:
-            logger.info(
-                f"[shelve_act_results] Shelved {shelved} act-mode tool result(s) "
-                f"into _sources at iteration {current_iteration}"
-            )
-        return shelved
-
-    @staticmethod
-    def _lookup_tool_name(internal_messages: List[Dict], tool_use_id: str) -> str:
-        """Find the tool_use block matching tool_use_id and return its name."""
-        for msg in internal_messages:
-            if msg.get("role") != "assistant":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "tool_use"
-                    and block.get("id") == tool_use_id
-                ):
-                    return block.get("name", "")
-        return ""
-
-    @staticmethod
-    def _make_act_source_id(tool_name: str, tool_use_id: str) -> str:
-        suffix = (tool_use_id or "").split("_")[-1][:8] or "x"
-        safe_name = (tool_name or "act_tool").replace("__", "_")
-        return f"act_{safe_name}_{suffix}"
-
-    @staticmethod
-    def _make_act_source_title(
-        tool_name: str, tool_use_id: str, internal_messages: List[Dict]
+        tool_name: str,
+        tool_input: Dict,
+        tool_use_id: str,
+        result_text: str,
+        iteration: int,
+        msg_idx: int,
     ) -> str:
-        """Build a short human-readable title from the tool's input args."""
-        for msg in internal_messages:
-            if msg.get("role") != "assistant":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "tool_use"
-                    and block.get("id") == tool_use_id
-                ):
-                    inp = block.get("input") or {}
-                    if isinstance(inp, dict):
-                        for key in ("query", "q", "name", "range", "thread_id", "id"):
-                            if key in inp and inp[key]:
-                                return f"{tool_name}({inp[key]!s:.60})"
-                        if inp:
-                            first_k, first_v = next(iter(inp.items()))
-                            return f"{tool_name}({first_k}={first_v!s:.40})"
-                    return tool_name or ""
-        return tool_name or ""
+        """Shelve a tool result; return the stub that replaces the inline body.
+
+        Caller is responsible for checking that tool_name is not a control
+        tool — this method shelves unconditionally.
+        """
+        if not hasattr(self, "_tool_counters"):
+            self._tool_counters: Dict[str, int] = {}
+        self._tool_counters[tool_name] = self._tool_counters.get(tool_name, 0) + 1
+        counter = self._tool_counters[tool_name]
+
+        name = self._make_shelf_name(tool_name, tool_input, counter)
+        # Ensure uniqueness (paranoia; counters already prevent collisions).
+        base = name
+        suffix = 2
+        while name in self._sources:
+            name = f"{base}_{suffix}"
+            suffix += 1
+
+        title = self._make_shelf_title(tool_name, tool_input)
+        header = f"# {tool_name}: {title}\n\n" if title else f"# {tool_name}\n\n"
+        body = header + (result_text if isinstance(result_text, str) else str(result_text))
+
+        self._sources[name] = {
+            "content": body,
+            "on": True,
+            "page_count": 1,
+            "source": tool_name,
+            "titles": [title] if title else [],
+            "mounted_at_iteration": iteration,
+            "shelved_from_msg": msg_idx,
+        }
+
+        size_chars = len(body)
+        return (
+            f"[{tool_name} shelved → {name} ({size_chars:,} chars). "
+            f"Toggle with context(action=\"off\", sources=[\"{name}\"]).]"
+        )
+
+    @staticmethod
+    def _make_shelf_name(tool_name: str, tool_input: Dict, counter: int) -> str:
+        """Deterministic, greppable shelf name. Prefer an input-derived suffix."""
+        safe = (tool_name or "tool").replace("__", "_")
+        if isinstance(tool_input, dict):
+            for key in ("database_name", "name", "query", "q", "thread_id",
+                        "page_id", "id", "range", "url"):
+                v = tool_input.get(key)
+                if v:
+                    suffix = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(v))[:30].strip("_")
+                    if suffix:
+                        return f"{safe}_{suffix}_{counter}"
+        return f"{safe}_{counter}"
+
+    @staticmethod
+    def _make_shelf_title(tool_name: str, tool_input: Dict) -> str:
+        """Short human-readable title from the tool's input args."""
+        if not isinstance(tool_input, dict):
+            return ""
+        for key in ("query", "q", "name", "database_name", "range",
+                    "thread_id", "url", "id", "page_id"):
+            v = tool_input.get(key)
+            if v:
+                return f"{tool_name}({str(v)[:60]})"
+        if tool_input:
+            first_k, first_v = next(iter(tool_input.items()))
+            return f"{tool_name}({first_k}={str(first_v)[:40]})"
+        return tool_name
+
+    def shelve_web_search_result(
+        self,
+        query: str,
+        rendered_text: str,
+        iteration: int,
+        tool_use_id: str,
+        msg_idx: int,
+    ) -> str:
+        """Shelve a server-side web_search result; return the shelf name.
+
+        The body lands in _sources; the caller is responsible for mutating
+        the web_search_tool_result block's .content to a short stub that
+        references this name.
+        """
+        if not hasattr(self, "_tool_counters"):
+            self._tool_counters = {}
+        self._tool_counters["web_search"] = self._tool_counters.get("web_search", 0) + 1
+        counter = self._tool_counters["web_search"]
+        safe_query = re.sub(r"[^a-zA-Z0-9_-]+", "_", query)[:30].strip("_") or "query"
+        name = f"web_search_{safe_query}_{counter}"
+        base = name
+        suffix = 2
+        while name in self._sources:
+            name = f"{base}_{suffix}"
+            suffix += 1
+
+        header = f"# Web search: {query}\n\n"
+        self._sources[name] = {
+            "content": header + rendered_text,
+            "on": True,
+            "page_count": 1,
+            "source": "web_search",
+            "titles": [query],
+            "mounted_at_iteration": iteration,
+            "shelved_from_msg": msg_idx,
+        }
+        return name
 
     # ── Workspace file tools ────────────────────────────────────────────
 
@@ -8307,6 +8377,129 @@ def _trim_tool_results(messages: List[Dict], max_result_chars: int = 50_000) -> 
 # and fired on casual conversation.
 
 
+def _sanitize_orphans_in_place(messages: list) -> None:
+    """Strip any tool_result blocks whose tool_use_id has no matching tool_use
+    in a preceding assistant message. Mutates the messages list in place.
+
+    This should be a no-op under the trimmer's pair-drop rule; it exists as a
+    last-line-of-defense so a future regression degrades to a missing-data
+    warning rather than an Anthropic 400.
+    """
+    if not isinstance(messages, list):
+        return
+    seen_ids: set = set()
+    total_dropped = 0
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if msg.get("role") == "assistant" and isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    bid = b.get("id")
+                    if bid:
+                        seen_ids.add(bid)
+            continue
+        if msg.get("role") == "user" and isinstance(content, list):
+            new_content = []
+            for b in content:
+                if (
+                    isinstance(b, dict)
+                    and b.get("type") == "tool_result"
+                    and b.get("tool_use_id") not in seen_ids
+                ):
+                    total_dropped += 1
+                    continue
+                new_content.append(b)
+            # Mutate in place.
+            msg["content"] = new_content
+    if total_dropped:
+        logger.warning(
+            f"[agentic] _sanitize_orphans_in_place dropped {total_dropped} "
+            f"orphan tool_result block(s) pre-API-call"
+        )
+
+
+def _render_web_search_results(result_list: list) -> str:
+    """Flatten a list of web_search_tool_result entries into readable text."""
+    parts: List[str] = []
+    for i, entry in enumerate(result_list, 1):
+        if not isinstance(entry, dict):
+            parts.append(str(entry))
+            continue
+        title = str(entry.get("title") or "").strip()
+        url = str(entry.get("url") or "").strip()
+        page_age = str(entry.get("page_age") or "").strip()
+        text = str(entry.get("text") or entry.get("content") or "").strip()
+
+        header = f"## [{i}] {title}".rstrip()
+        meta = " | ".join(x for x in (url, page_age) if x)
+        block_lines = [header]
+        if meta:
+            block_lines.append(meta)
+        if text:
+            block_lines.append("")
+            block_lines.append(text)
+        parts.append("\n".join(block_lines))
+    return "\n\n".join(parts)
+
+
+def _shelve_web_search_in_assistant(
+    serialized_content,
+    tool_executor,
+    iteration: int,
+    msg_idx: int,
+) -> None:
+    """Mutate serialized assistant content: replace each web_search_tool_result
+    body with a short stub and write the rendered body to _sources.
+
+    Caller should only invoke during an act burst. Preserves tool_use_id and
+    encrypted_content so multi-turn replay stays valid.
+    """
+    if not isinstance(serialized_content, list) or tool_executor is None:
+        return
+
+    # Map server_tool_use blocks by id so we can recover the originating query.
+    tool_use_by_id: Dict[str, Dict] = {}
+    for block in serialized_content:
+        if isinstance(block, dict) and block.get("type") == "server_tool_use":
+            bid = block.get("id")
+            if bid:
+                tool_use_by_id[bid] = block
+
+    for block in serialized_content:
+        if not isinstance(block, dict) or block.get("type") != "web_search_tool_result":
+            continue
+
+        content = block.get("content")
+        # Error blocks — keep inline, they're small and informative.
+        if isinstance(content, dict) and content.get("type") == "web_search_tool_result_error":
+            continue
+        if not isinstance(content, list) or not content:
+            continue
+
+        tool_use_id = block.get("tool_use_id", "")
+        matched = tool_use_by_id.get(tool_use_id) or {}
+        inp = matched.get("input") if isinstance(matched, dict) else {}
+        query = str(inp.get("query", "")) if isinstance(inp, dict) else ""
+
+        rendered = _render_web_search_results(content)
+        try:
+            name = tool_executor.shelve_web_search_result(
+                query=query or "(unknown query)",
+                rendered_text=rendered,
+                iteration=iteration,
+                tool_use_id=tool_use_id,
+                msg_idx=msg_idx,
+            )
+        except Exception as e:
+            logger.warning(f"[act shelve web_search] failed: {e}")
+            continue
+
+        block["content"] = (
+            f"[web_search shelved → {name} ({len(rendered):,} chars for query "
+            f"{query!r}). Toggle with context(action=\"off\", sources=[\"{name}\"]).]"
+        )
+
+
 def _serialize_content_blocks(content):
     """Convert Anthropic SDK content blocks to serializable dicts."""
     if isinstance(content, str):
@@ -8416,7 +8609,9 @@ async def agentic_turn(
     act_suites: List[str] = []
     act_instructions: List[str] = []
     act_step_status: List[str] = []  # "pending" | "done"
-    act_tool_use_ids: List[str] = []  # tool_use ids produced in the current act burst (shelved on __DONE__)
+    act_tool_use_ids: List[str] = []  # tool_use ids produced in the current act burst (retained for future diagnostics)
+    act_start_iteration: Optional[int] = None  # iteration at which act mode began
+    act_start_msg_idx: Optional[int] = None    # index into internal_messages at act entry; done() squashes from here
     use_think_act = suite_registry is not None  # Feature flag: only use Think/Act if registry provided
     _retried_for_empty_text = False  # One-shot: nudge model to produce text if end_turn had none
 
@@ -8490,6 +8685,7 @@ async def agentic_turn(
                     _add_tool(td)
             _add_tool(NOTEPAD_TOOL_DEFINITION)
             _add_tool(MEMORY_TOOL_DEFINITION)
+            _add_tool(CONTEXT_TOOL_DEFINITION)
             if act_instructions:
                 _add_tool(MARK_STEP_DONE_TOOL_DEFINITION)
             _add_tool(DONE_TOOL_DEFINITION)
@@ -8551,6 +8747,12 @@ async def agentic_turn(
         )
         if iteration_tools:
             api_kwargs["tools"] = iteration_tools
+
+        # Defensive guard: a tool_result in message history with no preceding
+        # tool_use is a 400 ("unexpected tool_use_id") from Anthropic. The
+        # trimmer's pair-drop rule should make this impossible, but verify
+        # anyway so a future regression degrades gracefully rather than 400s.
+        _sanitize_orphans_in_place(api_kwargs["messages"])
 
         try:
             response = await _call_with_retry(client, api_kwargs, on_tool_activity)
@@ -8711,6 +8913,18 @@ async def agentic_turn(
                     except Exception:
                         pass
 
+        # Serialize the assistant response once. During act mode, shelf any
+        # web_search_tool_result blocks before the message lands in history,
+        # so future iterations see stubs instead of full search bodies.
+        serialized_assistant = _serialize_content_blocks(response.content)
+        if act_mode and tool_executor is not None:
+            _shelve_web_search_in_assistant(
+                serialized_assistant,
+                tool_executor,
+                iteration=iteration,
+                msg_idx=len(internal_messages),
+            )
+
         # If no tool calls, we're done — return the final text
         if response.stop_reason == "end_turn" or not tool_uses:
             # If the model ended the turn with zero text but DID execute tools,
@@ -8719,7 +8933,7 @@ async def agentic_turn(
                 _retried_for_empty_text = True
                 internal_messages.append({
                     "role": "assistant",
-                    "content": _serialize_content_blocks(response.content),
+                    "content": serialized_assistant,
                 })
                 internal_messages.append({
                     "role": "user",
@@ -8757,10 +8971,11 @@ async def agentic_turn(
         # ── Tool execution ────────────────────────────────────────────
         internal_messages.append({
             "role": "assistant",
-            "content": _serialize_content_blocks(response.content),
+            "content": serialized_assistant,
         })
 
         tool_results = []
+        squashed_this_iter = False   # set True by the __DONE__ handler
         for tool_use in tool_uses:
             # Notify UX: tool starting
             if on_tool_activity:
@@ -8784,6 +8999,29 @@ async def agentic_turn(
             else:
                 # Execute tool
                 result_text = await tool_executor.execute(tool_use.name, tool_use.input)
+
+            # During act mode, uniformly shelve every non-control tool result.
+            # Control tools (notepad/context/memory/show_selection/mark_step_done/done)
+            # return acks or sentinels and pass through unchanged.
+            if (
+                act_mode
+                and tool_use.name not in _CONTROL_TOOL_NAMES
+                and isinstance(result_text, str)
+                and not result_text.startswith("__")  # don't shelf other internal sentinels
+            ):
+                try:
+                    result_text = tool_executor.shelve_tool_result(
+                        tool_name=tool_use.name,
+                        tool_input=tool_use.input if isinstance(tool_use.input, dict) else {},
+                        tool_use_id=tool_use.id,
+                        result_text=result_text,
+                        iteration=iteration,
+                        msg_idx=len(internal_messages),
+                    )
+                except Exception as shelve_err:
+                    logger.warning(
+                        f"[act shelve] failed for {tool_use.name}: {shelve_err}"
+                    )
 
             # Log tool call and result for debugging
             logger.info(
@@ -8813,9 +9051,20 @@ async def agentic_turn(
                 act_mode = True
                 act_suites = suite_names
                 act_tool_use_ids = []  # fresh burst
-                # Mute context (preserves individual on/off states for restore)
+                act_start_iteration = iteration
+                # Point at the assistant message that contains this act()
+                # tool_use. Squashing from this index on done() removes the
+                # entering-act assistant + every subsequent burst message,
+                # so no act() tool_use is left orphaned without its paired
+                # tool_result.
+                act_start_msg_idx = len(internal_messages) - 1
+                # Mute pre-burst context (preserves individual on/off states).
+                # Shelves created from this iteration onward stay visible to
+                # the act agent via the _act_start_iteration filter.
                 if tool_executor:
                     tool_executor._sources_muted = True
+                    tool_executor._act_start_iteration = iteration
+                    tool_executor._tool_counters = {}  # fresh burst namespace
                 instr_count = f" {len(act_instructions)} steps." if act_instructions else ""
                 result_text = f"Act mode. Suites loaded: {', '.join(suite_names)}.{instr_count} Context muted. Follow your instructions."
                 logger.info(f"[think/act] Entered Act mode with suites: {suite_names}, instructions: {len(act_instructions)} steps")
@@ -8849,31 +9098,122 @@ async def agentic_turn(
                             pass
                 else:
                     result_text = f"Invalid step number: {step_num}"
-            elif result_text == "__DONE__":
-                # Shelve all act-burst tool results into _sources before
-                # returning to Think mode. This frees ~all of the bloat
-                # while keeping the data lossly recoverable via turn_on_source.
-                if tool_executor and act_tool_use_ids:
+            elif result_text.startswith("__DONE__"):
+                # Parse the report + keep_shelves payload.
+                import json as _json_done
+                report = "(no report)"
+                keep_spec = None
+                payload_str = result_text[len("__DONE__"):]
+                if payload_str.startswith(":"):
                     try:
-                        tool_executor.shelve_act_results(
-                            act_tool_use_ids,
-                            internal_messages,
-                            current_iteration=iteration,
-                        )
-                    except Exception as shelve_err:
+                        payload = _json_done.loads(payload_str[1:])
+                        report = payload.get("report") or "(no report)"
+                        keep_spec = payload.get("keep_shelves")
+                    except Exception as parse_err:
                         logger.warning(
-                            f"[think/act] shelve_act_results failed: {shelve_err}"
+                            f"[think/act] done payload parse failed: {parse_err}; "
+                            "using defaults (discard all burst shelves)"
                         )
+
+                # Burst-scoped shelves are everything mounted at or after entry.
+                burst_start = act_start_iteration if act_start_iteration is not None else iteration
+                if tool_executor is not None:
+                    act_burst_sources = [
+                        (n, s) for n, s in list(tool_executor._sources.items())
+                        if s.get("mounted_at_iteration", -1) >= burst_start
+                    ]
+                else:
+                    act_burst_sources = []
+
+                # Apply keep_spec. None (or missing) → delete all; otherwise
+                # keep only listed shelves with their requested on/off state.
+                keep_map: Dict[str, bool] = {}
+                if isinstance(keep_spec, list):
+                    for item in keep_spec:
+                        if isinstance(item, dict) and item.get("name"):
+                            keep_map[str(item["name"])] = bool(item.get("on", False))
+                kept: List[tuple] = []
+                deleted_names: List[str] = []
+                if tool_executor is not None:
+                    for name, src in act_burst_sources:
+                        if name in keep_map:
+                            src["on"] = keep_map[name]
+                            kept.append((name, src, keep_map[name]))
+                        else:
+                            tool_executor._sources.pop(name, None)
+                            deleted_names.append(name)
+                logger.info(
+                    f"[act done] kept={len(kept)} deleted={len(deleted_names)}: "
+                    f"{deleted_names[:10]}{'...' if len(deleted_names) > 10 else ''}"
+                )
+
+                # Squash burst history into a single synthetic assistant message.
+                synth_lines = [
+                    f"[Act burst (iter {burst_start}..{iteration}): "
+                    f"suites={act_suites}]",
+                    "",
+                    report,
+                ]
+                if kept:
+                    synth_lines += ["", "Returned shelves:"]
+                    for name, src, is_on in kept:
+                        size_k = len(src.get("content", "")) // 1000
+                        state = "ON" if is_on else "OFF"
+                        synth_lines.append(
+                            f"- {name} [{state}] "
+                            f"({src.get('source', '?')}, {size_k}k chars)"
+                        )
+                synth_lines += [
+                    "",
+                    "(Burst history hidden. Reopen shelves with "
+                    "context(action=\"on\", sources=[...]).)",
+                ]
+                synth_text = "\n".join(synth_lines)
+
+                # Replace the burst's messages with the single synthetic one.
+                # Important: the current assistant message (containing the
+                # done() tool_use block) plus its pending tool_result for this
+                # same tool_use_id haven't been written to internal_messages
+                # yet — they'd live beyond act_start_msg_idx once written.
+                # We drop everything from the burst start and then append the
+                # synthetic message, so the next API call sees messages[0]
+                # (original user), followed by the synthetic assistant.
+                squash_from = (
+                    act_start_msg_idx
+                    if act_start_msg_idx is not None
+                    else len(internal_messages)
+                )
+                # Drop the assistant message that was just appended for THIS
+                # iteration (containing the done() tool_use). It would
+                # otherwise be orphaned (no matching tool_result will be
+                # appended because we skip tool_results and add the synth).
+                del internal_messages[squash_from:]
+                internal_messages.append({
+                    "role": "assistant",
+                    "content": synth_text,
+                })
+
+                # Reset act state and restore full context visibility.
                 act_mode = False
                 act_suites = []
                 act_instructions = []
                 act_step_status = []
                 act_tool_use_ids = []
-                if tool_executor:
+                act_start_iteration = None
+                act_start_msg_idx = None
+                if tool_executor is not None:
                     tool_executor._sources_muted = False
-                result_text = "Back to Think mode. Context restored."
-                logger.info("[think/act] Returned to Think mode")
-                # Fire plan done callback
+                    tool_executor._act_start_iteration = None
+                    tool_executor._tool_counters = {}
+
+                # Skip the rest of this iteration's tool_results bookkeeping:
+                # we've already replaced internal_messages, so the subsequent
+                # unconditional user-message append would produce orphan
+                # tool_results.  The flag suppresses it below.
+                squashed_this_iter = True
+                tool_results = []   # discard pre-done accumulated tool_results
+                result_text = None
+                logger.info("[think/act] Returned to Think mode via done(report)")
                 if on_tool_activity:
                     try:
                         await on_tool_activity(
@@ -8883,6 +9223,9 @@ async def agentic_turn(
                         )
                     except Exception:
                         pass
+                # Break out of the tool_uses loop — bad to keep processing
+                # other calls in the same assistant message after a done().
+                break
 
             # Handle interview sentinels — break out of loop and return with signal
             elif result_text.startswith("__INTERVIEW_START__:"):
@@ -8998,7 +9341,12 @@ async def agentic_turn(
                     except Exception:
                         pass
 
-        internal_messages.append({"role": "user", "content": tool_results})
+        # If done() squashed this iteration's history, skip the user-message
+        # append — the synthetic assistant message already replaced everything
+        # from act_start_msg_idx onward, and an empty/orphan tool_result list
+        # here would corrupt the pairing.
+        if not squashed_this_iter and tool_results:
+            internal_messages.append({"role": "user", "content": tool_results})
 
     # Exhausted iteration budget — return whatever text we have
     last_text = "\n".join(text_parts) if text_parts else ""

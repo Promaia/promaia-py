@@ -323,85 +323,122 @@ def _trim_sources_bucket(
     return freed
 
 
-def _drop_oldest_history(messages: List[Dict], need_to_free: int) -> List[Dict]:
-    """Drop oldest complete turns until ~need_to_free tokens are freed.
+def _is_assistant_with_tool_use(msg: Dict) -> bool:
+    if msg.get("role") != "assistant":
+        return False
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(b, dict) and b.get("type") == "tool_use"
+        for b in content
+    )
 
-    Pair safety: a tool_use block in an assistant message and its matching
-    tool_result block in the next user message must be dropped together.
-    Walks forward in turn-pairs (user → assistant → optional tool_results).
+
+def _is_user_tool_result(msg: Dict) -> bool:
+    if msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(b, dict) and b.get("type") == "tool_result"
+        for b in content
+    )
+
+
+def _strip_orphan_tool_results(messages: List[Dict]) -> List[Dict]:
+    """Remove tool_result blocks whose tool_use_id has no preceding tool_use.
+
+    Under the pair-drop rule in _drop_oldest_history this is a no-op safety
+    net, but it protects against future regressions and messages seeded from
+    outside the trimmer.
     """
-    if not messages:
-        return messages
-
-    freed = 0
-    drop_until = 0  # exclusive index — messages[:drop_until] will be dropped
-
-    i = 0
-    n = len(messages)
-    while i < n and freed < need_to_free:
-        # Identify the end of the current "turn group": one user message,
-        # the following assistant message, and any subsequent user message
-        # that contains tool_result blocks (which pair with tool_use blocks
-        # in the assistant message).
-        group_end = i + 1
-        # Pull in trailing assistant + tool_result user messages
-        while group_end < n:
-            nxt = messages[group_end]
-            content = nxt.get("content", "")
-            is_tool_result_msg = (
-                nxt.get("role") == "user"
-                and isinstance(content, list)
-                and any(
-                    isinstance(b, dict) and b.get("type") == "tool_result"
-                    for b in content
+    seen_ids: set = set()
+    cleaned: List[Dict] = []
+    for msg in messages:
+        content = msg.get("content")
+        if msg.get("role") == "assistant" and isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    bid = b.get("id")
+                    if bid:
+                        seen_ids.add(bid)
+            cleaned.append(msg)
+            continue
+        if msg.get("role") == "user" and isinstance(content, list):
+            new_content = []
+            dropped = 0
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    if b.get("tool_use_id") in seen_ids:
+                        new_content.append(b)
+                    else:
+                        dropped += 1
+                else:
+                    new_content.append(b)
+            if dropped:
+                logger.warning(
+                    f"[context_trimmer] stripped {dropped} orphan tool_result "
+                    f"block(s); tool_use ids not found in preceding history"
                 )
-            )
-            if nxt.get("role") == "assistant" or is_tool_result_msg:
-                group_end += 1
-                continue
-            break
+            if new_content:
+                msg = {**msg, "content": new_content}
+                cleaned.append(msg)
+            # else: entire message was orphan tool_results — drop it
+            continue
+        cleaned.append(msg)
+    return cleaned
 
-        group_tokens = _estimate_messages_tokens(messages[i:group_end])
-        freed += group_tokens
-        drop_until = group_end
-        i = group_end
 
-    if drop_until == 0:
+def _drop_oldest_history(messages: List[Dict], need_to_free: int) -> List[Dict]:
+    """Drop oldest (assistant tool_use, user tool_result) pairs to free tokens.
+
+    Invariants:
+      1. `messages[0]` is never dropped. It's the turn's anchor (a plain-text
+         user prompt seeded by conversation_manager), and removing it would
+         produce a tool_result at index 0 with no preceding assistant — the
+         exact orphan that caused the 2026-04-24 Anthropic 400.
+      2. Only whole (assistant-with-tool_use, user-tool_result) pairs drop.
+         Pair atomicity keeps every surviving tool_result matched to its
+         tool_use. Plain user/assistant messages act as anchors and are never
+         dropped by this function.
+
+    Returns the trimmed message list.
+    """
+    if len(messages) <= 1:
         return messages
 
-    if drop_until >= len(messages):
-        # Refuse to drop everything — leave at least the most recent turn.
-        # Find the start of the last user message and keep from there.
-        for j in range(len(messages) - 1, -1, -1):
-            if messages[j].get("role") == "user":
-                drop_until = j
-                break
-        if drop_until == 0:
-            return messages
+    keep = [True] * len(messages)
+    freed = 0
+    i = 1  # index 0 is sacrosanct
+    n = len(messages)
+    dropped_pairs = 0
+    while i < n and freed < need_to_free:
+        if (
+            _is_assistant_with_tool_use(messages[i])
+            and i + 1 < n
+            and _is_user_tool_result(messages[i + 1])
+        ):
+            pair_tokens = _estimate_messages_tokens(messages[i:i + 2])
+            keep[i] = False
+            keep[i + 1] = False
+            freed += pair_tokens
+            dropped_pairs += 1
+            i += 2
+            continue
+        # Plain user/assistant messages anchor the middle — leave them in
+        # place and scan forward. (Droppable pairs often sit between them.)
+        i += 1
 
-    dropped = messages[:drop_until]
-    kept = messages[drop_until:]
+    if dropped_pairs == 0:
+        return messages
 
-    # Pair safety: if the first kept message contains tool_result blocks,
-    # we orphaned its tool_use. Strip orphan tool_result blocks from the
-    # head of `kept`.
-    while kept:
-        first = kept[0]
-        content = first.get("content", "")
-        if first.get("role") == "user" and isinstance(content, list):
-            has_tool_result = any(
-                isinstance(b, dict) and b.get("type") == "tool_result"
-                for b in content
-            )
-            if has_tool_result:
-                # Drop this orphaned tool_result message entirely
-                kept = kept[1:]
-                continue
-        break
-
+    kept = [m for m, k in zip(messages, keep) if k]
+    kept = _strip_orphan_tool_results(kept)
     logger.info(
-        f"[context_trimmer] History bucket trim: dropped {len(dropped)} oldest "
-        f"messages, freed ~{freed} tokens"
+        f"[context_trimmer] History bucket trim: dropped {dropped_pairs} "
+        f"(assistant, tool_result) pair(s), freed ~{freed} tokens"
     )
     return kept
 
