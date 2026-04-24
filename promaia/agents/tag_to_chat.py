@@ -245,10 +245,16 @@ class TagToChatLoop:
         self.state.last_typing_at = time.time()
 
     async def handle_cancel(self, user_id: str):
-        """Handle 🛑 reaction — cancel current response, stay in thread."""
+        """Handle 🛑 reaction — hard-cancel the current response, stay in thread."""
         logger.info(f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Cancelled by user {user_id}")
         self._cancelled = True
         self._pause_event.set()  # Unblock if waiting
+        # Interrupt any in-flight Anthropic call / tool execution. CancelledError
+        # propagates up out of agentic_turn before it returns an
+        # AgenticTurnResult, so the in-flight turn's partial internal_messages
+        # never reach state.messages — no orphan tool_use/tool_result pairs.
+        if self._loop_task and not self._loop_task.done():
+            self._loop_task.cancel()
         await self._cleanup_temp_message()
         await self._go_dormant()
 
@@ -267,6 +273,7 @@ class TagToChatLoop:
             f"[tag2chat:{(self.state.thread_id or self.state.channel_id or "dm")[:12]}] Loop started for "
             f"agent={self.state.agent_id} platform={self.state.platform}"
         )
+        self._loop_task = asyncio.current_task()
         try:
             while True:
                 # Check stop conditions
