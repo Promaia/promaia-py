@@ -399,6 +399,21 @@ def _drop_oldest_history(messages: List[Dict], need_to_free: int) -> List[Dict]:
                 continue
         break
 
+    if not kept:
+        # The orphan-strip cascade ate everything. Sending an empty messages
+        # list to Anthropic yields a 400 ("at least one message is required")
+        # that masks the real problem. Keep the most recent message so the
+        # caller at least surfaces an honest token-overflow error (and Fix B
+        # — shelving fat tool results into context sources — should mean
+        # this branch never fires in practice).
+        logger.warning(
+            "[context_trimmer] History trim would have returned empty; "
+            "falling back to the most recent message to avoid an "
+            "empty-messages API error. Upstream tools are likely not "
+            "shelving fat bodies."
+        )
+        kept = messages[-1:]
+
     logger.info(
         f"[context_trimmer] History bucket trim: dropped {len(dropped)} oldest "
         f"messages, freed ~{freed} tokens"

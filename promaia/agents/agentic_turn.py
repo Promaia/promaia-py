@@ -3079,6 +3079,9 @@ class ToolExecutor:
         # }
         self._sources = {}
         self._sources_muted = False
+        # Monotonic counter for named context sources produced by fat-body
+        # tools (web_fetch, etc.) so their entries don't collide.
+        self._web_fetch_counter = 0
         # Updated each iteration by the agentic loop so source-management
         # paths (shelving, _context_action) can stamp mounted_at_iteration.
         self._current_iteration = 0
@@ -5711,7 +5714,14 @@ class ToolExecutor:
         return "Error: web_search is handled server-side by the Anthropic API. This method should not be called."
 
     async def _web_fetch(self, tool_input: Dict) -> str:
-        """Fetch and extract text content from a URL."""
+        """Fetch a URL and mount the extracted text as a context source.
+
+        The body lands in ``self._sources`` (visible/ON by default) so the
+        context trimmer can LRU it off losslessly when budget tightens —
+        same pattern ``query_source`` uses. The tool_result sent back to the
+        model is a short stub, not the full body, which keeps message
+        history lean across many fetches.
+        """
         import httpx
 
         url = tool_input.get("url", "")
@@ -5779,10 +5789,33 @@ class ToolExecutor:
             return f"Could not extract readable content from {url}"
 
         # Truncate if too long
+        truncated = False
         if len(text) > MAX_CONTENT_CHARS:
             text = text[:MAX_CONTENT_CHARS] + "\n\n[Content truncated at 50,000 characters]"
+            truncated = True
 
-        return f"Content from {url}:\n\n{text}"
+        # Mount the body as a named context source. ON by default so the
+        # agent can read it right now; the trimmer will LRU it off when
+        # budget tightens. Name scheme mirrors `sql_…`, `search_…`, etc.
+        self._web_fetch_counter += 1
+        source_name = f"web_fetch_{self._web_fetch_counter}"
+        header = f"# Web fetch: {url}\n\n"
+        self._sources[source_name] = {
+            "content": header + text,
+            "on": True,
+            "page_count": 1,
+            "source": "web_fetch",
+            "titles": [url],
+            "mounted_at_iteration": self._current_iteration,
+        }
+
+        truncation_note = " (truncated)" if truncated else ""
+        return (
+            f"Fetched {url} → {len(text):,} chars{truncation_note} → "
+            f"source '{source_name}' [ON]. The full body is now visible in "
+            f"your context shelf; use the `context` tool to toggle it off "
+            f"when you no longer need it."
+        )
 
     async def _ensure_notion(self):
         """Lazy-initialize Notion client."""
