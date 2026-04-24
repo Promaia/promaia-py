@@ -161,6 +161,7 @@ def detect_available_tools(workspace: str) -> List[str]:
                 tools.append("gmail")
                 tools.append("calendar")
                 tools.append("google_sheets")
+                tools.append("google_drive")
     except Exception:
         pass
 
@@ -184,6 +185,29 @@ def detect_available_tools(workspace: str) -> List[str]:
         pass
 
     return tools
+
+
+def resolve_effective_mcp_tools(agent, workspace: str) -> List[str]:
+    """Return the mcp_tools list the agent should actually run with.
+
+    Default agent (`is_default_agent=True`, i.e. maia): union of its stored
+    mcp_tools with everything `detect_available_tools()` can probe from the
+    current environment. This is the "default agent gets everything" rule
+    and it's applied identically in terminal, Slack, and scheduled paths.
+
+    Non-default agents: their stored mcp_tools verbatim. What the operator
+    configured via `maia agent add/edit` is the source of truth, and it does
+    not drift between environments.
+    """
+    stored = list(getattr(agent, "mcp_tools", None) or [])
+    if not getattr(agent, "is_default_agent", False):
+        return stored
+    detected = detect_available_tools(workspace)
+    merged = list(stored)
+    for t in detected:
+        if t not in merged:
+            merged.append(t)
+    return merged
 
 
 # ── Prompt enhancement ────────────────────────────────────────────────────

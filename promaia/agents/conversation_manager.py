@@ -619,7 +619,10 @@ class ConversationManager:
             # Generate response using the shared agentic adapter
             # This gives Slack/Discord the same Think/Act mode, context sources,
             # memory, suite registry, and conversation_mode.md prompt as terminal chat.
-            from promaia.chat.agentic_adapter import run_agentic_turn
+            from promaia.chat.agentic_adapter import (
+                resolve_effective_mcp_tools,
+                run_agentic_turn,
+            )
 
             # Auto-add calendar to mcp_tools if agent has a dedicated calendar
             if getattr(agent, 'calendar_id', None):
@@ -627,7 +630,7 @@ class ConversationManager:
                 if "calendar" not in agent_mcp:
                     agent.mcp_tools = list(agent_mcp) + ["calendar"]
 
-            mcp_tools = getattr(agent, 'mcp_tools', []) or []
+            mcp_tools = resolve_effective_mcp_tools(agent, agent.workspace)
             databases = getattr(agent, 'databases', []) or []
 
             # Restore persisted notepad and source states from conversation context
