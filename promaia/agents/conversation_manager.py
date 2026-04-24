@@ -642,16 +642,14 @@ class ConversationManager:
             def _noop_print(*args, **kwargs):
                 pass
 
-            # Pick the LLM model:
-            #   1) honour an explicit per-conversation override (set via Slack `/model`)
-            #   2) otherwise Slack defaults to Claude Opus 4.6 (1M), other platforms to Sonnet
-            model_override = state.context.get("model_override")
-            if model_override:
-                model = model_override
-            elif state.platform == "slack":
-                model = "claude-opus-4-6-1m"
+            # Pick the LLM model. For Slack, read the workspace-wide setting
+            # (set via the Slack `/model` slash command); other platforms keep
+            # the run_agentic_turn default (Sonnet).
+            if state.platform == "slack":
+                from promaia.messaging.slack_settings import get_slack_model
+                model = get_slack_model()
             else:
-                model = None  # run_agentic_turn falls back to its default (Sonnet)
+                model = None
 
             result = await run_agentic_turn(
                 system_prompt=system_prompt,

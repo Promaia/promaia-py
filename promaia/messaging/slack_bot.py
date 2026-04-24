@@ -1039,34 +1039,13 @@ def create_slack_bot():
         ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
     ]
 
-    async def _find_slack_conversation(channel_id: str, user_id: str):
-        """Find the most recent active/dormant Slack conversation for this channel+user."""
-        conv = await conv_manager.get_active_conversation(
-            platform="slack", channel_id=channel_id, user_id=user_id
-        )
-        if conv:
-            return conv
-        import sqlite3
-        try:
-            with sqlite3.connect(conv_manager.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                row = conn.execute(
-                    "SELECT * FROM conversations WHERE platform='slack' AND channel_id=? AND user_id=? AND status IN ('active','dormant') ORDER BY created_at DESC LIMIT 1",
-                    (channel_id, user_id),
-                ).fetchone()
-                if row:
-                    return conv_manager._row_to_state(dict(row))
-        except Exception:
-            pass
-        return None
-
     @app.command("/model")
     async def handle_model_command(ack, command, client):
         """
         Handle /model slash command.
 
         Usage:
-            /model — list available models and pick one for the current conversation
+            /model — list available models and pick the Slack-wide model
         """
         await ack()
 
@@ -1074,7 +1053,16 @@ def create_slack_bot():
             channel_id = command["channel_id"]
             user_id = command["user_id"]
 
-            lines = ["*Pick a model for this conversation:*\n"]
+            from promaia.messaging.slack_settings import get_slack_model
+            current = get_slack_model()
+            current_label = next(
+                (d for mid, d in MODEL_CHOICES if mid == current), current
+            )
+
+            lines = [
+                "*Pick the model for all Slack conversations:*",
+                f"_Currently: {current_label}_\n",
+            ]
             emoji_to_model = {}
             for i, (model_id, display_name) in enumerate(MODEL_CHOICES):
                 if i >= len(AGENT_EMOJIS):
@@ -1205,24 +1193,14 @@ def create_slack_bot():
                         pass
                     del _model_pick_messages[message_ts]
 
-                    conv = await _find_slack_conversation(channel_id, user_id)
-                    if conv:
-                        conv.context["model_override"] = model_id
-                        await conv_manager._save_state(conv)
-                        await client.chat_postEphemeral(
-                            channel=channel_id,
-                            user=user_id,
-                            text=f"🧠 Model for this conversation set to *{display_name}*.",
-                        )
-                        logger.info(
-                            f"Model override set to {model_id} for conv {conv.conversation_id}"
-                        )
-                    else:
-                        await client.chat_postEphemeral(
-                            channel=channel_id,
-                            user=user_id,
-                            text="No active conversation. Start chatting first, then use /model.",
-                        )
+                    from promaia.messaging.slack_settings import set_slack_model
+                    set_slack_model(model_id)
+                    await client.chat_postEphemeral(
+                        channel=channel_id,
+                        user=user_id,
+                        text=f"🧠 Slack model set to *{display_name}* (applies to every conversation).",
+                    )
+                    logger.info(f"Slack-wide model set to {model_id} by {user_id}")
                 return
 
             # Check if this is an agent pick reaction
