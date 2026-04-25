@@ -3152,6 +3152,10 @@ class ToolExecutor:
         # Updated each iteration by the agentic loop so source-management
         # paths (shelving, _context_action) can stamp mounted_at_iteration.
         self._current_iteration = 0
+        # Updated before each tool dispatch so self-shelving tools can stamp
+        # shelved_from_msg — points at the pending user tool_result message
+        # where the tool's stub will appear in history.
+        self._current_msg_idx = 0
         # Per-tool counters for deterministic act-burst shelf naming.
         self._tool_counters: Dict[str, int] = {}
         # External MCP server connections
@@ -3414,9 +3418,14 @@ class ToolExecutor:
             "page_count": total_pages,
             "source": "query_sql",
             "titles": self._extract_titles(loaded_content),
+            "mounted_at_iteration": self._current_iteration,
+            "shelved_from_msg": self._current_msg_idx,
         }
 
-        parts = [f"Found {total_pages} results → source '{source_name}' [ON]"]
+        parts = [
+            f"Found {total_pages} results → source '{source_name}' [ON] "
+            f"@msg#{self._current_msg_idx}"
+        ]
         if metadata and metadata.get('generated_query'):
             parts.append(f"SQL: {metadata['generated_query']}")
         return "\n".join(parts)
@@ -3456,8 +3465,13 @@ class ToolExecutor:
             "page_count": total_pages,
             "source": "query_vector",
             "titles": self._extract_titles(loaded_content),
+            "mounted_at_iteration": self._current_iteration,
+            "shelved_from_msg": self._current_msg_idx,
         }
-        return f"Found {total_pages} semantically similar results → source '{source_name}' [ON]"
+        return (
+            f"Found {total_pages} semantically similar results → "
+            f"source '{source_name}' [ON] @msg#{self._current_msg_idx}"
+        )
 
     async def _query_source(self, tool_input: Dict) -> str:
         from promaia.config.databases import get_database_config
@@ -3499,8 +3513,13 @@ class ToolExecutor:
             "page_count": len(pages),
             "source": "query_source",
             "titles": self._extract_titles({database: pages}),
+            "mounted_at_iteration": self._current_iteration,
+            "shelved_from_msg": self._current_msg_idx,
         }
-        return f"Loaded {len(pages)} pages from '{database}' ({time_range}) → source '{source_name}' [ON]"
+        return (
+            f"Loaded {len(pages)} pages from '{database}' ({time_range}) → "
+            f"source '{source_name}' [ON] @msg#{self._current_msg_idx}"
+        )
 
     async def _write_journal(self, tool_input: Dict) -> str:
         from promaia.agents.notion_journal import write_journal_entry
@@ -4633,14 +4652,19 @@ class ToolExecutor:
         result = f"Range {range_str} ({max_rows} rows, starting row {start_row}):\n\n{out.getvalue()}"
 
         # Auto-save as toggleable context source
-        # TODO: may want to add opt-in pin feature in future version
         source_name = f"sheet_{range_str.replace('!', '_').replace(':', '-')}"
         self._sources[source_name] = {
             "content": result,
             "on": True,
             "source": "sheets_read_range",
+            "page_count": 1,
+            "mounted_at_iteration": self._current_iteration,
+            "shelved_from_msg": self._current_msg_idx,
         }
-        return f"Range loaded → source '{source_name}' [ON]\n\n{result}"
+        return (
+            f"Range loaded → source '{source_name}' [ON] "
+            f"@msg#{self._current_msg_idx}\n\n{result}"
+        )
 
     @staticmethod
     def _coerce_values(values):
@@ -5884,14 +5908,14 @@ class ToolExecutor:
             "source": "web_fetch",
             "titles": [url],
             "mounted_at_iteration": self._current_iteration,
+            "shelved_from_msg": self._current_msg_idx,
         }
 
         truncation_note = " (truncated)" if truncated else ""
         return (
             f"Fetched {url} → {len(text):,} chars{truncation_note} → "
-            f"source '{source_name}' [ON]. The full body is now visible in "
-            f"your context shelf; use the `context` tool to toggle it off "
-            f"when you no longer need it."
+            f"source '{source_name}' [ON] @msg#{self._current_msg_idx}. "
+            f"Toggle with context(action=\"off\", sources=[\"{source_name}\"])."
         )
 
     async def _ensure_notion(self):
@@ -8884,6 +8908,13 @@ async def agentic_turn(
             "content": serialized_assistant,
         })
 
+        # All tool_results from this assistant message land in the same user
+        # message at position len(internal_messages).  Stamp it so self-
+        # shelving tools (query_source, web_fetch, etc.) can record
+        # shelved_from_msg on any shelf they create this iteration.
+        if tool_executor is not None:
+            tool_executor._current_msg_idx = len(internal_messages)
+
         tool_results = []
         squashed_this_iter = False   # set True by the __DONE__ handler
         for tool_use in tool_uses:
@@ -9140,8 +9171,43 @@ async def agentic_turn(
                 squashed_this_iter = True
                 tool_results = []   # discard pre-done accumulated tool_results
                 result_text = None
-                logger.info("[think/act] Returned to Think mode via done(report)")
+
+                # UX: surface the act→think switch in the Slack activity feed,
+                # mirroring how act() announces its loaded suites.
+                kept_on  = sum(1 for _, _, is_on in kept if is_on)
+                kept_off = len(kept) - kept_on
+                if kept:
+                    shelves_phrase = f"{len(kept)} shelves ({kept_on} on, {kept_off} off)"
+                else:
+                    shelves_phrase = "no shelves kept"
+                done_summary = (
+                    f"Back to Think mode → {shelves_phrase}, "
+                    f"{len(report):,}-char report"
+                )
+                logger.info(f"[think/act] {done_summary}")
+
+                # Record in workflow capture and Slack activity feed.
+                all_tool_calls.append({
+                    "name": "done",
+                    "input": {
+                        "report_length": len(report),
+                        "kept": [
+                            {"name": n, "on": on, "chars": len(s.get("content", ""))}
+                            for n, s, on in kept
+                        ],
+                    },
+                    "summary": done_summary,
+                })
                 if on_tool_activity:
+                    try:
+                        await on_tool_activity(
+                            tool_name="done",
+                            tool_input={},
+                            completed=True,
+                            summary=done_summary,
+                        )
+                    except Exception:
+                        pass
                     try:
                         await on_tool_activity(
                             tool_name="__plan_done__",
@@ -9497,6 +9563,11 @@ def _summarize_tool_result(
         return _vs("Notion DB query", outcome)
 
     elif tool_name == "web_search":
+        # Act-mode shelving rewrites the assistant message to "[web_search
+        # shelved → <name> (X chars for query '...')]" — surface that in UX.
+        m = re.search(r"web_search shelved → (\S+?) \(([^)]+) for query", result or "")
+        if m:
+            return _vs("Web search", f"{m.group(2)} → source '{m.group(1)}' [on]")
         phrase = _extract_count_phrase(result)
         return _vs("Web search", phrase or "ok")
 
@@ -9505,10 +9576,29 @@ def _summarize_tool_result(
         display_url = url[:60] + "…" if len(url) > 60 else url
         if errored:
             return f"Web fetch {display_url} ✗ {err}"
+        # web_fetch's stub embeds the shelf name; parse it for the UX line.
+        m = re.search(r"source '([^']+)' \[ON\](?: @msg#(\d+))?", result or "")
+        size_m = re.search(r"(\d[\d,]*)\s*chars", result or "")
+        if m:
+            size = f"{size_m.group(1)} chars" if size_m else f"{len(result):,} chars"
+            anchor = f" @msg#{m.group(2)}" if m.group(2) else ""
+            return f"Web fetch {display_url} → {size} → source '{m.group(1)}' [on]{anchor}"
         return f"Web fetch {display_url} → {len(result):,} chars"
 
     elif tool_name == "task_queue_add":
         return _vs("Queue task", tool_input.get("task", ""))
+
+    elif tool_name == "done":
+        # The loop fires its own activity event with a richer summary when
+        # __DONE__ fires; this fallback handles any other path that routes a
+        # done tool_result through the summariser.
+        return _vs("Back to Think mode", "act burst complete")
+
+    elif tool_name == "act":
+        suites = tool_input.get("suites", [])
+        if isinstance(suites, list):
+            return _vs("Act mode", f"suites: {', '.join(suites)}")
+        return _vs("Act mode", str(suites))
 
     else:
         return _vs(tool_name, "")
