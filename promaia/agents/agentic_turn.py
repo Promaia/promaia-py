@@ -8323,16 +8323,22 @@ def _shelve_web_search_in_assistant(
     iteration: int,
     msg_idx: int,
 ) -> None:
-    """Mutate serialized assistant content: replace each web_search_tool_result
-    body with a short stub and write the rendered body to _sources.
+    """Replace each (server_tool_use, web_search_tool_result) pair with a
+    single text block summarising the shelved result. Mutates the list in
+    place.
 
-    Caller should only invoke during an act burst. Preserves tool_use_id and
-    encrypted_content so multi-turn replay stays valid.
+    Why not mutate `.content` to a stub string in place?  Anthropic's API
+    validates `web_search_tool_result.content` as `list[WebSearchResultBlock]`
+    on every subsequent turn — a string there triggers a 400.  Collapsing the
+    pair to a text block sidesteps the schema entirely.
+
+    Caller should only invoke during an act burst.
     """
     if not isinstance(serialized_content, list) or tool_executor is None:
         return
 
-    # Map server_tool_use blocks by id so we can recover the originating query.
+    # First pass: shelve each web_search_tool_result and collect the
+    # text-summary replacements keyed by tool_use_id.
     tool_use_by_id: Dict[str, Dict] = {}
     for block in serialized_content:
         if isinstance(block, dict) and block.get("type") == "server_tool_use":
@@ -8340,12 +8346,14 @@ def _shelve_web_search_in_assistant(
             if bid:
                 tool_use_by_id[bid] = block
 
+    summaries_by_id: Dict[str, str] = {}
+    shelveable_ids: set = set()
+
     for block in serialized_content:
         if not isinstance(block, dict) or block.get("type") != "web_search_tool_result":
             continue
 
         content = block.get("content")
-        # Error blocks — keep inline, they're small and informative.
         if isinstance(content, dict) and content.get("type") == "web_search_tool_result_error":
             continue
         if not isinstance(content, list) or not content:
@@ -8369,10 +8377,35 @@ def _shelve_web_search_in_assistant(
             logger.warning(f"[act shelve web_search] failed: {e}")
             continue
 
-        block["content"] = (
+        summaries_by_id[tool_use_id] = (
             f"[web_search shelved → {name} ({len(rendered):,} chars for query "
-            f"{query!r}). Toggle with context(action=\"off\", sources=[\"{name}\"]).]"
+            f"{query!r}). Toggle with context(action=\"on\", sources=[\"{name}\"]).]"
         )
+        shelveable_ids.add(tool_use_id)
+
+    if not shelveable_ids:
+        return
+
+    # Second pass: rebuild the content list. The text summary takes the slot
+    # where the server_tool_use used to sit so relative ordering is preserved.
+    new_content: List = []
+    for block in serialized_content:
+        if not isinstance(block, dict):
+            new_content.append(block)
+            continue
+
+        btype = block.get("type")
+        if btype == "server_tool_use" and block.get("id") in shelveable_ids:
+            new_content.append({
+                "type": "text",
+                "text": summaries_by_id[block["id"]],
+            })
+            continue
+        if btype == "web_search_tool_result" and block.get("tool_use_id") in shelveable_ids:
+            continue
+        new_content.append(block)
+
+    serialized_content[:] = new_content
 
 
 def _serialize_content_blocks(content):
