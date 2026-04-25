@@ -14,10 +14,25 @@ import sys
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
+import anyio
+
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import Implementation
+
+try:  # Prefer the non-deprecated transport when available
+    from mcp.client.streamable_http import streamable_http_client as _streamable_http_client  # type: ignore
+    _HAS_NEW_HTTP_CLIENT = True
+except ImportError:  # pragma: no cover — older mcp library
+    from mcp.client.streamable_http import streamablehttp_client as _streamable_http_client  # type: ignore
+    _HAS_NEW_HTTP_CLIENT = False
+
+try:
+    from mcp.shared._httpx_utils import create_mcp_http_client
+except ImportError:  # pragma: no cover
+    create_mcp_http_client = None  # type: ignore
+
+import httpx
 
 from .result_adapter import adapt_call_tool_result, adapt_tool_list
 
@@ -87,8 +102,25 @@ class McpProtocolClient:
 
             self._session = session
 
-            # Initialize the session (MCP handshake)
-            init_result = await self._session.initialize()
+            # Initialize the session (MCP handshake). The underlying
+            # streamable_http transport has its own cancel scope that
+            # cancels on any downstream error; wrap with fail_after so a
+            # slow/cold server produces a clear timeout instead of a bare
+            # "Cancelled by cancel scope" message.
+            try:
+                with anyio.fail_after(timeout):
+                    init_result = await self._session.initialize()
+            except TimeoutError:
+                logger.error(
+                    "MCP handshake timed out after %ss (transport=%s, url=%s). "
+                    "Server may be cold-starting, unreachable, or not speaking "
+                    "the MCP streamable-HTTP protocol at this path.",
+                    timeout,
+                    transport,
+                    url if transport == "streamable_http" else "—",
+                )
+                await self._cleanup_stack()
+                return False
 
             self.initialized = True
             self.server_info = {
@@ -107,7 +139,18 @@ class McpProtocolClient:
             return True
 
         except BaseException as e:
-            logger.error("Error connecting to MCP server: %s", e)
+            # A bare "Cancelled by cancel scope" here almost always means the
+            # handshake task was torn down by the streamable-HTTP transport's
+            # task group after some downstream error (server returned HTML,
+            # 404, or never completed the MCP initialize exchange). Log the
+            # endpoint explicitly so the user can diagnose without re-running.
+            target = url if transport == "streamable_http" else " ".join(command or [])
+            logger.error(
+                "Error connecting to MCP server (transport=%s, target=%s): %s",
+                transport,
+                target,
+                e,
+            )
             await self._cleanup_stack()
             return False
 
@@ -149,16 +192,119 @@ class McpProtocolClient:
         headers: Optional[Dict[str, str]] = None,
         timeout: int = 30,
     ) -> Optional[ClientSession]:
-        """Open a Streamable HTTP transport and return a ClientSession."""
+        """Open a Streamable HTTP transport and return a ClientSession.
+
+        Uses the non-deprecated `streamable_http_client` when present, with
+        an httpx client that carries caller-supplied headers and honors the
+        requested timeout. Falls back to the legacy `streamablehttp_client`
+        signature when running against an older `mcp` package.
+        """
         logger.info("Connecting to MCP server (HTTP): %s", url)
 
-        read_stream, write_stream, _get_session_id = await self._stack.enter_async_context(
-            streamablehttp_client(url, headers=headers, timeout=timedelta(seconds=timeout))
-        )
+        # Pre-flight: surface auth / 404 / wrong-endpoint errors cleanly. The
+        # streamable-HTTP transport wraps these in a task-group cancel, which
+        # ends up as "Cancelled by cancel scope <id>" — useless for debugging.
+        # A direct POST of a valid MCP initialize request lets us see the
+        # real status code.
+        diag_err = await self._preflight_http(url, headers, timeout)
+        if diag_err:
+            logger.error("MCP pre-flight failed for %s: %s", url, diag_err)
+            return None
+
+        if _HAS_NEW_HTTP_CLIENT and create_mcp_http_client is not None:
+            # New API: pass a fully configured httpx client so we can thread
+            # headers + timeout through without deprecated kwargs.
+            http_timeout = httpx.Timeout(timeout, read=max(timeout, 300))
+            client = create_mcp_http_client(
+                headers=headers or None,
+                timeout=http_timeout,
+            )
+            read_stream, write_stream, _get_session_id = await self._stack.enter_async_context(
+                _streamable_http_client(url, http_client=client)
+            )
+        else:  # pragma: no cover — legacy path
+            read_stream, write_stream, _get_session_id = await self._stack.enter_async_context(
+                _streamable_http_client(
+                    url,
+                    headers=headers,
+                    timeout=timedelta(seconds=timeout),
+                )
+            )
         session = await self._stack.enter_async_context(
             ClientSession(read_stream, write_stream, client_info=_CLIENT_INFO)
         )
         return session
+
+    async def _preflight_http(
+        self,
+        url: str,
+        headers: Optional[Dict[str, str]],
+        timeout: int,
+    ) -> Optional[str]:
+        """Probe the MCP HTTP endpoint with a real initialize request.
+
+        Returns ``None`` when the endpoint looks usable (2xx, or an SSE /
+        JSON response). Returns a human-readable error string otherwise so
+        the caller can log a clear reason (401, 404, plain HTML, etc).
+        """
+        probe_headers = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }
+        if headers:
+            probe_headers.update(headers)
+
+        init_payload = {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": _CLIENT_INFO.name,
+                    "version": _CLIENT_INFO.version,
+                },
+            },
+        }
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(timeout),
+                follow_redirects=True,
+            ) as client:
+                resp = await client.post(url, json=init_payload, headers=probe_headers)
+        except httpx.HTTPError as e:
+            return f"network error: {e}"
+
+        if resp.status_code == 401:
+            return (
+                "server returned 401 Unauthorized — this MCP server requires "
+                "authentication. Set an Authorization header in the server's "
+                "`env` config (e.g. `\"Authorization\": \"Bearer ${MRP_TOKEN}\"`)."
+            )
+        if resp.status_code == 403:
+            return "server returned 403 Forbidden — credentials are rejected."
+        if resp.status_code == 404:
+            return (
+                "server returned 404 Not Found — the URL path is probably "
+                "wrong (common mistake: using the landing page instead of "
+                "the `/mcp` or `/sse` endpoint)."
+            )
+        if resp.status_code >= 500:
+            return f"server returned HTTP {resp.status_code} — upstream is unhealthy."
+        if resp.status_code >= 400:
+            return f"server returned HTTP {resp.status_code}."
+
+        ctype = resp.headers.get("content-type", "")
+        if "html" in ctype.lower():
+            return (
+                "server returned HTML instead of MCP JSON/SSE — the URL is "
+                "probably not an MCP endpoint (did you paste the web UI "
+                "URL by mistake?)."
+            )
+
+        return None
 
     # ------------------------------------------------------------------
     # Tool discovery & execution
