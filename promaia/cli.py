@@ -43,6 +43,7 @@ from promaia.cli.database_commands import (
     handle_database_remove_with_data_purge, handle_database_remove_interactive,
     handle_channel_remove_interactive,
     handle_database_channel_list, handle_database_edit,
+    handle_vectorize_slack_dms,
     add_database_commands, add_database_commands_to_existing_parser
 )
 from promaia.cli.conversion_commands import add_conversion_commands
@@ -3379,6 +3380,8 @@ def main():
                 asyncio.run(handle_database_test(args))
             elif args.database_command == "sync":
                 asyncio.run(handle_database_sync(args))
+            elif args.database_command == "vectorize-slack-dms":
+                asyncio.run(handle_vectorize_slack_dms(args))
             elif args.database_command == "info":
                 asyncio.run(handle_database_info(args))
             elif args.database_command == "push":

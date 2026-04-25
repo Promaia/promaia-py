@@ -45,8 +45,7 @@ QUERY_TOOL_DEFINITIONS = [
         "description": (
             "Search your data sources using natural language (converted to SQL). "
             "Use for exact text/keyword searches when you know what you're looking for. "
-            "Examples: 'emails from Federico this week', 'tasks due today', "
-            "'calendar events tomorrow'"
+            "Examples: 'emails from Federico this week', 'tasks due today'"
         ),
         "input_schema": {
             "type": "object",
@@ -101,7 +100,7 @@ QUERY_TOOL_DEFINITIONS = [
         "description": (
             "Load pages from a specific database with time filtering. "
             "Use to expand context or load different time ranges. "
-            "Available databases include: agent_journal, gmail, stories, tasks, calendar, "
+            "Available databases include: agent_journal, gmail, stories, tasks, "
             "and any Discord/Slack channel sources."
         ),
         "input_schema": {
@@ -111,7 +110,7 @@ QUERY_TOOL_DEFINITIONS = [
                     "type": "string",
                     "description": (
                         "Database name (e.g., 'agent_journal', 'gmail', 'stories', "
-                        "'tasks', 'calendar')"
+                        "'tasks')"
                     )
                 },
                 "days": {
@@ -452,54 +451,15 @@ GMAIL_READ_TOOL_DEFINITIONS = [
 
 MESSAGING_TOOL_DEFINITIONS = [
     {
-        "name": "send_message",
-        "description": (
-            "Send a one-way message (no reply expected). "
-            "Use 'user' to DM someone by name, or 'channel_id' for a channel. "
-            "For back-and-forth conversations, use start_conversation instead."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "channel_id": {
-                    "type": "string",
-                    "description": (
-                        "The channel ID to send the message to. "
-                        "Use 'current' to send to the current conversation's channel. "
-                        "Omit if using 'user' to send a DM instead."
-                    )
-                },
-                "user": {
-                    "type": "string",
-                    "description": (
-                        "The user's name to send a direct message to. "
-                        "Looks up the user by display name, real name, or username "
-                        "and opens a DM channel automatically."
-                    )
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The message content to send."
-                },
-                "thread_id": {
-                    "type": "string",
-                    "description": (
-                        "Optional thread ID to reply in a specific thread. "
-                        "Omit to post in the channel."
-                    )
-                }
-            },
-            "required": ["content"]
-        }
-    },
-    {
         "name": "start_conversation",
         "description": (
-            "Start a back-and-forth DM conversation with a user. "
-            "Sends the initial message, then waits for their reply. "
-            "Returns the user's response so you can continue the conversation. "
-            "Use this when you need a reply (e.g. asking a question, confirming something). "
-            "For one-way notifications, use send_message instead."
+            "Send the opening message of a DM to a user and hand off. "
+            "The conversation is registered so that when the user replies, "
+            "the Slack reply handler picks it up and continues it using your "
+            "agent personality. This tool returns as soon as the message is "
+            "sent — do NOT expect a reply back from this call, and do not "
+            "call it again just to wait. Use it once per user you want to "
+            "reach, then conclude your turn."
         ),
         "input_schema": {
             "type": "object",
@@ -682,8 +642,9 @@ CALENDAR_TOOL_DEFINITIONS = [
     {
         "name": "create_calendar_event",
         "description": (
-            "Create a new calendar event. "
-            "Use query_sql with calendar source to check for conflicts first."
+            "Create a new event on the user's calendar (or any calendar via `calendar_id`). "
+            "To schedule on your own agent calendar, use schedule_self instead. "
+            "Check for conflicts with list_calendar_events first."
         ),
         "input_schema": {
             "type": "object",
@@ -721,7 +682,8 @@ CALENDAR_TOOL_DEFINITIONS = [
         "name": "update_calendar_event",
         "description": (
             "Update an existing calendar event. "
-            "Use query_sql with calendar source to find the event_id."
+            "Get the event_id from list_calendar_events / list_self_calendar_events / "
+            "list_agent_calendar_events."
         ),
         "input_schema": {
             "type": "object",
@@ -748,7 +710,8 @@ CALENDAR_TOOL_DEFINITIONS = [
         "name": "delete_calendar_event",
         "description": (
             "Delete a calendar event. "
-            "Use query_sql with calendar source to find the event_id."
+            "Get the event_id from list_calendar_events / list_self_calendar_events / "
+            "list_agent_calendar_events."
         ),
         "input_schema": {
             "type": "object",
@@ -839,12 +802,109 @@ SCHEDULE_AGENT_EVENT_TOOL_DEFINITION = {
     },
 }
 
+LIST_SELF_CALENDAR_EVENTS_TOOL_DEFINITION = {
+    "name": "list_self_calendar_events",
+    "description": (
+        "List events on **your own** dedicated agent calendar — the one "
+        "schedule_self writes to and that triggers your future runs. "
+        "Use this when the user asks about your scheduled work, recurring "
+        "triggers, or events on 'the agent calendar'."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "days_ahead": {
+                "type": "integer",
+                "description": "Number of days ahead to look (default 7)",
+                "default": 7
+            },
+            "days_back": {
+                "type": "integer",
+                "description": "Number of days back to look (default 0)",
+                "default": 0
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional search text to filter events"
+            },
+        }
+    },
+}
+
+GET_SELF_CALENDAR_EVENT_TOOL_DEFINITION = {
+    "name": "get_self_calendar_event",
+    "description": "Get details of an event on your own agent calendar.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "event_id": {"type": "string", "description": "Calendar event ID"}
+        },
+        "required": ["event_id"]
+    },
+}
+
+LIST_AGENT_CALENDAR_EVENTS_TOOL_DEFINITION = {
+    "name": "list_agent_calendar_events",
+    "description": (
+        "List events on another agent's dedicated calendar. Use this when "
+        "the user asks about a specific named agent's schedule."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "agent": {
+                "type": "string",
+                "description": (
+                    "Agent name (required when multiple agents have "
+                    "calendars, optional when only one)"
+                )
+            },
+            "days_ahead": {
+                "type": "integer",
+                "description": "Number of days ahead to look (default 7)",
+                "default": 7
+            },
+            "days_back": {
+                "type": "integer",
+                "description": "Number of days back to look (default 0)",
+                "default": 0
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional search text to filter events"
+            },
+        }
+    },
+}
+
+GET_AGENT_CALENDAR_EVENT_TOOL_DEFINITION = {
+    "name": "get_agent_calendar_event",
+    "description": "Get details of an event on a named agent's dedicated calendar.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "event_id": {"type": "string", "description": "Calendar event ID"},
+            "agent": {
+                "type": "string",
+                "description": (
+                    "Agent name (required when multiple agents have "
+                    "calendars, optional when only one)"
+                )
+            },
+        },
+        "required": ["event_id"]
+    },
+}
+
 CALENDAR_READ_TOOL_DEFINITIONS = [
     {
         "name": "list_calendar_events",
         "description": (
-            "List upcoming calendar events. "
-            "Optionally filter by date range or search query."
+            "List upcoming calendar events on the user's primary calendar "
+            "(or any calendar by ID). "
+            "Optionally filter by date range or search query. "
+            "To read an agent calendar, prefer list_self_calendar_events / "
+            "list_agent_calendar_events, which auto-resolve the calendar ID."
         ),
         "input_schema": {
             "type": "object",
@@ -862,19 +922,34 @@ CALENDAR_READ_TOOL_DEFINITIONS = [
                 "query": {
                     "type": "string",
                     "description": "Optional search text to filter events"
+                },
+                "calendar_id": {
+                    "type": "string",
+                    "description": (
+                        "Calendar ID to read from (default: primary). "
+                        "Use list_calendars to discover IDs."
+                    )
                 }
             }
         }
     },
     {
         "name": "get_calendar_event",
-        "description": "Get details of a specific calendar event by ID.",
+        "description": (
+            "Get details of a specific calendar event by ID. "
+            "To read from an agent calendar, prefer get_self_calendar_event / "
+            "get_agent_calendar_event."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "event_id": {
                     "type": "string",
                     "description": "Calendar event ID"
+                },
+                "calendar_id": {
+                    "type": "string",
+                    "description": "Calendar ID the event lives on (default: primary)"
                 }
             },
             "required": ["event_id"]
@@ -1445,6 +1520,29 @@ GOOGLE_SHEETS_FORMAT_TOOL_DEFINITIONS = [
     },
 ]
 
+# Loop-internal tool names. Results from these tools are acks, control
+# sentinels, or other model/loop plumbing — never user-visible data — so
+# they are NOT auto-shelved during act-mode uniform shelving.
+_CONTROL_TOOL_NAMES: frozenset = frozenset({
+    "context",
+    "notepad",
+    "memory",
+    "show_selection",
+    "mark_step_done",
+    "done",
+})
+
+# Tools that already mount their own context source and return a stub.
+# The act-mode dispatch hook skips them to avoid double-shelving the
+# (already-shortened) stub as a second source.
+_SELF_SHELVING_TOOL_NAMES: frozenset = frozenset({
+    "web_fetch",
+    "query_sql",
+    "query_vector",
+    "query_source",
+    "sheets_read_range",
+})
+
 NOTEPAD_TOOL_DEFINITION = {
     "name": "notepad",
     "description": (
@@ -1601,8 +1699,46 @@ MARK_STEP_DONE_TOOL_DEFINITION = {
 
 DONE_TOOL_DEFINITION = {
     "name": "done",
-    "description": "Exit Act mode and return to Think mode. Context and search tools become available again.",
-    "input_schema": {"type": "object", "properties": {}, "required": []}
+    "description": (
+        "Exit Act mode and return to Think mode. "
+        "Hand a concise prose report back to the Think-mode agent. "
+        "Optionally keep specific shelves by listing them in keep_shelves "
+        "(each with its own on/off state). Any burst shelf you do not list "
+        "is discarded — the report is the primary handoff. "
+        "Curate deliberately: a good report plus two carefully chosen "
+        "shelves beats twelve shelves the think agent has to sift through."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "report": {
+                "type": "string",
+                "description": (
+                    "Plain-text report for the Think-mode agent: what you did, "
+                    "what you found, what matters next. This is the only part "
+                    "of your burst the Think agent sees (plus any shelves you "
+                    "explicitly keep)."
+                ),
+            },
+            "keep_shelves": {
+                "type": "array",
+                "description": (
+                    "Optional curated list of shelves to preserve. Anything "
+                    "not listed is discarded. Omit this field entirely to "
+                    "discard all burst shelves."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "on": {"type": "boolean"},
+                    },
+                    "required": ["name", "on"],
+                },
+            },
+        },
+        "required": ["report"],
+    },
 }
 
 TASK_QUEUE_TOOL_DEFINITIONS = [
@@ -2390,7 +2526,7 @@ AGENT_TOOL_DEFINITIONS = [
                     "type": "boolean",
                     "description": (
                         "Whether this agent can use messaging tools "
-                        "(send_message, start_conversation, etc.)."
+                        "(start_conversation, end_conversation, etc.)."
                     )
                 },
                 "allowed_channel_ids": {
@@ -2653,6 +2789,37 @@ def _resolve_spreadsheet_id(identifier: str, workspace: str) -> str:
     raise ValueError(f"Could not resolve spreadsheet: '{identifier}'")
 
 
+def _format_event_time(time_obj: Dict, display_tz: str) -> str:
+    """Format a Google Calendar event start/end dict as a human-readable string.
+
+    Google returns events with either `dateTime` (timed events) or `date`
+    (all-day events). When events().list is called with timeZone=X, dateTime
+    values come back with the matching offset — we parse and render them with
+    the zone abbreviation so the model never has to reason about UTC math.
+    """
+    date_only = time_obj.get('date')
+    if date_only:
+        return f"{date_only} (all-day)"
+
+    dt_str = time_obj.get('dateTime')
+    if not dt_str:
+        return '?'
+
+    try:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+        parsed = _dt.fromisoformat(dt_str.replace('Z', '+00:00'))
+        try:
+            local = parsed.astimezone(ZoneInfo(display_tz))
+            zone_label = local.strftime('%Z') or display_tz
+        except Exception:
+            local = parsed
+            zone_label = display_tz
+        return local.strftime(f"%Y-%m-%d %I:%M %p {zone_label}").replace(' 0', ' ')
+    except Exception:
+        return dt_str
+
+
 def _hex_to_rgb(hex_color: str) -> Dict[str, float]:
     """Convert '#RRGGBB' to Google Sheets RGB float dict."""
     h = hex_color.lstrip("#")
@@ -2722,9 +2889,14 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
         tools.extend(CALENDAR_MANAGEMENT_TOOL_DEFINITIONS)
         if getattr(agent, 'calendar_id', None):
             tools.append(SCHEDULE_SELF_TOOL_DEFINITION)
-        # Always include schedule_agent_event — calendar may be created mid-session
-        # by create_agent. The executor returns a clear error if no calendars exist.
+            tools.append(LIST_SELF_CALENDAR_EVENTS_TOOL_DEFINITION)
+            tools.append(GET_SELF_CALENDAR_EVENT_TOOL_DEFINITION)
+        # Always include schedule_agent_event + agent-calendar reads — calendars
+        # may be created mid-session by create_agent. The executor returns a
+        # clear error if no calendars exist.
         tools.append(SCHEDULE_AGENT_EVENT_TOOL_DEFINITION)
+        tools.append(LIST_AGENT_CALENDAR_EVENTS_TOOL_DEFINITION)
+        tools.append(GET_AGENT_CALENDAR_EVENT_TOOL_DEFINITION)
     if "notion" in mcp_tools:
         tools.extend(NOTION_TOOL_DEFINITIONS)
         tools.extend(NOTION_BLOCK_TOOL_DEFINITIONS)
@@ -2810,11 +2982,15 @@ def _build_tool_suite_registry(agent, has_platform: bool = False) -> Dict[str, D
     if "calendar" in mcp_tools:
         tools = list(CALENDAR_TOOL_DEFINITIONS) + list(CALENDAR_READ_TOOL_DEFINITIONS) + list(CALENDAR_MANAGEMENT_TOOL_DEFINITIONS)
         tools.append(SCHEDULE_AGENT_EVENT_TOOL_DEFINITION)
+        tools.append(LIST_AGENT_CALENDAR_EVENTS_TOOL_DEFINITION)
+        tools.append(GET_AGENT_CALENDAR_EVENT_TOOL_DEFINITION)
         if getattr(agent, 'calendar_id', None):
             tools.append(SCHEDULE_SELF_TOOL_DEFINITION)
+            tools.append(LIST_SELF_CALENDAR_EVENTS_TOOL_DEFINITION)
+            tools.append(GET_SELF_CALENDAR_EVENT_TOOL_DEFINITION)
         registry["calendar"] = {
             "tools": tools,
-            "description": "events, scheduling, calendar management (list/create/delete calendars)",
+            "description": "events, scheduling, reading agent calendars, calendar management (list/create/delete calendars)",
             "count": len(tools),
         }
 
@@ -2964,9 +3140,20 @@ class ToolExecutor:
         # }
         self._sources = {}
         self._sources_muted = False
+        # When in an act burst, set to the iteration at entry. Shelves whose
+        # mounted_at_iteration >= this value are visible to the act agent even
+        # while muted. None when not in an act burst.
+        self._act_start_iteration: Optional[int] = None
+        # Monotonic counter for named context sources produced by _web_fetch
+        # (koii-prod's built-in pre-shelving path). Kept so merged web_fetch
+        # behaviour stays intact; uniform act-mode shelving uses
+        # self._tool_counters separately.
+        self._web_fetch_counter = 0
         # Updated each iteration by the agentic loop so source-management
         # paths (shelving, _context_action) can stamp mounted_at_iteration.
         self._current_iteration = 0
+        # Per-tool counters for deterministic act-burst shelf naming.
+        self._tool_counters: Dict[str, int] = {}
         # External MCP server connections
         self._mcp_client = None        # McpClient instance
         self._mcp_tool_map = {}        # namespaced_name → (server_name, original_name)
@@ -2984,8 +3171,6 @@ class ToolExecutor:
             elif tool_name == "write_agent_journal":
                 return await self._write_journal(tool_input)
             # Messaging tools
-            elif tool_name == "send_message":
-                return await self._send_message(tool_input)
             elif tool_name == "start_conversation":
                 return await self._start_conversation(tool_input)
             elif tool_name == "end_conversation":
@@ -3043,6 +3228,14 @@ class ToolExecutor:
                 return await self._list_calendar_events(tool_input)
             elif tool_name == "get_calendar_event":
                 return await self._get_calendar_event(tool_input)
+            elif tool_name == "list_self_calendar_events":
+                return await self._list_self_calendar_events(tool_input)
+            elif tool_name == "get_self_calendar_event":
+                return await self._get_self_calendar_event(tool_input)
+            elif tool_name == "list_agent_calendar_events":
+                return await self._list_agent_calendar_events(tool_input)
+            elif tool_name == "get_agent_calendar_event":
+                return await self._get_agent_calendar_event(tool_input)
             # Calendar management
             elif tool_name == "list_calendars":
                 return await self._list_calendars(tool_input)
@@ -3091,7 +3284,15 @@ class ToolExecutor:
                 step = tool_input.get("step", 0)
                 return f"__MARK_STEP__:{step}"
             elif tool_name == "done":
-                return "__DONE__"
+                # Carry the report + keep_shelves curation to the loop-level
+                # consumer. Payload is intentionally JSON so the loop can parse
+                # with a single json.loads call.
+                import json as _json_done
+                payload = {
+                    "report": tool_input.get("report", "") or "",
+                    "keep_shelves": tool_input.get("keep_shelves"),
+                }
+                return f"__DONE__:{_json_done.dumps(payload)}"
             # Config tools
             elif tool_name == "list_source_types":
                 return await self._list_source_types()
@@ -3415,131 +3616,14 @@ class ToolExecutor:
 
         return None
 
-    async def _send_message(self, tool_input: Dict) -> str:
-        if not self.platform:
-            return "Error: messaging is not available in this context (no platform)."
-
-        content = tool_input.get("content", "")
-        if not content:
-            return "Error: missing 'content' parameter"
-
-        user_name = tool_input.get("user")
-        channel_id = tool_input.get("channel_id")
-        thread_id = tool_input.get("thread_id")
-
-        # DM by user name — resolve to channel via conversations.open
-        if user_name:
-            user_info = await self._resolve_user(user_name)
-            if not user_info:
-                return f"Error: could not find user matching '{user_name}'"
-            dm_channel = await self.platform.open_dm(user_info["id"])
-            if not dm_channel:
-                return f"Error: could not open DM with {user_info['real_name'] or user_name}"
-            channel_id = dm_channel
-            target_desc = f"DM to {user_info.get('real_name') or user_info.get('name', user_name)}"
-        elif channel_id == "current" or (not channel_id and not user_name):
-            if not self.channel_context:
-                return "Error: no current channel context available. Use 'user' to DM someone or provide a channel_id."
-            channel_id = self.channel_context["channel_id"]
-            thread_id = thread_id or self.channel_context.get("thread_id")
-            target_desc = f"channel {channel_id}"
-        else:
-            target_desc = f"channel {channel_id}"
-
-        if not channel_id:
-            return "Error: must provide either 'user' or 'channel_id'"
-
-        meta = await self.platform.send_message(
-            channel_id=channel_id,
-            content=content,
-            thread_id=thread_id,
-        )
-
-        # For top-level DMs, register a dormant conversation so replies
-        # can be routed back with full context of the original message.
-        if user_name and not thread_id:
-            await self._register_dormant_dm(
-                meta=meta,
-                user_info=user_info,
-                dm_channel=channel_id,
-                content=content,
-            )
-
-        if thread_id:
-            target_desc += f" (thread {thread_id[:12]})"
-        return f"Message sent to {target_desc}"
-
-    async def _register_dormant_dm(
-        self, meta, user_info: Dict, dm_channel: str, content: str,
-    ) -> None:
-        """Create a dormant ConversationState for a DM so replies are routable."""
-        try:
-            from promaia.agents.conversation_manager import (
-                ConversationManager, ConversationState,
-            )
-            from datetime import datetime, timezone
-
-            conv_manager = ConversationManager()
-            platform_name = getattr(self.platform, "platform_name", "slack")
-
-            if platform_name not in conv_manager.platforms:
-                conv_manager.register_platform(platform_name, self.platform)
-
-            agent_id = (
-                getattr(self.agent, "agent_id", None)
-                or getattr(self.agent, "name", "agent")
-            )
-            real_name = (
-                user_info.get("real_name")
-                or user_info.get("name")
-                or "unknown"
-            )
-
-            now = datetime.now(timezone.utc).isoformat()
-            msg_ts = str(int(datetime.now(timezone.utc).timestamp()))
-            conversation_id = f"{platform_name}_{dm_channel}_{msg_ts}"
-            dm_thread_id = meta.message_id
-
-            state = ConversationState(
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                platform=platform_name,
-                channel_id=dm_channel,
-                user_id=user_info["id"],
-                thread_id=dm_thread_id,
-                status="dormant",
-                last_message_at=now,
-                messages=[{
-                    "role": "assistant",
-                    "content": content,
-                    "timestamp": now,
-                }],
-                context={"is_dm": True, "user_name": real_name},
-                timeout_seconds=600,
-                max_turns=None,
-                turn_count=0,
-                created_at=now,
-                conversation_type="tag_to_chat",
-                is_active=True,
-                conversation_partner=real_name,
-            )
-            await conv_manager._save_state(state)
-            logger.info(
-                f"Registered dormant DM conversation {conversation_id} "
-                f"(thread {dm_thread_id[:12]}) for replies from {real_name}"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to register dormant DM conversation: {e}")
-
     async def _start_conversation(self, tool_input: Dict) -> str:
-        """Start a real interactive DM conversation and wait for it to complete.
+        """Send the opening message of a DM and hand off to the reply handler.
 
-        Creates a TagToChatLoop that drives a full back-and-forth conversation
-        using the agent's personality. The agentic turn suspends until the
-        conversation goes dormant (user stops replying), then resumes with
-        the full transcript.
+        Persists a ConversationState keyed by the message's thread_id. When the
+        user replies, the Slack bot's dormant-thread waker rehydrates a
+        TagToChatLoop in its own process and drives the conversation. This tool
+        returns immediately so the current agentic turn can conclude.
         """
-        import asyncio
         if not self.platform:
             return "Error: messaging is not available in this context (no platform)."
 
@@ -3552,12 +3636,10 @@ class ToolExecutor:
         if not message:
             return "Error: missing 'message' parameter"
 
-        # Resolve user
         user_info = await self._resolve_user(user_name)
         if not user_info:
             return f"Error: could not find user matching '{user_name}'"
 
-        # Open DM channel
         dm_channel = await self.platform.open_dm(user_info["id"])
         if not dm_channel:
             return f"Error: could not open DM with {user_info['real_name'] or user_name}"
@@ -3566,13 +3648,11 @@ class ToolExecutor:
             from promaia.agents.conversation_manager import (
                 ConversationManager, ConversationState,
             )
-            from promaia.agents.tag_to_chat import TagToChatLoop
             from datetime import datetime, timezone
 
             conv_manager = ConversationManager()
             platform_name = getattr(self.platform, "platform_name", "slack")
 
-            # Register platform so the Slack bot can route replies
             if platform_name not in conv_manager.platforms:
                 conv_manager.register_platform(platform_name, self.platform)
 
@@ -3582,13 +3662,11 @@ class ToolExecutor:
             )
             real_name = user_info.get("real_name") or user_info.get("name") or user_name
 
-            # Send message at top-level — this becomes the thread parent
             meta = await self.platform.send_message(
                 channel_id=dm_channel, content=message,
             )
             dm_thread_id = meta.message_id
 
-            # Create a real conversation state (not passive — agent personality drives it)
             now = datetime.now(timezone.utc).isoformat()
             msg_ts = str(int(datetime.now(timezone.utc).timestamp()))
             conversation_id = f"{platform_name}_{dm_channel}_{msg_ts}"
@@ -3600,7 +3678,7 @@ class ToolExecutor:
                 channel_id=dm_channel,
                 user_id=user_info["id"],
                 thread_id=dm_thread_id,
-                status="active",
+                status="dormant",
                 last_message_at=now,
                 messages=[{
                     "role": "assistant",
@@ -3617,54 +3695,16 @@ class ToolExecutor:
                 conversation_partner=real_name,
             )
             await conv_manager._save_state(state)
-
-            # Start a real TagToChatLoop — agent personality drives the conversation
-            loop = TagToChatLoop(
-                conversation_id=conversation_id,
-                channel_id=dm_channel,
-                thread_id=dm_thread_id,
-                platform=platform_name,
-                agent_id=agent_id,
-                platform_impl=self.platform,
-                conv_manager=conv_manager,
-                is_dm=True,
+            logger.info(
+                f"Started conversation {conversation_id} with {real_name} "
+                f"(dormant; reply handler will wake it)"
             )
 
-            # Dormancy signal — fires when the loop exits (dormant/stopped)
-            done_event = asyncio.Event()
-            loop.on_done(done_event.set)
-
-            # Start the conversation loop
-            asyncio.create_task(loop.run())
-            logger.info(f"Started interactive conversation {conversation_id} with {real_name}")
-
-            # Suspend the agentic turn until conversation goes dormant or times out
-            try:
-                await asyncio.wait_for(
-                    done_event.wait(),
-                    timeout=timeout_minutes * 60,
-                )
-            except asyncio.TimeoutError:
-                logger.info(f"Conversation {conversation_id} timed out after {timeout_minutes}min")
-                loop._stop_requested = True
-
-            # Load final transcript
-            final_state = await conv_manager._load_state(conversation_id)
-            if final_state and final_state.messages:
-                transcript_lines = []
-                for msg in final_state.messages:
-                    role = msg.get("role", "unknown")
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        text_parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
-                        content = "\n".join(text_parts)
-                    if isinstance(content, str) and content.strip():
-                        speaker = real_name if role == "user" else "You"
-                        transcript_lines.append(f"[{speaker}]: {content}")
-                transcript = "\n".join(transcript_lines)
-                return f"Conversation with {real_name} completed.\n\nTranscript:\n{transcript}"
-            else:
-                return f"Conversation with {real_name} ended (no messages exchanged)."
+            return (
+                f"Sent the opening message to {real_name}. "
+                f"The conversation is now live — when they reply, the Slack "
+                f"reply handler will continue it. Nothing more for you to do here."
+            )
 
         except Exception as e:
             logger.error(f"start_conversation error: {e}", exc_info=True)
@@ -4221,6 +4261,55 @@ class ToolExecutor:
         summary = tool_input.get("summary", "")
         return f"Scheduled on {agent_name}'s calendar: '{summary}' at {start}\n{result}"
 
+    # ── Agent-calendar read wrappers (auto-resolve calendar_id) ─────────────
+
+    def _resolve_agent_calendar_id(self, tool_input: Dict) -> str:
+        """Resolve which agent calendar to read. Returns calendar_id string
+        on success, or an error message string starting with 'Error:' on failure.
+        Mirrors the resolution logic in _schedule_agent_event."""
+        if not self._agent_calendars:
+            return "Error: No agent calendars available."
+        agent_name = tool_input.get("agent")
+        if len(self._agent_calendars) == 1:
+            agent_name = next(iter(self._agent_calendars))
+        elif not agent_name:
+            names = ", ".join(sorted(self._agent_calendars.keys()))
+            return f"Error: Multiple agent calendars available ({names}). Please specify the 'agent' parameter."
+        if agent_name not in self._agent_calendars:
+            names = ", ".join(sorted(self._agent_calendars.keys()))
+            return f"Error: No calendar for agent '{agent_name}'. Available: {names}"
+        return self._agent_calendars[agent_name]
+
+    async def _list_self_calendar_events(self, tool_input: Dict) -> str:
+        if not self._agent_calendar_id:
+            return "Error: No dedicated calendar configured for this agent."
+        merged = dict(tool_input)
+        merged["calendar_id"] = self._agent_calendar_id
+        return await self._list_calendar_events(merged)
+
+    async def _get_self_calendar_event(self, tool_input: Dict) -> str:
+        if not self._agent_calendar_id:
+            return "Error: No dedicated calendar configured for this agent."
+        merged = dict(tool_input)
+        merged["calendar_id"] = self._agent_calendar_id
+        return await self._get_calendar_event(merged)
+
+    async def _list_agent_calendar_events(self, tool_input: Dict) -> str:
+        resolved = self._resolve_agent_calendar_id(tool_input)
+        if resolved.startswith("Error:"):
+            return resolved
+        merged = dict(tool_input)
+        merged["calendar_id"] = resolved
+        return await self._list_calendar_events(merged)
+
+    async def _get_agent_calendar_event(self, tool_input: Dict) -> str:
+        resolved = self._resolve_agent_calendar_id(tool_input)
+        if resolved.startswith("Error:"):
+            return resolved
+        merged = dict(tool_input)
+        merged["calendar_id"] = resolved
+        return await self._get_calendar_event(merged)
+
     async def _create_calendar_event(self, tool_input: Dict) -> str:
         await self._ensure_calendar()
         calendar_id = tool_input.get("calendar_id", "primary")
@@ -4295,15 +4384,18 @@ class ToolExecutor:
         days_ahead = tool_input.get("days_ahead", 7)
         days_back = tool_input.get("days_back", 0)
         query = tool_input.get("query")
+        calendar_id = tool_input.get("calendar_id", "primary")
+        tz = self._calendar_tz or 'UTC'
 
         now = _dt.now(_tz.utc)
         time_min = (now - _td(days=days_back)).isoformat()
         time_max = (now + _td(days=days_ahead)).isoformat()
 
         kwargs = {
-            "calendarId": "primary",
+            "calendarId": calendar_id,
             "timeMin": time_min,
             "timeMax": time_max,
+            "timeZone": tz,
             "singleEvents": True,
             "orderBy": "startTime",
             "maxResults": 50,
@@ -4311,20 +4403,31 @@ class ToolExecutor:
         if query:
             kwargs["q"] = query
 
+        logger.info(
+            "list_calendar_events: calendar_id=%r time_min=%s time_max=%s "
+            "query=%r days_ahead=%s days_back=%s tz=%s",
+            calendar_id, time_min, time_max, query, days_ahead, days_back, tz,
+        )
         try:
             result = await asyncio.to_thread(
                 self._calendar_service.events().list(**kwargs).execute
             )
             events = result.get('items', [])
+            logger.info(
+                "list_calendar_events: returned %d events for calendar_id=%r "
+                "(summary=%r, accessRole=%r)",
+                len(events), calendar_id,
+                result.get('summary'), result.get('accessRole'),
+            )
             if not events:
-                return "No calendar events found for the specified range."
+                return f"No calendar events found for the specified range ({tz})."
 
-            lines = [f"Found {len(events)} events:\n"]
+            lines = [f"Found {len(events)} events (times in {tz}):\n"]
             for ev in events:
                 start = ev.get('start', {})
-                start_str = start.get('dateTime') or start.get('date', '?')
+                start_str = _format_event_time(start, tz)
                 end = ev.get('end', {})
-                end_str = end.get('dateTime') or end.get('date', '?')
+                end_str = _format_event_time(end, tz)
                 summary = ev.get('summary', '(No title)')
                 location = ev.get('location', '')
                 loc_str = f" | Location: {location}" if location else ""
@@ -4342,11 +4445,13 @@ class ToolExecutor:
         event_id = tool_input.get("event_id", "")
         if not event_id:
             return "Error: missing 'event_id' parameter"
+        calendar_id = tool_input.get("calendar_id", "primary")
+        tz = self._calendar_tz or 'UTC'
 
         try:
             event = await asyncio.to_thread(
                 self._calendar_service.events().get(
-                    calendarId="primary", eventId=event_id
+                    calendarId=calendar_id, eventId=event_id, timeZone=tz
                 ).execute
             )
             start = event.get('start', {})
@@ -4356,8 +4461,8 @@ class ToolExecutor:
 
             parts = [
                 f"**{event.get('summary', '(No title)')}**",
-                f"Start: {start.get('dateTime') or start.get('date', '?')}",
-                f"End: {end.get('dateTime') or end.get('date', '?')}",
+                f"Start: {_format_event_time(start, tz)}",
+                f"End: {_format_event_time(end, tz)}",
             ]
             if event.get('location'):
                 parts.append(f"Location: {event['location']}")
@@ -5686,7 +5791,14 @@ class ToolExecutor:
         return "Error: web_search is handled server-side by the Anthropic API. This method should not be called."
 
     async def _web_fetch(self, tool_input: Dict) -> str:
-        """Fetch and extract text content from a URL."""
+        """Fetch a URL and mount the extracted text as a context source.
+
+        The body lands in ``self._sources`` (visible/ON by default) so the
+        context trimmer can LRU it off losslessly when budget tightens —
+        same pattern ``query_source`` uses. The tool_result sent back to the
+        model is a short stub, not the full body, which keeps message
+        history lean across many fetches.
+        """
         import httpx
 
         url = tool_input.get("url", "")
@@ -5754,10 +5866,33 @@ class ToolExecutor:
             return f"Could not extract readable content from {url}"
 
         # Truncate if too long
+        truncated = False
         if len(text) > MAX_CONTENT_CHARS:
             text = text[:MAX_CONTENT_CHARS] + "\n\n[Content truncated at 50,000 characters]"
+            truncated = True
 
-        return f"Content from {url}:\n\n{text}"
+        # Mount the body as a named context source. ON by default so the
+        # agent can read it right now; the trimmer will LRU it off when
+        # budget tightens. Name scheme mirrors `sql_…`, `search_…`, etc.
+        self._web_fetch_counter += 1
+        source_name = f"web_fetch_{self._web_fetch_counter}"
+        header = f"# Web fetch: {url}\n\n"
+        self._sources[source_name] = {
+            "content": header + text,
+            "on": True,
+            "page_count": 1,
+            "source": "web_fetch",
+            "titles": [url],
+            "mounted_at_iteration": self._current_iteration,
+        }
+
+        truncation_note = " (truncated)" if truncated else ""
+        return (
+            f"Fetched {url} → {len(text):,} chars{truncation_note} → "
+            f"source '{source_name}' [ON]. The full body is now visible in "
+            f"your context shelf; use the `context` tool to toggle it off "
+            f"when you no longer need it."
+        )
 
     async def _ensure_notion(self):
         """Lazy-initialize Notion client."""
@@ -6655,21 +6790,61 @@ class ToolExecutor:
                     titles.append(title)
         return titles
 
+    def _sorted_sources(self) -> List[tuple]:
+        """Return (name, src) pairs with msg-anchored sources first, newest-msg first."""
+        indexed = []
+        unindexed = []
+        for name, src in self._sources.items():
+            if src.get("shelved_from_msg") is not None:
+                indexed.append((name, src))
+            else:
+                unindexed.append((name, src))
+        indexed.sort(key=lambda pair: pair[1]["shelved_from_msg"], reverse=True)
+        return indexed + unindexed
+
+    def _is_source_visible(self, src: Dict) -> bool:
+        """Filter applied while muted. Burst shelves (mounted at or after
+        _act_start_iteration) stay visible to the act agent; pre-burst shelves
+        are hidden. When not muted, every source is visible."""
+        if not self._sources_muted:
+            return True
+        if self._act_start_iteration is None:
+            return False
+        return src.get("mounted_at_iteration", -1) >= self._act_start_iteration
+
     def build_context_index(self) -> str:
-        """Build the context index string for the system prompt."""
-        if self._sources_muted or not self._sources:
+        """Build the context shelf index for the system prompt.
+
+        Sources produced by tool calls carry a @msg#N anchor matching the
+        stub that replaced their tool_result in message history. The model
+        can cross-reference the tool_use at message N with the body on
+        the shelf to see 'I did this, here's what came back.'
+
+        During an act burst, only shelves created in the current burst are
+        shown — pre-burst shelves stay muted.
+        """
+        if not self._sources:
+            return ""
+        items = [(name, src) for name, src in self._sorted_sources()
+                 if self._is_source_visible(src)]
+        if not items:
             return ""
         lines = [
-            "## Your Context\n",
-            "Toggle sources ON/OFF with the `context` tool.",
-            "Check here BEFORE searching — the data you need may already be loaded.\n",
+            "## Context Shelf\n",
+            "Sources retrieved from tool calls in this conversation. Toggle ON/OFF with the `context` tool.",
+            "Shown newest first. `(from msg #N)` means the source was produced by the tool call at message N of this conversation — the stub at that message points back here.\n",
         ]
-        for name, src in self._sources.items():
+        for name, src in items:
             state = "ON" if src["on"] else "OFF"
             origin = src.get("source", "unknown")
             count = src.get("page_count", 0)
             chars = len(src.get("content", ""))
-            lines.append(f"- [{state}] **{name}** ({count} entries, {chars // 1000}k chars, source: {origin})")
+            msg_ref = src.get("shelved_from_msg")
+            if msg_ref is not None:
+                anchor = f"from msg #{msg_ref}, via {origin}"
+            else:
+                anchor = f"via {origin}"
+            lines.append(f"- [{state}] **{name}** ({anchor}, {count} entries, {chars // 1000}k chars)")
             # OFF sources show titles so agent knows what's available without loading
             if not src["on"]:
                 titles = src.get("titles", [])
@@ -6678,150 +6853,147 @@ class ToolExecutor:
         return "\n".join(lines)
 
     def build_active_source_content(self) -> str:
-        """Build the combined content of all ON sources for the system prompt."""
-        if self._sources_muted:
-            return ""
+        """Build the combined content of all ON sources for the system prompt.
+
+        Follows the same newest-first order as the index so body position
+        matches the index listing. During an act burst, only shelves created
+        this burst contribute content — pre-burst shelves stay muted.
+        """
         parts = []
-        for name, src in self._sources.items():
-            if src["on"] and src.get("content"):
-                parts.append(src["content"])
+        for name, src in self._sorted_sources():
+            if not src.get("on") or not src.get("content"):
+                continue
+            if not self._is_source_visible(src):
+                continue
+            parts.append(src["content"])
         return "\n\n".join(parts)
 
-    # ── Act-mode tool result shelving ───────────────────────────────────
+    # ── Uniform act-mode tool-result shelving ──────────────────────────
     #
-    # When act mode exits via __DONE__, all tool_result blocks produced
-    # during the burst are moved into the _sources shelf system. The
-    # full payload is registered as an ON source (so think mode sees it
-    # immediately via build_active_source_content) and the inline
-    # tool_result block is replaced with a short stub. The matching
-    # tool_use block is left untouched, so workflow capture
-    # (all_tool_calls[]) is unaffected.
+    # During an act burst, every non-control tool result is shelved
+    # immediately: the full body lands in self._sources[name] with on=True
+    # and mounted_at_iteration stamped, and the inline tool_result content
+    # becomes a one-line stub. The agent sees the stubs in message history
+    # and the full bodies in the Context Shelf (filtered to the current
+    # burst by build_active_source_content / build_context_index).
     #
-    # Tiny results (control acks, "done", error strings) stay inline.
+    # Control tools (notepad, context, memory, show_selection,
+    # mark_step_done, done) return acks/sentinels consumed by the loop,
+    # never a body worth shelving — they pass through unchanged.
 
-    _SHELVE_MIN_CHARS = 500
-
-    def shelve_act_results(
+    def shelve_tool_result(
         self,
-        tool_use_ids: List[str],
-        internal_messages: List[Dict],
-        current_iteration: int,
-    ) -> int:
-        """Shelve every tool_result whose id is in tool_use_ids.
-
-        Returns the number of results shelved. Stubs replace the inline
-        content; the registered source is ON so think mode sees it
-        immediately on its next turn.
-        """
-        if not tool_use_ids:
-            return 0
-
-        id_set = set(tool_use_ids)
-        shelved = 0
-
-        # Walk newest → oldest so multiple bursts behave predictably.
-        for msg in reversed(internal_messages):
-            if msg.get("role") != "user":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") != "tool_result":
-                    continue
-                tu_id = block.get("tool_use_id")
-                if tu_id not in id_set:
-                    continue
-                result_text = block.get("content", "")
-                if not isinstance(result_text, str):
-                    continue
-                if len(result_text) < self._SHELVE_MIN_CHARS:
-                    continue
-                # Skip if already a stub (idempotent)
-                if result_text.startswith("[tool result shelved]"):
-                    continue
-
-                tool_name = self._lookup_tool_name(internal_messages, tu_id)
-                source_id = self._make_act_source_id(tool_name, tu_id)
-                title = self._make_act_source_title(tool_name, tu_id, internal_messages)
-
-                self._sources[source_id] = {
-                    "content": result_text,
-                    "on": True,
-                    "page_count": 1,
-                    "source": tool_name or "act_tool",
-                    "titles": [title] if title else [],
-                    "mounted_at_iteration": current_iteration,
-                }
-
-                stub = (
-                    f"[tool result shelved] source_id={source_id} "
-                    f"tool={tool_name or 'unknown'} size={len(result_text)} chars\n"
-                    f"Call turn_on_source if you need to re-read this."
-                )
-                block["content"] = stub
-                shelved += 1
-
-        if shelved:
-            logger.info(
-                f"[shelve_act_results] Shelved {shelved} act-mode tool result(s) "
-                f"into _sources at iteration {current_iteration}"
-            )
-        return shelved
-
-    @staticmethod
-    def _lookup_tool_name(internal_messages: List[Dict], tool_use_id: str) -> str:
-        """Find the tool_use block matching tool_use_id and return its name."""
-        for msg in internal_messages:
-            if msg.get("role") != "assistant":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "tool_use"
-                    and block.get("id") == tool_use_id
-                ):
-                    return block.get("name", "")
-        return ""
-
-    @staticmethod
-    def _make_act_source_id(tool_name: str, tool_use_id: str) -> str:
-        suffix = (tool_use_id or "").split("_")[-1][:8] or "x"
-        safe_name = (tool_name or "act_tool").replace("__", "_")
-        return f"act_{safe_name}_{suffix}"
-
-    @staticmethod
-    def _make_act_source_title(
-        tool_name: str, tool_use_id: str, internal_messages: List[Dict]
+        tool_name: str,
+        tool_input: Dict,
+        tool_use_id: str,
+        result_text: str,
+        iteration: int,
+        msg_idx: int,
     ) -> str:
-        """Build a short human-readable title from the tool's input args."""
-        for msg in internal_messages:
-            if msg.get("role") != "assistant":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "tool_use"
-                    and block.get("id") == tool_use_id
-                ):
-                    inp = block.get("input") or {}
-                    if isinstance(inp, dict):
-                        for key in ("query", "q", "name", "range", "thread_id", "id"):
-                            if key in inp and inp[key]:
-                                return f"{tool_name}({inp[key]!s:.60})"
-                        if inp:
-                            first_k, first_v = next(iter(inp.items()))
-                            return f"{tool_name}({first_k}={first_v!s:.40})"
-                    return tool_name or ""
-        return tool_name or ""
+        """Shelve a tool result; return the stub that replaces the inline body.
+
+        Caller is responsible for checking that tool_name is not a control
+        tool — this method shelves unconditionally.
+        """
+        if not hasattr(self, "_tool_counters"):
+            self._tool_counters: Dict[str, int] = {}
+        self._tool_counters[tool_name] = self._tool_counters.get(tool_name, 0) + 1
+        counter = self._tool_counters[tool_name]
+
+        name = self._make_shelf_name(tool_name, tool_input, counter)
+        # Ensure uniqueness (paranoia; counters already prevent collisions).
+        base = name
+        suffix = 2
+        while name in self._sources:
+            name = f"{base}_{suffix}"
+            suffix += 1
+
+        title = self._make_shelf_title(tool_name, tool_input)
+        header = f"# {tool_name}: {title}\n\n" if title else f"# {tool_name}\n\n"
+        body = header + (result_text if isinstance(result_text, str) else str(result_text))
+
+        self._sources[name] = {
+            "content": body,
+            "on": True,
+            "page_count": 1,
+            "source": tool_name,
+            "titles": [title] if title else [],
+            "mounted_at_iteration": iteration,
+            "shelved_from_msg": msg_idx,
+        }
+
+        size_chars = len(body)
+        return (
+            f"[{tool_name} shelved → {name} ({size_chars:,} chars). "
+            f"Toggle with context(action=\"off\", sources=[\"{name}\"]).]"
+        )
+
+    @staticmethod
+    def _make_shelf_name(tool_name: str, tool_input: Dict, counter: int) -> str:
+        """Deterministic, greppable shelf name. Prefer an input-derived suffix."""
+        safe = (tool_name or "tool").replace("__", "_")
+        if isinstance(tool_input, dict):
+            for key in ("database_name", "name", "query", "q", "thread_id",
+                        "page_id", "id", "range", "url"):
+                v = tool_input.get(key)
+                if v:
+                    suffix = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(v))[:30].strip("_")
+                    if suffix:
+                        return f"{safe}_{suffix}_{counter}"
+        return f"{safe}_{counter}"
+
+    @staticmethod
+    def _make_shelf_title(tool_name: str, tool_input: Dict) -> str:
+        """Short human-readable title from the tool's input args."""
+        if not isinstance(tool_input, dict):
+            return ""
+        for key in ("query", "q", "name", "database_name", "range",
+                    "thread_id", "url", "id", "page_id"):
+            v = tool_input.get(key)
+            if v:
+                return f"{tool_name}({str(v)[:60]})"
+        if tool_input:
+            first_k, first_v = next(iter(tool_input.items()))
+            return f"{tool_name}({first_k}={str(first_v)[:40]})"
+        return tool_name
+
+    def shelve_web_search_result(
+        self,
+        query: str,
+        rendered_text: str,
+        iteration: int,
+        tool_use_id: str,
+        msg_idx: int,
+    ) -> str:
+        """Shelve a server-side web_search result; return the shelf name.
+
+        The body lands in _sources; the caller is responsible for mutating
+        the web_search_tool_result block's .content to a short stub that
+        references this name.
+        """
+        if not hasattr(self, "_tool_counters"):
+            self._tool_counters = {}
+        self._tool_counters["web_search"] = self._tool_counters.get("web_search", 0) + 1
+        counter = self._tool_counters["web_search"]
+        safe_query = re.sub(r"[^a-zA-Z0-9_-]+", "_", query)[:30].strip("_") or "query"
+        name = f"web_search_{safe_query}_{counter}"
+        base = name
+        suffix = 2
+        while name in self._sources:
+            name = f"{base}_{suffix}"
+            suffix += 1
+
+        header = f"# Web search: {query}\n\n"
+        self._sources[name] = {
+            "content": header + rendered_text,
+            "on": True,
+            "page_count": 1,
+            "source": "web_search",
+            "titles": [query],
+            "mounted_at_iteration": iteration,
+            "shelved_from_msg": msg_idx,
+        }
+        return name
 
     # ── Workspace file tools ────────────────────────────────────────────
 
@@ -8080,6 +8252,162 @@ def _trim_tool_results(messages: List[Dict], max_result_chars: int = 50_000) -> 
 # and fired on casual conversation.
 
 
+def _sanitize_orphans_in_place(messages: list) -> None:
+    """Strip any tool_result blocks whose tool_use_id has no matching tool_use
+    in a preceding assistant message. Mutates the messages list in place.
+
+    This should be a no-op under the trimmer's pair-drop rule; it exists as a
+    last-line-of-defense so a future regression degrades to a missing-data
+    warning rather than an Anthropic 400.
+    """
+    if not isinstance(messages, list):
+        return
+    seen_ids: set = set()
+    total_dropped = 0
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if msg.get("role") == "assistant" and isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    bid = b.get("id")
+                    if bid:
+                        seen_ids.add(bid)
+            continue
+        if msg.get("role") == "user" and isinstance(content, list):
+            new_content = []
+            for b in content:
+                if (
+                    isinstance(b, dict)
+                    and b.get("type") == "tool_result"
+                    and b.get("tool_use_id") not in seen_ids
+                ):
+                    total_dropped += 1
+                    continue
+                new_content.append(b)
+            # Mutate in place.
+            msg["content"] = new_content
+    if total_dropped:
+        logger.warning(
+            f"[agentic] _sanitize_orphans_in_place dropped {total_dropped} "
+            f"orphan tool_result block(s) pre-API-call"
+        )
+
+
+def _render_web_search_results(result_list: list) -> str:
+    """Flatten a list of web_search_tool_result entries into readable text."""
+    parts: List[str] = []
+    for i, entry in enumerate(result_list, 1):
+        if not isinstance(entry, dict):
+            parts.append(str(entry))
+            continue
+        title = str(entry.get("title") or "").strip()
+        url = str(entry.get("url") or "").strip()
+        page_age = str(entry.get("page_age") or "").strip()
+        text = str(entry.get("text") or entry.get("content") or "").strip()
+
+        header = f"## [{i}] {title}".rstrip()
+        meta = " | ".join(x for x in (url, page_age) if x)
+        block_lines = [header]
+        if meta:
+            block_lines.append(meta)
+        if text:
+            block_lines.append("")
+            block_lines.append(text)
+        parts.append("\n".join(block_lines))
+    return "\n\n".join(parts)
+
+
+def _shelve_web_search_in_assistant(
+    serialized_content,
+    tool_executor,
+    iteration: int,
+    msg_idx: int,
+) -> None:
+    """Replace each (server_tool_use, web_search_tool_result) pair with a
+    single text block summarising the shelved result. Mutates the list in
+    place.
+
+    Why not mutate `.content` to a stub string in place?  Anthropic's API
+    validates `web_search_tool_result.content` as `list[WebSearchResultBlock]`
+    on every subsequent turn — a string there triggers a 400.  Collapsing the
+    pair to a text block sidesteps the schema entirely.
+
+    Caller should only invoke during an act burst.
+    """
+    if not isinstance(serialized_content, list) or tool_executor is None:
+        return
+
+    # First pass: shelve each web_search_tool_result and collect the
+    # text-summary replacements keyed by tool_use_id.
+    tool_use_by_id: Dict[str, Dict] = {}
+    for block in serialized_content:
+        if isinstance(block, dict) and block.get("type") == "server_tool_use":
+            bid = block.get("id")
+            if bid:
+                tool_use_by_id[bid] = block
+
+    summaries_by_id: Dict[str, str] = {}
+    shelveable_ids: set = set()
+
+    for block in serialized_content:
+        if not isinstance(block, dict) or block.get("type") != "web_search_tool_result":
+            continue
+
+        content = block.get("content")
+        if isinstance(content, dict) and content.get("type") == "web_search_tool_result_error":
+            continue
+        if not isinstance(content, list) or not content:
+            continue
+
+        tool_use_id = block.get("tool_use_id", "")
+        matched = tool_use_by_id.get(tool_use_id) or {}
+        inp = matched.get("input") if isinstance(matched, dict) else {}
+        query = str(inp.get("query", "")) if isinstance(inp, dict) else ""
+
+        rendered = _render_web_search_results(content)
+        try:
+            name = tool_executor.shelve_web_search_result(
+                query=query or "(unknown query)",
+                rendered_text=rendered,
+                iteration=iteration,
+                tool_use_id=tool_use_id,
+                msg_idx=msg_idx,
+            )
+        except Exception as e:
+            logger.warning(f"[act shelve web_search] failed: {e}")
+            continue
+
+        summaries_by_id[tool_use_id] = (
+            f"[web_search shelved → {name} ({len(rendered):,} chars for query "
+            f"{query!r}). Toggle with context(action=\"on\", sources=[\"{name}\"]).]"
+        )
+        shelveable_ids.add(tool_use_id)
+
+    if not shelveable_ids:
+        return
+
+    # Second pass: rebuild the content list. The text summary takes the slot
+    # where the server_tool_use used to sit so relative ordering is preserved.
+    new_content: List = []
+    for block in serialized_content:
+        if not isinstance(block, dict):
+            new_content.append(block)
+            continue
+
+        btype = block.get("type")
+        if btype == "server_tool_use" and block.get("id") in shelveable_ids:
+            new_content.append({
+                "type": "text",
+                "text": summaries_by_id[block["id"]],
+            })
+            continue
+        if btype == "web_search_tool_result" and block.get("tool_use_id") in shelveable_ids:
+            continue
+        new_content.append(block)
+
+    serialized_content[:] = new_content
+
+
 def _serialize_content_blocks(content):
     """Convert Anthropic SDK content blocks to serializable dicts."""
     if isinstance(content, str):
@@ -8126,6 +8454,7 @@ async def agentic_turn(
     context_data_block: str = "",
     suite_registry: Optional[Dict] = None,
     mcp_suites: Optional[Dict] = None,
+    model: str = "claude-sonnet-4-6",
 ) -> AgenticTurnResult:
     """
     Run a self-contained agentic turn with tool use.
@@ -8189,7 +8518,9 @@ async def agentic_turn(
     act_suites: List[str] = []
     act_instructions: List[str] = []
     act_step_status: List[str] = []  # "pending" | "done"
-    act_tool_use_ids: List[str] = []  # tool_use ids produced in the current act burst (shelved on __DONE__)
+    act_tool_use_ids: List[str] = []  # tool_use ids produced in the current act burst (retained for future diagnostics)
+    act_start_iteration: Optional[int] = None  # iteration at which act mode began
+    act_start_msg_idx: Optional[int] = None    # index into internal_messages at act entry; done() squashes from here
     use_think_act = suite_registry is not None  # Feature flag: only use Think/Act if registry provided
     _retried_for_empty_text = False  # One-shot: nudge model to produce text if end_turn had none
 
@@ -8247,14 +8578,26 @@ async def agentic_turn(
                 budget_note += "\n".join(instr_lines)
 
             # Act mode tools: loaded suites + notepad + memory + mark_step_done + done
+            # Dedupe by tool name: suites can overlap (e.g. "google" aggregates
+            # gmail/calendar/sheets/drive, so act(suites=["google","sheets"]) would
+            # otherwise send sheets tools twice and fail with "tools: Tool names
+            # must be unique").
             iteration_tools = []
+            seen_tool_names: set[str] = set()
+            def _add_tool(td: Dict) -> None:
+                name = td.get("name")
+                if name and name not in seen_tool_names:
+                    seen_tool_names.add(name)
+                    iteration_tools.append(td)
             for suite_name in act_suites:
-                iteration_tools.extend(_get_suite_tools(suite_name, suite_registry, mcp_suites))
-            iteration_tools.append(NOTEPAD_TOOL_DEFINITION)
-            iteration_tools.append(MEMORY_TOOL_DEFINITION)
+                for td in _get_suite_tools(suite_name, suite_registry, mcp_suites):
+                    _add_tool(td)
+            _add_tool(NOTEPAD_TOOL_DEFINITION)
+            _add_tool(MEMORY_TOOL_DEFINITION)
+            _add_tool(CONTEXT_TOOL_DEFINITION)
             if act_instructions:
-                iteration_tools.append(MARK_STEP_DONE_TOOL_DEFINITION)
-            iteration_tools.append(DONE_TOOL_DEFINITION)
+                _add_tool(MARK_STEP_DONE_TOOL_DEFINITION)
+            _add_tool(DONE_TOOL_DEFINITION)
 
         else:
             # Legacy mode (no suite registry): all tools, all context
@@ -8305,14 +8648,21 @@ async def agentic_turn(
                 logger.debug(f"Failed to log agentic prompt: {log_err}")
 
         # Build API call kwargs
+        from promaia.ai.models import resolve_anthropic_model_id
         api_kwargs = dict(
-            model=f"{prefix}claude-sonnet-4-6",
+            model=f"{prefix}{resolve_anthropic_model_id(model)}",
             system=trimmed_system,
             messages=internal_messages,
             max_tokens=4096,
         )
         if iteration_tools:
             api_kwargs["tools"] = iteration_tools
+
+        # Defensive guard: a tool_result in message history with no preceding
+        # tool_use is a 400 ("unexpected tool_use_id") from Anthropic. The
+        # trimmer's pair-drop rule should make this impossible, but verify
+        # anyway so a future regression degrades gracefully rather than 400s.
+        _sanitize_orphans_in_place(api_kwargs["messages"])
 
         try:
             response = await _call_with_retry(client, api_kwargs, on_tool_activity)
@@ -8473,6 +8823,18 @@ async def agentic_turn(
                     except Exception:
                         pass
 
+        # Serialize the assistant response once. During act mode, shelf any
+        # web_search_tool_result blocks before the message lands in history,
+        # so future iterations see stubs instead of full search bodies.
+        serialized_assistant = _serialize_content_blocks(response.content)
+        if act_mode and tool_executor is not None:
+            _shelve_web_search_in_assistant(
+                serialized_assistant,
+                tool_executor,
+                iteration=iteration,
+                msg_idx=len(internal_messages),
+            )
+
         # If no tool calls, we're done — return the final text
         if response.stop_reason == "end_turn" or not tool_uses:
             # If the model ended the turn with zero text but DID execute tools,
@@ -8481,7 +8843,7 @@ async def agentic_turn(
                 _retried_for_empty_text = True
                 internal_messages.append({
                     "role": "assistant",
-                    "content": _serialize_content_blocks(response.content),
+                    "content": serialized_assistant,
                 })
                 internal_messages.append({
                     "role": "user",
@@ -8519,10 +8881,11 @@ async def agentic_turn(
         # ── Tool execution ────────────────────────────────────────────
         internal_messages.append({
             "role": "assistant",
-            "content": _serialize_content_blocks(response.content),
+            "content": serialized_assistant,
         })
 
         tool_results = []
+        squashed_this_iter = False   # set True by the __DONE__ handler
         for tool_use in tool_uses:
             # Notify UX: tool starting
             if on_tool_activity:
@@ -8546,6 +8909,32 @@ async def agentic_turn(
             else:
                 # Execute tool
                 result_text = await tool_executor.execute(tool_use.name, tool_use.input)
+
+            # During act mode, uniformly shelve every non-control tool result.
+            # Control tools return acks or sentinels and pass through.
+            # Self-shelving tools (_web_fetch, query_sql/_vector/_source,
+            # sheets_read_range) already mounted their body to _sources and
+            # returned a stub — shelving the stub a second time is wasteful.
+            if (
+                act_mode
+                and tool_use.name not in _CONTROL_TOOL_NAMES
+                and tool_use.name not in _SELF_SHELVING_TOOL_NAMES
+                and isinstance(result_text, str)
+                and not result_text.startswith("__")  # don't shelf other internal sentinels
+            ):
+                try:
+                    result_text = tool_executor.shelve_tool_result(
+                        tool_name=tool_use.name,
+                        tool_input=tool_use.input if isinstance(tool_use.input, dict) else {},
+                        tool_use_id=tool_use.id,
+                        result_text=result_text,
+                        iteration=iteration,
+                        msg_idx=len(internal_messages),
+                    )
+                except Exception as shelve_err:
+                    logger.warning(
+                        f"[act shelve] failed for {tool_use.name}: {shelve_err}"
+                    )
 
             # Log tool call and result for debugging
             logger.info(
@@ -8575,9 +8964,20 @@ async def agentic_turn(
                 act_mode = True
                 act_suites = suite_names
                 act_tool_use_ids = []  # fresh burst
-                # Mute context (preserves individual on/off states for restore)
+                act_start_iteration = iteration
+                # Point at the assistant message that contains this act()
+                # tool_use. Squashing from this index on done() removes the
+                # entering-act assistant + every subsequent burst message,
+                # so no act() tool_use is left orphaned without its paired
+                # tool_result.
+                act_start_msg_idx = len(internal_messages) - 1
+                # Mute pre-burst context (preserves individual on/off states).
+                # Shelves created from this iteration onward stay visible to
+                # the act agent via the _act_start_iteration filter.
                 if tool_executor:
                     tool_executor._sources_muted = True
+                    tool_executor._act_start_iteration = iteration
+                    tool_executor._tool_counters = {}  # fresh burst namespace
                 instr_count = f" {len(act_instructions)} steps." if act_instructions else ""
                 result_text = f"Act mode. Suites loaded: {', '.join(suite_names)}.{instr_count} Context muted. Follow your instructions."
                 logger.info(f"[think/act] Entered Act mode with suites: {suite_names}, instructions: {len(act_instructions)} steps")
@@ -8611,31 +9011,136 @@ async def agentic_turn(
                             pass
                 else:
                     result_text = f"Invalid step number: {step_num}"
-            elif result_text == "__DONE__":
-                # Shelve all act-burst tool results into _sources before
-                # returning to Think mode. This frees ~all of the bloat
-                # while keeping the data lossly recoverable via turn_on_source.
-                if tool_executor and act_tool_use_ids:
+            elif result_text.startswith("__DONE__"):
+                # Parse the report + keep_shelves payload.
+                import json as _json_done
+                report = "(no report)"
+                keep_spec = None
+                payload_str = result_text[len("__DONE__"):]
+                if payload_str.startswith(":"):
                     try:
-                        tool_executor.shelve_act_results(
-                            act_tool_use_ids,
-                            internal_messages,
-                            current_iteration=iteration,
-                        )
-                    except Exception as shelve_err:
+                        payload = _json_done.loads(payload_str[1:])
+                        report = payload.get("report") or "(no report)"
+                        keep_spec = payload.get("keep_shelves")
+                    except Exception as parse_err:
                         logger.warning(
-                            f"[think/act] shelve_act_results failed: {shelve_err}"
+                            f"[think/act] done payload parse failed: {parse_err}; "
+                            "using defaults (discard all burst shelves)"
                         )
+
+                # Burst-scoped shelves are everything mounted at or after entry.
+                burst_start = act_start_iteration if act_start_iteration is not None else iteration
+                if tool_executor is not None:
+                    act_burst_sources = [
+                        (n, s) for n, s in list(tool_executor._sources.items())
+                        if s.get("mounted_at_iteration", -1) >= burst_start
+                    ]
+                else:
+                    act_burst_sources = []
+
+                # Apply keep_spec. None (or missing) → delete all; otherwise
+                # keep only listed shelves with their requested on/off state.
+                keep_map: Dict[str, bool] = {}
+                if isinstance(keep_spec, list):
+                    for item in keep_spec:
+                        if isinstance(item, dict) and item.get("name"):
+                            keep_map[str(item["name"])] = bool(item.get("on", False))
+                kept: List[tuple] = []
+                deleted_names: List[str] = []
+                if tool_executor is not None:
+                    for name, src in act_burst_sources:
+                        if name in keep_map:
+                            src["on"] = keep_map[name]
+                            kept.append((name, src, keep_map[name]))
+                        else:
+                            tool_executor._sources.pop(name, None)
+                            deleted_names.append(name)
+                logger.info(
+                    f"[act done] kept={len(kept)} deleted={len(deleted_names)}: "
+                    f"{deleted_names[:10]}{'...' if len(deleted_names) > 10 else ''}"
+                )
+
+                # Squash burst history into a single synthetic assistant message.
+                synth_lines = [
+                    f"[Act burst (iter {burst_start}..{iteration}): "
+                    f"suites={act_suites}]",
+                    "",
+                    report,
+                ]
+                if kept:
+                    synth_lines += ["", "Returned shelves:"]
+                    for name, src, is_on in kept:
+                        size_k = len(src.get("content", "")) // 1000
+                        state = "ON" if is_on else "OFF"
+                        synth_lines.append(
+                            f"- {name} [{state}] "
+                            f"({src.get('source', '?')}, {size_k}k chars)"
+                        )
+                synth_lines += [
+                    "",
+                    "(Burst history hidden. Reopen shelves with "
+                    "context(action=\"on\", sources=[...]).)",
+                ]
+                synth_text = "\n".join(synth_lines)
+
+                # Replace the burst's messages with the single synthetic one.
+                # Important: the current assistant message (containing the
+                # done() tool_use block) plus its pending tool_result for this
+                # same tool_use_id haven't been written to internal_messages
+                # yet — they'd live beyond act_start_msg_idx once written.
+                # We drop everything from the burst start and then append the
+                # synthetic message, so the next API call sees messages[0]
+                # (original user), followed by the synthetic assistant.
+                squash_from = (
+                    act_start_msg_idx
+                    if act_start_msg_idx is not None
+                    else len(internal_messages)
+                )
+                # Drop the assistant message that was just appended for THIS
+                # iteration (containing the done() tool_use). It would
+                # otherwise be orphaned (no matching tool_result will be
+                # appended because we skip tool_results and add the synth).
+                del internal_messages[squash_from:]
+                internal_messages.append({
+                    "role": "assistant",
+                    "content": synth_text,
+                })
+                # The conversation must end with a user message — many models
+                # (Opus 4.6 included) reject a trailing assistant message as
+                # an unsupported "prefill" request.  Append a brief user-role
+                # nudge so the next iteration's API call is well-formed and
+                # the Think-mode agent picks up from the report cleanly.
+                internal_messages.append({
+                    "role": "user",
+                    "content": (
+                        "Act burst complete. Continue handling the user's "
+                        "request based on your report above. Reopen any kept "
+                        "shelves with context(action=\"on\", sources=[...]) "
+                        "if you need detail."
+                    ),
+                })
+
+                # Reset act state and restore full context visibility.
                 act_mode = False
                 act_suites = []
                 act_instructions = []
                 act_step_status = []
                 act_tool_use_ids = []
-                if tool_executor:
+                act_start_iteration = None
+                act_start_msg_idx = None
+                if tool_executor is not None:
                     tool_executor._sources_muted = False
-                result_text = "Back to Think mode. Context restored."
-                logger.info("[think/act] Returned to Think mode")
-                # Fire plan done callback
+                    tool_executor._act_start_iteration = None
+                    tool_executor._tool_counters = {}
+
+                # Skip the rest of this iteration's tool_results bookkeeping:
+                # we've already replaced internal_messages, so the subsequent
+                # unconditional user-message append would produce orphan
+                # tool_results.  The flag suppresses it below.
+                squashed_this_iter = True
+                tool_results = []   # discard pre-done accumulated tool_results
+                result_text = None
+                logger.info("[think/act] Returned to Think mode via done(report)")
                 if on_tool_activity:
                     try:
                         await on_tool_activity(
@@ -8645,6 +9150,9 @@ async def agentic_turn(
                         )
                     except Exception:
                         pass
+                # Break out of the tool_uses loop — bad to keep processing
+                # other calls in the same assistant message after a done().
+                break
 
             # Handle interview sentinels — break out of loop and return with signal
             elif result_text.startswith("__INTERVIEW_START__:"):
@@ -8760,7 +9268,12 @@ async def agentic_turn(
                     except Exception:
                         pass
 
-        internal_messages.append({"role": "user", "content": tool_results})
+        # If done() squashed this iteration's history, skip the user-message
+        # append — the synthetic assistant message already replaced everything
+        # from act_start_msg_idx onward, and an empty/orphan tool_result list
+        # here would corrupt the pairing.
+        if not squashed_this_iter and tool_results:
+            internal_messages.append({"role": "user", "content": tool_results})
 
     # Exhausted iteration budget — return whatever text we have
     last_text = "\n".join(text_parts) if text_parts else ""
@@ -8832,114 +9345,170 @@ async def agentic_turn(
     )
 
 
+_COUNT_VERBS = ("Found", "Loaded", "Retrieved", "Wrote", "Created", "Updated", "Sent", "Queued")
+
+
+def _is_error(result: str) -> bool:
+    """Detect whether a tool result indicates failure."""
+    if not result:
+        return False
+    head = result.lstrip()[:200]
+    lowered = head.lower()
+    if head.startswith("❌") or head.startswith("Error") or "error:" in lowered[:40]:
+        return True
+    return any(needle in lowered for needle in (
+        "query failed",
+        "permission denied",
+        "(error)",
+    ))
+
+
+def _error_snippet(result: str, max_len: int = 80) -> str:
+    """Return a short, clean error snippet from a failed tool result."""
+    if not result:
+        return "error"
+    line = result.splitlines()[0].lstrip()
+    # Drop leading noise prefixes so the cause lands front-and-center. We
+    # iterate because real-world results stack them (e.g. "❌ Query failed:
+    # X") and the user only wants "X".
+    changed = True
+    prefixes = ("❌ ", "❌", "Error: ", "Error:", "Query failed: ", "Query failed:")
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if line.startswith(prefix):
+                line = line[len(prefix):]
+                changed = True
+                break
+    line = line.strip()
+    if len(line) > max_len:
+        line = line[: max_len - 1].rstrip() + "…"
+    return line or "error"
+
+
+def _extract_count_phrase(result: str, verbs: tuple = _COUNT_VERBS) -> str:
+    """Find the first line in `result` that reads like "Found 12 ..." and
+    return it lowercased. Skips the leading "✅ Vector Search: ..." headers
+    that just echo the call.
+    """
+    if not result:
+        return ""
+    for line in result.splitlines()[:6]:
+        stripped = line.strip().lstrip("✅").strip()
+        if not stripped:
+            continue
+        first = stripped.split(maxsplit=1)[0]
+        if first in verbs:
+            # Cap length so the summary stays one-liner friendly.
+            return stripped[:120].lower()
+    return ""
+
+
 def _summarize_tool_result(
     tool_name: str, tool_input: Dict, result: str
 ) -> str:
-    """Create a short human-readable summary of a tool call."""
+    """Create a short human-readable summary of a tool call.
+
+    Format convention: "<verb phrase> → <outcome>" on success, "<verb phrase>
+    ✗ <brief error>" on failure. Query echoes are kept out of the summary
+    because the caller's UI already displays the tool input above the result.
+    """
+    errored = _is_error(result)
+    err = _error_snippet(result) if errored else ""
+
+    def _vs(verb: str, outcome: str) -> str:
+        if errored:
+            return f"{verb} ✗ {err}"
+        return f"{verb} → {outcome}" if outcome else f"{verb} ✓"
+
     if tool_name == "query_sql":
-        query = tool_input.get("query", "")
-        if "Found" in result:
-            count_part = result.split("\n")[0]
-            return f'Searched "{query}" ({count_part.lower()})'
-        if "no results" in result.lower():
-            return f'Searched "{query}" (no results)'
-        return f'Searched "{query}"'
+        phrase = _extract_count_phrase(result)
+        outcome = phrase or ("no results" if "no results" in result.lower() else "ok")
+        return _vs("SQL search", outcome)
 
     elif tool_name == "query_vector":
-        query = tool_input.get("query", "")
-        if "Found" in result:
-            count_part = result.split("\n")[0]
-            return f'Semantic search "{query}" ({count_part.lower()})'
-        if "no results" in result.lower():
-            return f'Semantic search "{query}" (no results)'
-        return f'Semantic search "{query}"'
+        phrase = _extract_count_phrase(result)
+        outcome = phrase or ("no results" if "no results" in result.lower() else "ok")
+        return _vs("Semantic search", outcome)
 
     elif tool_name == "query_source":
-        db = tool_input.get("database", "")
+        db = tool_input.get("database", "?")
         days = tool_input.get("days", "all")
-        if "Loaded" in result:
-            count_part = result.split("\n")[0]
-            return f"Loaded {db}:{days} ({count_part.lower()})"
-        return f"Loaded {db}:{days}"
+        phrase = _extract_count_phrase(result)
+        return _vs(f"Load {db}:{days}", phrase or "ok")
 
     elif tool_name == "write_agent_journal":
-        return "Wrote agent journal entry"
+        return _vs("Agent journal", "noted")
 
     elif tool_name == "send_email":
         to = tool_input.get("to", "")
         subj = tool_input.get("subject", "")
-        return f'Sent email to {to}: "{subj}"'
+        return _vs("Send email", f'to {to}: "{subj}"')
 
     elif tool_name == "create_email_draft":
         subj = tool_input.get("subject", "")
-        return f'Created draft: "{subj}"'
+        return _vs("Email draft", f'"{subj}"')
 
     elif tool_name == "reply_to_email":
-        return f"Replied to thread {tool_input.get('thread_id', '')[:12]}"
+        tid = tool_input.get("thread_id", "")[:12]
+        return _vs("Email reply", f"thread {tid}" if tid else "sent")
 
     elif tool_name == "draft_reply_to_email":
-        return f"Draft reply created in thread {tool_input.get('thread_id', '')[:12]}"
+        tid = tool_input.get("thread_id", "")[:12]
+        return _vs("Email draft reply", f"thread {tid}" if tid else "drafted")
 
     elif tool_name == "schedule_self":
-        return f"Self-scheduled: {tool_input.get('summary', '')} at {tool_input.get('start_time', '')}"
+        return _vs(
+            "Self-schedule",
+            f"{tool_input.get('summary', '')} @ {tool_input.get('start_time', '')}",
+        )
 
     elif tool_name == "schedule_agent_event":
-        agent = tool_input.get('agent', '')
+        agent = tool_input.get("agent", "")
         agent_label = f" ({agent})" if agent else ""
-        return f"Agent-scheduled{agent_label}: {tool_input.get('summary', '')} at {tool_input.get('start_time', '')}"
+        return _vs(
+            f"Agent-schedule{agent_label}",
+            f"{tool_input.get('summary', '')} @ {tool_input.get('start_time', '')}",
+        )
 
     elif tool_name == "create_calendar_event":
-        return f"Created event: {tool_input.get('summary', '')}"
+        return _vs("Create event", tool_input.get("summary", ""))
 
     elif tool_name == "update_calendar_event":
-        return f"Updated event {tool_input.get('event_id', '')[:12]}"
+        return _vs("Update event", tool_input.get("event_id", "")[:12])
 
     elif tool_name == "delete_calendar_event":
-        return f"Deleted event {tool_input.get('event_id', '')[:12]}"
-
-    elif tool_name == "send_message":
-        target = tool_input.get("channel_id", "")
-        return f"Sent message to {target}"
+        return _vs("Delete event", tool_input.get("event_id", "")[:12])
 
     elif tool_name == "notion_search":
-        if "Error:" in result:
-            return f"Error searching Notion for '{tool_input.get('query', '')}'"
-        return f"Searched Notion for '{tool_input.get('query', '')}'"
+        phrase = _extract_count_phrase(result)
+        outcome = phrase or ("no results" if "no results" in result.lower() else "ok")
+        return _vs("Notion search", outcome)
 
     elif tool_name == "notion_create_page":
-        if "Error:" in result:
-            return f"Error creating Notion page (error)"
-        return f"Created Notion page: {tool_input.get('title', '')}"
+        return _vs("Create Notion page", tool_input.get("title", ""))
 
     elif tool_name == "notion_update_page":
-        if "Error:" in result:
-            return f"Error updating Notion page {tool_input.get('page_id', '')[:12]} (error)"
-        return f"Updated Notion page {tool_input.get('page_id', '')[:12]}"
+        return _vs("Update Notion page", tool_input.get("page_id", "")[:12])
 
     elif tool_name == "notion_query_database":
-        if "Error:" in result:
-            return f"Notion database {tool_input.get('database_id', '')[:12]} (error)"
-        return f"Queried Notion database {tool_input.get('database_id', '')[:12]}"
+        phrase = _extract_count_phrase(result)
+        outcome = phrase or f"db {tool_input.get('database_id', '')[:12]}"
+        return _vs("Notion DB query", outcome)
 
     elif tool_name == "web_search":
-        query = tool_input.get("query", "")
-        if "Error:" in result:
-            return f'Web search "{query}" (error)'
-        return f'Web search "{query}"'
+        phrase = _extract_count_phrase(result)
+        return _vs("Web search", phrase or "ok")
 
     elif tool_name == "web_fetch":
         url = tool_input.get("url", "")
-        display_url = url[:60] + "..." if len(url) > 60 else url
-        if "Error:" in result:
-            return f"Fetch {display_url} (error)"
-        char_count = len(result)
-        return f"Fetched {display_url} ({char_count:,} chars)"
+        display_url = url[:60] + "…" if len(url) > 60 else url
+        if errored:
+            return f"Web fetch {display_url} ✗ {err}"
+        return f"Web fetch {display_url} → {len(result):,} chars"
 
     elif tool_name == "task_queue_add":
-        task = tool_input.get("task", "")
-        return f'Queued task: "{task}"'
+        return _vs("Queue task", tool_input.get("task", ""))
 
     else:
-        if result.startswith("Error") or result.startswith("Error:"):
-            return f"{tool_name} (error)"
-        return f"{tool_name} completed"
+        return _vs(tool_name, "")

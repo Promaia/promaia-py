@@ -74,17 +74,21 @@ class SlackPlatform(BaseMessagingPlatform):
         channel_id: str,
         content: str,
         thread_id: Optional[str] = None,
-        blocks: Optional[List[Dict]] = None
+        blocks: Optional[List[Dict]] = None,
+        transient: bool = False,
     ) -> MessageMetadata:
         """
         Send message to Slack channel.
-        
+
         Args:
             channel_id: Slack channel ID (C...)
             content: Message text
             thread_id: Optional thread timestamp for threaded replies
             blocks: Optional Slack block kit blocks
-        
+            transient: If True, skip the KB save-at-send-time write. Used for
+                thinking/animation posts that get edited and/or deleted before
+                the turn completes — they shouldn't show up in thread history.
+
         Returns:
             MessageMetadata with message info
         """
@@ -95,11 +99,17 @@ class SlackPlatform(BaseMessagingPlatform):
                 thread_ts=thread_id,
                 blocks=blocks
             )
-            
+
             # Extract message metadata
             message = response['message']
             ts = response['ts']
-            
+
+            # Save-at-send-time: persist the bot's outbound message to the KB
+            # so the next response turn's thread-context read sees it without
+            # waiting on the periodic channel sync.
+            if not transient:
+                await self._save_outbound_to_kb(message, channel_id, ts, thread_id)
+
             return MessageMetadata(
                 message_id=ts,
                 channel_id=channel_id,
@@ -117,6 +127,52 @@ class SlackPlatform(BaseMessagingPlatform):
             self.logger.error(f"Error sending Slack message: {e}", exc_info=True)
             raise
     
+    async def _save_outbound_to_kb(
+        self,
+        message: Dict[str, Any],
+        channel_id: str,
+        ts: str,
+        thread_id: Optional[str],
+    ) -> None:
+        """Persist the bot's outbound Slack message to the KB synchronously.
+
+        Skips empty content (animation edits don't need their own KB entry —
+        only the final post matters for thread history). Silently swallows
+        failures; the periodic sync remains as backup.
+        """
+        text = message.get('text') or ''
+        if not text.strip():
+            return
+        try:
+            from promaia.connectors.slack_connector import SlackConnector
+            from promaia.storage.unified_storage import get_unified_storage
+            from promaia.config.databases import get_database_config
+
+            db_config = get_database_config("slack", workspace=None)
+            if not db_config:
+                return
+            storage = get_unified_storage()
+            connector = SlackConnector({
+                "database_id": db_config.database_id,
+                "bot_token": self.bot_token,
+            })
+            enriched = {
+                'ts': ts,
+                'user': message.get('user', ''),
+                'text': text,
+                'thread_ts': thread_id,
+                'bot_id': message.get('bot_id'),
+            }
+            await connector.save_one_message(
+                message=enriched,
+                channel_id=channel_id,
+                storage=storage,
+                db_config=db_config,
+                username=message.get('username') or 'promaia',
+            )
+        except Exception as e:
+            self.logger.debug(f"save outbound to KB failed (non-fatal): {e}")
+
     async def find_user_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Find a Slack user by display name, real name, or username.
 

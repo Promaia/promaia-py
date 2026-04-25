@@ -81,9 +81,33 @@ def _load_agent_calendars(workspace: str) -> Dict[str, str]:
         if not creds:
             return {}
 
-        # Find or create "maia" agent
+        # Find or create "maia" agent. Auto-creating only happens if there's
+        # no maia at all. If maia is missing because the config-wipe bug
+        # nuked her (see memory/project_config_wipe_bug.md), we'd rather
+        # FAIL LOUDLY than silently resurrect a bare-bones agent with
+        # databases=[] and a hardcoded mcp_tools list — that pattern was
+        # the smoking gun for today's nested-field wipe.
         maia_agent = next((a for a in agents if a.name == "maia"), None)
         if not maia_agent:
+            # Check whether agents.json has a maia we just failed to load —
+            # if so, refuse to overwrite, force human investigation.
+            try:
+                from promaia.config.atomic_io import read_section
+                section = read_section("agents") or {}
+                if isinstance(section, dict):
+                    on_disk = section.get("agents", [])
+                else:
+                    on_disk = section if isinstance(section, list) else []
+                if any(a.get("name") == "maia" for a in on_disk):
+                    logger.error(
+                        "Refusing to auto-create maia: agents.json HAS a maia "
+                        "but load_agents() did not return her. This is the "
+                        "config-wipe failure mode. NOT overwriting. See "
+                        "memory/project_config_wipe_bug.md."
+                    )
+                    return {}
+            except Exception:
+                logger.warning("agents.json check before auto-create failed", exc_info=True)
             maia_agent = AgentConfig(
                 name="maia",
                 agent_id="maia",
@@ -137,6 +161,7 @@ def detect_available_tools(workspace: str) -> List[str]:
                 tools.append("gmail")
                 tools.append("calendar")
                 tools.append("google_sheets")
+                tools.append("google_drive")
     except Exception:
         pass
 
@@ -160,6 +185,29 @@ def detect_available_tools(workspace: str) -> List[str]:
         pass
 
     return tools
+
+
+def resolve_effective_mcp_tools(agent, workspace: str) -> List[str]:
+    """Return the mcp_tools list the agent should actually run with.
+
+    Default agent (`is_default_agent=True`, i.e. maia): union of its stored
+    mcp_tools with everything `detect_available_tools()` can probe from the
+    current environment. This is the "default agent gets everything" rule
+    and it's applied identically in terminal, Slack, and scheduled paths.
+
+    Non-default agents: their stored mcp_tools verbatim. What the operator
+    configured via `maia agent add/edit` is the source of truth, and it does
+    not drift between environments.
+    """
+    stored = list(getattr(agent, "mcp_tools", None) or [])
+    if not getattr(agent, "is_default_agent", False):
+        return stored
+    detected = detect_available_tools(workspace)
+    merged = list(stored)
+    for t in detected:
+        if t not in merged:
+            merged.append(t)
+    return merged
 
 
 # ── Prompt enhancement ────────────────────────────────────────────────────
@@ -216,12 +264,13 @@ def build_agentic_system_prompt(
     if has_platform:
         tool_sections_parts.append(
             "## Messaging Tools\n\n"
-            "- **send_message**: Send a one-way message (no reply expected).\n"
-            "  Use 'user' to DM someone by name, or 'channel_id' for a channel.\n"
-            "- **start_conversation**: Start a back-and-forth DM conversation.\n"
-            "  Sends your message and waits for the user's reply (up to 15 min).\n"
-            "  Returns the user's response. Use this when you need a reply.\n"
-            "  You can call it multiple times to continue the conversation."
+            "- **start_conversation**: DM a user. This is the only tool for "
+            "messaging a user directly — use it for questions, confirmations, "
+            "and notifications alike. It sends the opening message and hands "
+            "off to the Slack reply handler, which continues the conversation "
+            "when the user replies. The tool returns immediately; do not wait "
+            "for a reply inside your turn. Call it once per user you want to "
+            "reach, then wrap up."
         )
     if "gmail" in mcp_tools:
         tool_sections_parts.append(
@@ -237,7 +286,14 @@ def build_agentic_system_prompt(
             "- **create_calendar_event**: Create event on the **user's** calendar (summary, start_time, end_time)\n"
             "- **update_calendar_event**: Update event (event_id + fields to change)\n"
             "- **delete_calendar_event**: Delete event (event_id)\n"
-            "  Always check for conflicts with query_sql before creating events."
+            "  All three accept an optional `calendar_id` (defaults to primary).\n"
+            "  Check for conflicts with **list_calendar_events** before creating events.\n\n"
+            "## Calendar Tools (Read)\n\n"
+            "- **list_calendar_events**: List events on the **user's** primary calendar "
+            "(or any calendar via optional `calendar_id`).\n"
+            "- **get_calendar_event**: Get one event by `event_id` "
+            "(optional `calendar_id`, defaults to primary).\n"
+            "- **list_calendars**: Discover calendar IDs (primary, subscribed, agent calendars)."
         )
         if agent_calendar_id:
             cal_section += (
@@ -246,36 +302,53 @@ def build_agentic_system_prompt(
                 "on your own dedicated calendar that will trigger you to run at the specified time.\n"
                 "  - Use for: reminders, follow-ups, multi-step workflows spanning hours/days\n"
                 "  - Params: summary (required), start_time (required), end_time (optional), "
-                "description (optional — include context for your future self)\n\n"
+                "description (optional — include context for your future self)\n"
+                "- **list_self_calendar_events**: List events on **your own** agent calendar — "
+                "the same calendar schedule_self writes to. Use this when the user asks about "
+                "your scheduled triggers or events on \"the agent calendar\". No calendar_id needed.\n"
+                "- **get_self_calendar_event**: Get one event from your own calendar by `event_id`.\n\n"
                 "### Which calendar tool to use\n\n"
                 "- User says \"put X on my calendar\" / \"schedule a meeting\" → **create_calendar_event** (user's calendar)\n"
-                "- You need to follow up later / check on something tomorrow / continue a workflow → **schedule_self** (your calendar)\n\n"
+                "- You need to follow up later / check on something tomorrow / continue a workflow → **schedule_self** (your calendar)\n"
+                "- User asks about your scheduled triggers / \"what's on the agent calendar\" → **list_self_calendar_events**\n"
+                "- User asks about their own calendar → **list_calendar_events** (primary)\n\n"
                 "### Important: scheduling ≠ executing\n\n"
                 "When you create a calendar event for future execution, your job is DONE once the event is created. "
                 "Do NOT execute the event's workflow immediately — it will be triggered automatically at the scheduled time. "
                 "The event description should contain instructions for your future self, not a to-do list for right now."
             )
-        # Agent calendar scheduling (for chat mode)
+        # Agent calendar scheduling + read (for chat mode)
         if agent_calendars:
             if len(agent_calendars) == 1:
                 name = next(iter(agent_calendars))
                 cal_section += (
-                    f"\n\n## Agent Calendar Scheduling\n\n"
+                    f"\n\n## Agent Calendar Scheduling & Reads\n\n"
                     f"- **schedule_agent_event**: Schedule events on **{name}**'s dedicated agent calendar.\n"
-                    f"  No need to specify the agent parameter — {name} is the only agent with a calendar.\n\n"
+                    f"  No need to specify the agent parameter — {name} is the only agent with a calendar.\n"
+                    f"- **list_agent_calendar_events**: List events on {name}'s agent calendar. "
+                    f"No `calendar_id` needed — auto-resolves.\n"
+                    f"- **get_agent_calendar_event**: Get one event from {name}'s agent calendar by `event_id`.\n\n"
                     f"### Which calendar tool to use\n\n"
                     f"- User says \"put X on my calendar\" / \"schedule a meeting\" → **create_calendar_event** (user's personal calendar)\n"
-                    f"- User says \"schedule X on the agent calendar\" / \"add to maia's calendar\" → **schedule_agent_event** ({name}'s calendar)"
+                    f"- User says \"schedule X on the agent calendar\" / \"add to {name}'s calendar\" → **schedule_agent_event** ({name}'s calendar)\n"
+                    f"- User asks \"what's on {name}'s calendar\" / \"check the agent calendar\" → **list_agent_calendar_events**\n"
+                    f"- User asks about their own calendar → **list_calendar_events**"
                 )
             else:
                 names = ", ".join(sorted(agent_calendars.keys()))
                 cal_section += (
-                    f"\n\n## Agent Calendar Scheduling\n\n"
-                    f"- **schedule_agent_event**: Schedule events on an agent's dedicated calendar.\n"
-                    f"  You must specify the `agent` parameter. Available agents: {names}\n\n"
+                    f"\n\n## Agent Calendar Scheduling & Reads\n\n"
+                    f"- **schedule_agent_event**: Schedule events on an agent's dedicated calendar. "
+                    f"Requires `agent` parameter. Available agents: {names}\n"
+                    f"- **list_agent_calendar_events**: List events on a named agent's calendar. "
+                    f"Requires `agent` parameter.\n"
+                    f"- **get_agent_calendar_event**: Get one event from a named agent's calendar. "
+                    f"Requires `agent` parameter.\n\n"
                     f"### Which calendar tool to use\n\n"
                     f"- User says \"put X on my calendar\" / \"schedule a meeting\" → **create_calendar_event** (user's personal calendar)\n"
-                    f"- User says \"schedule X on the agent calendar\" / names a specific agent → **schedule_agent_event** (agent's calendar)"
+                    f"- User says \"schedule X on the agent calendar\" / names a specific agent → **schedule_agent_event** (agent's calendar)\n"
+                    f"- User asks \"what's on <agent>'s calendar\" → **list_agent_calendar_events**\n"
+                    f"- User asks about their own calendar → **list_calendar_events**"
                 )
         tool_sections_parts.append(cal_section)
     if "notion" in mcp_tools:
@@ -645,6 +718,7 @@ async def run_agentic_turn(
     source_states: Optional[Dict[str, Dict]] = None,
     on_tool_activity: Optional[Callable] = None,
     messaging_enabled: bool = False,
+    model: Optional[str] = None,
 ) -> AgenticTurnResult:
     """Run an agentic turn using the full autonomous tool loop.
 
@@ -815,7 +889,7 @@ async def run_agentic_turn(
 
     # Run the agentic loop
     try:
-        result = await agentic_turn(
+        agentic_kwargs = dict(
             system_prompt=enhanced_prompt,
             messages=messages,
             tools=tools,
@@ -826,6 +900,9 @@ async def run_agentic_turn(
             suite_registry=suite_registry,
             mcp_suites=mcp_suites if mcp_suites else None,
         )
+        if model:
+            agentic_kwargs["model"] = model
+        result = await agentic_turn(**agentic_kwargs)
     finally:
         await executor.disconnect_mcp_servers()
 

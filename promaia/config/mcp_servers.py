@@ -14,6 +14,33 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_default_config_path() -> str:
+    """Resolve the default `mcp_servers.json` path.
+
+    Uses the shared `_find_mcp_servers_json()` search so that the manager,
+    the CLI, and the agent loader all agree on a single file. Falls back to
+    `<data_dir>/mcp_servers.json` when no existing file is located, so the
+    manager always has a stable place to save to if the caller later adds
+    servers.
+    """
+    try:
+        from promaia.agents.mcp_loader import _find_mcp_servers_json
+
+        found = _find_mcp_servers_json()
+        if found is not None:
+            return str(found)
+    except Exception:
+        pass
+
+    try:
+        from promaia.utils.env_writer import get_data_dir
+
+        return str(get_data_dir() / "mcp_servers.json")
+    except Exception:
+        return "mcp_servers.json"
+
+
 @dataclass
 class McpServerConfig:
     """Configuration for an MCP server."""
@@ -71,22 +98,37 @@ class McpServerConfig:
 
 class McpServerManager:
     """Manages MCP server configurations and connections."""
-    
-    def __init__(self, config_path: str = "mcp_servers.json"):
+
+    def __init__(self, config_path: Optional[str] = None):
         """Initialize the MCP server manager.
-        
+
         Args:
-            config_path: Path to the MCP servers configuration file
+            config_path: Path to the MCP servers configuration file. When None,
+                resolves via `promaia.agents.mcp_loader._find_mcp_servers_json()`
+                (same search used by the rest of the stack) and falls back to
+                `<data_dir>/mcp_servers.json` if nothing is found. The default
+                is deliberately NOT the relative string "mcp_servers.json" —
+                that caused phantom default configs to be written into CWD.
         """
+        if config_path is None:
+            config_path = _resolve_default_config_path()
         self.config_path = config_path
         self.servers: Dict[str, McpServerConfig] = {}
         self.load_config()
-    
+
     def load_config(self) -> None:
         """Load MCP server configurations from file."""
         if not os.path.exists(self.config_path):
-            logger.info(f"MCP config file not found at {self.config_path}, creating default config")
-            self.create_default_config()
+            # No file: start with an empty registry. We deliberately do NOT
+            # auto-create a defaults file here — doing so in CWD poisoned the
+            # mcp_servers.json search order (see _find_mcp_servers_json) and
+            # made `maia mcp remove` / agent internals show stale
+            # filesystem/git/sqlite entries that nobody configured.
+            logger.debug(
+                "MCP config file not found at %s; starting with empty server list",
+                self.config_path,
+            )
+            self.servers = {}
             return
         
         try:
@@ -113,39 +155,7 @@ class McpServerManager:
         except Exception as e:
             logger.error(f"Error loading MCP config from {self.config_path}: {e}")
             self.servers = {}
-    
-    def create_default_config(self) -> None:
-        """Create a default MCP configuration file with examples."""
-        default_config = {
-            "servers": {
-                "filesystem": {
-                    "description": "Access local filesystem for reading and writing files",
-                    "command": ["npx", "@modelcontextprotocol/server-filesystem"],
-                    "args": ["/path/to/allowed/directory"],
-                    "enabled": False
-                },
-                "git": {
-                    "description": "Git repository operations and information",
-                    "command": ["npx", "@modelcontextprotocol/server-git"],
-                    "args": ["--repository", "."],
-                    "enabled": False
-                },
-                "sqlite": {
-                    "description": "SQLite database access and queries",
-                    "command": ["npx", "@modelcontextprotocol/server-sqlite"],
-                    "args": ["--db-path", "data/example.db"],
-                    "enabled": False
-                }
-            }
-        }
-        
-        try:
-            with open(self.config_path, 'w', encoding='utf-8') as f:
-                json.dump(default_config, f, indent=2)
-            logger.info(f"Created default MCP config at {self.config_path}")
-        except Exception as e:
-            logger.error(f"Error creating default MCP config: {e}")
-    
+
     def get_server(self, name: str) -> Optional[McpServerConfig]:
         """Get a specific MCP server configuration.
         

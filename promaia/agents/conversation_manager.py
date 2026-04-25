@@ -22,6 +22,39 @@ from promaia.agents.messaging.base import BaseMessagingPlatform
 
 logger = logging.getLogger(__name__)
 
+
+def _fire_vectorize(state, *, include_partial: bool = False) -> None:
+    """Fire-and-forget: kick off Slack DM chunk vectorization after a turn.
+
+    Runs only for Slack tag_to_chat conversations; skips incognito. Never
+    raises — vectorization errors are logged and swallowed so they can't
+    disrupt chat flow.
+    """
+    try:
+        if getattr(state, "platform", None) != "slack":
+            return
+        if getattr(state, "conversation_type", None) != "tag_to_chat":
+            return
+        if state.context and state.context.get("incognito"):
+            return
+
+        from promaia.storage.conversation_vectorizer import vectorize_conversation_from_state
+
+        async def _runner():
+            try:
+                await vectorize_conversation_from_state(state, include_partial=include_partial)
+            except Exception as e:
+                logger.warning(f"[vectorizer] background task failed: {e}")
+
+        try:
+            asyncio.get_running_loop().create_task(_runner())
+        except RuntimeError:
+            # No running loop — likely called from a sync path; skip.
+            pass
+    except Exception as e:
+        logger.debug(f"[vectorizer] _fire_vectorize skipped: {e}")
+
+
 # Callback type for conversation end events
 # Takes (conversation_id: str, transcript: List[Dict], reason: str) -> None
 ConversationEndCallback = Callable[[str, List[Dict[str, Any]], str], Awaitable[None]]
@@ -499,6 +532,7 @@ class ConversationManager:
 
         await self._save_state(state)
 
+        _fire_vectorize(state)
         logger.debug(f"Handled message in {conversation_id}, turn {state.turn_count}")
         return response
 
@@ -585,7 +619,10 @@ class ConversationManager:
             # Generate response using the shared agentic adapter
             # This gives Slack/Discord the same Think/Act mode, context sources,
             # memory, suite registry, and conversation_mode.md prompt as terminal chat.
-            from promaia.chat.agentic_adapter import run_agentic_turn
+            from promaia.chat.agentic_adapter import (
+                resolve_effective_mcp_tools,
+                run_agentic_turn,
+            )
 
             # Auto-add calendar to mcp_tools if agent has a dedicated calendar
             if getattr(agent, 'calendar_id', None):
@@ -593,7 +630,7 @@ class ConversationManager:
                 if "calendar" not in agent_mcp:
                     agent.mcp_tools = list(agent_mcp) + ["calendar"]
 
-            mcp_tools = getattr(agent, 'mcp_tools', []) or []
+            mcp_tools = resolve_effective_mcp_tools(agent, agent.workspace)
             databases = getattr(agent, 'databases', []) or []
 
             # Restore persisted notepad and source states from conversation context
@@ -604,6 +641,15 @@ class ConversationManager:
             # (the on_tool_activity callback handles UX for Slack/Discord)
             def _noop_print(*args, **kwargs):
                 pass
+
+            # Pick the LLM model. For Slack, read the workspace-wide setting
+            # (set via the Slack `/model` slash command); other platforms keep
+            # the run_agentic_turn default (Sonnet).
+            if state.platform == "slack":
+                from promaia.messaging.slack_settings import get_slack_model
+                model = get_slack_model()
+            else:
+                model = None
 
             result = await run_agentic_turn(
                 system_prompt=system_prompt,
@@ -616,6 +662,7 @@ class ConversationManager:
                 source_states=source_states,
                 on_tool_activity=on_tool_activity,
                 messaging_enabled=getattr(agent, 'messaging_enabled', False),
+                model=model,
             )
 
             output = result.response_text
@@ -1130,6 +1177,7 @@ class ConversationManager:
         state.last_message_at = datetime.now(timezone.utc).isoformat()
         await self._save_state(state)
 
+        _fire_vectorize(state)
         logger.debug(f"Handled batched messages in {conversation_id}, turn {state.turn_count}")
         return response
 

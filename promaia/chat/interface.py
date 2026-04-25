@@ -411,7 +411,7 @@ def _build_tool_context_summary(tool_calls_made):
         elif name == "notion_get_page":
             page_id = tc_input.get("page_id", "")
             parts.append(f"notion_get_page: page_id={page_id}")
-        elif name in ("send_message", "send_email", "create_draft"):
+        elif name in ("send_email", "create_draft"):
             parts.append(f"{name}: {summary}")
         elif name == "calendar_create_event":
             parts.append(f"calendar_create_event: {summary}")

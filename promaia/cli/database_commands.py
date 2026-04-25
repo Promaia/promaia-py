@@ -1954,6 +1954,42 @@ async def handle_database_test(args):
         except Exception as e:
             print(f"✗ {display_name}: {e}")
 
+async def handle_vectorize_slack_dms(args):
+    """Handle 'maia database vectorize-slack-dms' command.
+
+    Walks conversations.db, chunks each Slack DM into 12-message cores with
+    2-message overlap each side, embeds each chunk into ChromaDB, and writes
+    rows to slack_dm_chunks. Auto-registers the slack_dms database and grants
+    the maia agent QUERY access to it on first run.
+    """
+    from promaia.storage.conversation_vectorizer import (
+        backfill_all,
+        ensure_database_registered,
+    )
+
+    workspace = getattr(args, 'workspace', None)
+    dry_run = bool(getattr(args, 'dry_run', False))
+
+    # Auto-register (idempotent). Resolve workspace if not provided.
+    resolved_ws = workspace
+    if resolved_ws is None:
+        try:
+            from promaia.config.workspaces import get_workspace_manager
+            resolved_ws = get_workspace_manager().get_default_workspace() or 'default'
+        except Exception:
+            resolved_ws = 'default'
+    ensure_database_registered(resolved_ws)
+
+    if dry_run:
+        print(f"Dry run — workspace={resolved_ws}")
+    else:
+        print(f"Vectorizing Slack DMs into ChromaDB (workspace={resolved_ws})...")
+
+    convos, chunks = await backfill_all(workspace=workspace, dry_run=dry_run)
+    verb = "would embed" if dry_run else "embedded"
+    print(f"Done: {convos} conversations, {chunks} chunks {verb}.")
+
+
 async def handle_database_sync(args):
     """Handle 'maia database sync' command."""
     # Check if browse mode is requested
@@ -3858,7 +3894,16 @@ def add_database_commands_to_existing_parser(parent_parser, subparsers):
     sync_parser.add_argument('--date-range', help='Date range for sync (e.g., 2025-02-01,2025-03-31)')
     
     sync_parser.set_defaults(func=handle_database_sync)
-    
+
+    # Backfill Slack DM chunked embeddings from the live conversations.db
+    vectorize_parser = subparsers.add_parser(
+        'vectorize-slack-dms',
+        help='Chunk and embed all Slack DMs from conversations.db into ChromaDB',
+    )
+    vectorize_parser.add_argument('--workspace', '-ws', help='Workspace override (defaults to each agent\'s workspace)')
+    vectorize_parser.add_argument('--dry-run', action='store_true', help='Report what would be embedded without calling OpenAI')
+    vectorize_parser.set_defaults(func=handle_vectorize_slack_dms)
+
     # Database info
     info_parser = subparsers.add_parser('info', help='Show database information')
     info_parser.add_argument('name', help='Database name')
