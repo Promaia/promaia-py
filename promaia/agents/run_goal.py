@@ -112,12 +112,6 @@ def _summarize_tool_input(tool_name: str, tool_input: dict) -> str:
         db = tool_input.get("database", "")
         days = tool_input.get("days", "")
         return f"{db}" + (f" ({days}d)" if days else "")
-    elif tool_name == "send_message":
-        user = tool_input.get("user", "")
-        ch = tool_input.get("channel_id", "")
-        target = f"DM {user}" if user else ch
-        content = tool_input.get("content", "")
-        return f"→ {target}: {content[:60]}" if content else f"→ {target}"
     elif tool_name == "send_email":
         to = tool_input.get("to", "")
         subj = tool_input.get("subject", "")
@@ -182,7 +176,10 @@ async def _run_agentic(agent_config, goal: str, metadata: dict) -> dict:
     from promaia.agents.agentic_turn import (
         agentic_turn, build_tool_definitions, ToolExecutor,
     )
-    from promaia.chat.agentic_adapter import build_agentic_system_prompt
+    from promaia.chat.agentic_adapter import (
+        build_agentic_system_prompt,
+        resolve_effective_mcp_tools,
+    )
 
     name = agent_config.name  # shorthand for log prefix
 
@@ -203,6 +200,14 @@ async def _run_agentic(agent_config, goal: str, metadata: dict) -> dict:
                 logger.info(f"[{name}] Loaded system prompt from Notion")
         except Exception as e:
             logger.warning(f"[{name}] Could not load Notion config: {e}")
+
+    # Resolve effective mcp_tools on the config object so every downstream
+    # reader (build_tool_definitions, _build_tool_suite_registry via the
+    # ToolExecutor) sees the same list. The default agent gets the union
+    # with detect_available_tools(); others keep their stored config.
+    agent_config.mcp_tools = resolve_effective_mcp_tools(
+        agent_config, agent_config.workspace,
+    )
 
     # 2. Initialize messaging platform
     platform = _init_messaging_platform(agent_config)

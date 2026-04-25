@@ -3,11 +3,26 @@ Agent configuration management with JSON persistence.
 """
 
 import json
+import logging
 import os
 from dataclasses import dataclass, asdict, field
 from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+# Fields where going from non-empty to empty during a save_agent() call almost
+# always indicates a stale-copy / auto-recreate bug rather than user intent.
+# The wipe protection in save_agent() preserves the on-disk value for these
+# fields unless the caller passes force=True.
+# See memory/project_config_wipe_bug.md.
+_WIPE_PROTECTED_FIELDS = (
+    "databases",
+    "mcp_tools",
+    "allowed_channel_ids",
+    "source_access",
+)
 
 
 class SourcePermission(Enum):
@@ -250,77 +265,133 @@ def _get_agents_file() -> Path:
     return get_data_dir() / "agents.json"
 
 
+def _load_agents_from_section() -> Optional[List[Dict[str, Any]]]:
+    """Read the per-section agents file via atomic_io. Returns the raw list of
+    agent dicts, or None if the file is missing or corrupted (atomic_io
+    quarantines the bad bytes and returns None — see atomic_io.read_section)."""
+    from promaia.config.atomic_io import read_section
+    section = read_section("agents")
+    if section is None:
+        return None
+    if isinstance(section, dict):
+        return section.get("agents", [])
+    if isinstance(section, list):
+        return section
+    logger.warning(f"agents.json has unexpected shape ({type(section).__name__}); ignoring")
+    return None
+
+
 def load_agents() -> List[AgentConfig]:
     """
     Load all agent configurations.
 
-    Checks separate agents.json file first (immune to database sync clearing),
-    falls back to promaia.config.json for backwards compatibility.
+    Reads from agents.json (per-section, atomic, the source of truth);
+    falls back to promaia.config.json's agents key only if agents.json is
+    absent.
     """
-    # Try separate agents file first (preferred, won't be cleared by sync)
-    agents_file = _get_agents_file()
-    if agents_file.exists():
-        try:
-            with open(agents_file, 'r') as f:
-                agents_data_file = json.load(f)
-                if 'agents' in agents_data_file:
-                    agents = []
-                    for agent_data in agents_data_file['agents']:
-                        try:
-                            agents.append(AgentConfig.from_dict(agent_data))
-                        except Exception as e:
-                            print(f"Error loading agent from agents.json {agent_data.get('name', 'unknown')}: {e}")
-                    if agents:  # Return if we found any agents
-                        return agents
-        except Exception as e:
-            print(f"Could not load agents.json: {e}, falling back to main config")
-
-    # Fall back to main config (backwards compatibility)
-    config = load_config()
-    agents_data = config.get('agents', [])
+    raw_agents = _load_agents_from_section()
+    source = "agents.json"
+    if raw_agents is None:
+        # Fall back to legacy blob (one-time migration target).
+        config = load_config()
+        raw_agents = config.get('agents', [])
+        source = "promaia.config.json (legacy)"
 
     agents = []
-    for agent_data in agents_data:
+    for agent_data in raw_agents:
         try:
             agents.append(AgentConfig.from_dict(agent_data))
         except Exception as e:
-            print(f"Error loading agent {agent_data.get('name', 'unknown')}: {e}")
+            logger.error(f"Error loading agent {agent_data.get('name', 'unknown')} from {source}: {e}")
 
     return agents
 
 
-def save_agent(agent: AgentConfig) -> None:
-    """Save or update an agent configuration."""
+def _apply_wipe_protection(
+    new_dict: Dict[str, Any],
+    existing_dict: Optional[Dict[str, Any]],
+    force: bool,
+) -> Dict[str, Any]:
+    """If a wipe-protected field is going from non-empty (on disk) to empty
+    (in the incoming save), preserve the on-disk value and log a warning.
+
+    Most wipes have been "agentic_adapter auto-recreates a bare-bones agent
+    after the top-level agents key was nuked from blob, then saves with
+    databases=[]." This guard makes such a save a no-op for the wipe-prone
+    fields rather than a silent data loss event.
+
+    Pass force=True from CLI flows where the user genuinely wants to clear
+    a list (e.g. `agent edit` deselect-all).
+    """
+    if force or existing_dict is None:
+        return new_dict
+    merged = dict(new_dict)
+    for field in _WIPE_PROTECTED_FIELDS:
+        existing_val = existing_dict.get(field)
+        new_val = merged.get(field)
+        if existing_val and not new_val:
+            logger.warning(
+                f"save_agent({merged.get('name')!r}): wipe protection — "
+                f"field {field!r} is non-empty on disk ({existing_val!r}) but "
+                f"empty in incoming save. Preserving disk value. Pass "
+                f"force=True to override. See memory/project_config_wipe_bug.md."
+            )
+            merged[field] = existing_val
+    return merged
+
+
+def save_agent(agent: AgentConfig, *, force: bool = False) -> None:
+    """Save or update an agent configuration.
+
+    Writes are atomic per-section (agents.json) via promaia.config.atomic_io.
+    The legacy promaia.config.json blob is mirror-updated best-effort for
+    backward compat with code paths that still read the blob directly.
+
+    Wipe protection: if any of the fields in `_WIPE_PROTECTED_FIELDS`
+    (databases, mcp_tools, allowed_channel_ids, source_access) is non-empty
+    on disk but empty in the incoming agent, the on-disk value is preserved.
+    Pass force=True from intentional-clear flows (CLI deselect-all, etc.)
+    to override.
+    """
+    from promaia.config.atomic_io import read_section, write_section
+
     agent_dict = agent.to_dict()
 
-    def _upsert(agents_list: list) -> list:
+    def _upsert(agents_list: list, incoming: Dict[str, Any]) -> list:
         for i, existing in enumerate(agents_list):
-            if existing.get('name') == agent.name:
-                agents_list[i] = agent_dict
+            if existing.get('name') == incoming.get('name'):
+                agents_list[i] = incoming
                 return agents_list
-        agents_list.append(agent_dict)
+        agents_list.append(incoming)
         return agents_list
 
-    # 1. Update promaia.config.json (legacy)
-    config = load_config()
-    if 'agents' not in config:
-        config['agents'] = []
-    _upsert(config['agents'])
-    save_config(config)
+    # Read existing on-disk state so wipe protection can compare.
+    section = read_section("agents") or {"agents": []}
+    if isinstance(section, list):
+        section = {"agents": section}
+    existing_agents = section.get("agents", [])
+    existing_for_this_name = next(
+        (a for a in existing_agents if a.get('name') == agent.name),
+        None,
+    )
 
-    # 2. Update agents.json (preferred source for load_agents)
-    agents_file = _get_agents_file()
-    if agents_file.exists():
-        try:
-            with open(agents_file, 'r') as f:
-                agents_data = json.load(f)
-            if 'agents' not in agents_data:
-                agents_data['agents'] = []
-            _upsert(agents_data['agents'])
-            with open(agents_file, 'w') as f:
-                json.dump(agents_data, f, indent=2)
-        except Exception as e:
-            print(f"Warning: could not update agents.json: {e}")
+    # Apply wipe protection BEFORE upsert.
+    safe_dict = _apply_wipe_protection(agent_dict, existing_for_this_name, force=force)
+
+    # Source of truth: agents.json (atomic + backups).
+    section["agents"] = _upsert(existing_agents, safe_dict)
+    write_section("agents", section)
+
+    # Mirror to legacy blob best-effort. Failures here are NOT fatal — the
+    # source of truth above already succeeded.
+    try:
+        config = load_config()
+        if 'agents' not in config:
+            config['agents'] = []
+        config['agents'] = _upsert(config['agents'], safe_dict)
+        save_config(config)
+    except Exception as e:
+        logger.warning(f"save_agent({agent.name!r}): legacy blob mirror failed (agents.json is authoritative): {e}")
 
 
 def delete_agent(agent_name: str) -> bool:
@@ -375,21 +446,21 @@ def delete_agent(agent_name: str) -> bool:
             save_config(config)
             deleted = True
 
-    # 2. Remove from agents.json
-    agents_file = _get_agents_file()
-    if agents_file.exists():
-        try:
-            with open(agents_file, 'r') as f:
-                agents_data = json.load(f)
-            if 'agents' in agents_data:
-                original_length = len(agents_data['agents'])
-                agents_data['agents'] = [a for a in agents_data['agents'] if a.get('name') != agent_name]
-                if len(agents_data['agents']) < original_length:
-                    with open(agents_file, 'w') as f:
-                        json.dump(agents_data, f, indent=2)
-                    deleted = True
-        except Exception as e:
-            print(f"Warning: could not update agents.json: {e}")
+    # 2. Remove from agents.json (atomic, source of truth)
+    try:
+        from promaia.config.atomic_io import read_section, write_section
+        section = read_section("agents")
+        if section is not None:
+            if isinstance(section, list):
+                section = {"agents": section}
+            agents_list = section.get('agents', [])
+            original_length = len(agents_list)
+            section['agents'] = [a for a in agents_list if a.get('name') != agent_name]
+            if len(section['agents']) < original_length:
+                write_section("agents", section)
+                deleted = True
+    except Exception as e:
+        logger.warning(f"delete_agent({agent_name!r}): could not update agents.json: {e}")
 
     return deleted
 

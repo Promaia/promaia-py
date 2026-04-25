@@ -1029,6 +1029,69 @@ def create_slack_bot():
     # Track pending agent-pick messages: {message_ts: {emoji_name: agent_name}}
     _agent_pick_messages: Dict[str, Dict[str, str]] = {}
 
+    # Track pending model-pick messages: {message_ts: {emoji_name: model_id}}
+    _model_pick_messages: Dict[str, Dict[str, str]] = {}
+
+    # Models exposed via the Slack /model picker
+    MODEL_CHOICES = [
+        ("claude-opus-4-6-1m", "Claude Opus 4.6 (1M)"),
+        ("claude-opus-4-6", "Claude Opus 4.6"),
+        ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+    ]
+
+    @app.command("/model")
+    async def handle_model_command(ack, command, client):
+        """
+        Handle /model slash command.
+
+        Usage:
+            /model — list available models and pick the Slack-wide model
+        """
+        await ack()
+
+        try:
+            channel_id = command["channel_id"]
+            user_id = command["user_id"]
+
+            from promaia.messaging.slack_settings import get_slack_model
+            current = get_slack_model()
+            current_label = next(
+                (d for mid, d in MODEL_CHOICES if mid == current), current
+            )
+
+            lines = [
+                "*Pick the model for all Slack conversations:*",
+                f"_Currently: {current_label}_\n",
+            ]
+            emoji_to_model = {}
+            for i, (model_id, display_name) in enumerate(MODEL_CHOICES):
+                if i >= len(AGENT_EMOJIS):
+                    break
+                lines.append(f"{i + 1}. {display_name}")
+                emoji_to_model[AGENT_EMOJIS[i]] = model_id
+
+            response = await client.chat_postMessage(
+                channel=channel_id,
+                text="\n".join(lines),
+            )
+            msg_ts = response["ts"]
+
+            for i in range(min(len(MODEL_CHOICES), len(AGENT_EMOJIS))):
+                try:
+                    await client.reactions_add(
+                        channel=channel_id,
+                        timestamp=msg_ts,
+                        name=AGENT_EMOJIS[i],
+                    )
+                except Exception:
+                    pass
+
+            _model_pick_messages[msg_ts] = emoji_to_model
+            logger.info(f"/model picker posted in {channel_id}, tracking {msg_ts}")
+
+        except Exception as e:
+            logger.error(f"Error handling /model command: {e}", exc_info=True)
+
     @app.command("/agent")
     async def handle_agent_command(ack, command, client):
         """
@@ -1114,6 +1177,31 @@ def create_slack_bot():
             message_ts = item['ts']
             channel_id = item['channel']
             user_id = event['user']
+
+            # Check if this is a model pick reaction
+            if message_ts in _model_pick_messages:
+                model_map = _model_pick_messages[message_ts]
+                if emoji in model_map:
+                    model_id = model_map[emoji]
+                    display_name = next(
+                        (d for mid, d in MODEL_CHOICES if mid == model_id), model_id
+                    )
+
+                    try:
+                        await client.chat_delete(channel=channel_id, ts=message_ts)
+                    except Exception:
+                        pass
+                    del _model_pick_messages[message_ts]
+
+                    from promaia.messaging.slack_settings import set_slack_model
+                    set_slack_model(model_id)
+                    await client.chat_postEphemeral(
+                        channel=channel_id,
+                        user=user_id,
+                        text=f"🧠 Slack model set to *{display_name}* (applies to every conversation).",
+                    )
+                    logger.info(f"Slack-wide model set to {model_id} by {user_id}")
+                return
 
             # Check if this is an agent pick reaction
             if message_ts in _agent_pick_messages:

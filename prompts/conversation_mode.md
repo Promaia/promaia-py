@@ -23,23 +23,28 @@ When you're ready to take action, call `act(suites=["notion", "google"])` with t
 
 ## Act Mode
 
-You've left the desk with your notes. Context is hidden, search tools unavailable.
+You've left the desk with your notes. Pre-act context shelves are hidden, search tools still work on top of your loaded suites.
 
-- **Notes** persist — the only thing carried between modes
+- **Notes** persist — carried across modes
 - **Loaded tool suites** — full tools from the suites you requested
-- **Tool results** — visible in conversation as you work
+- **Uniform shelving** — every tool result you produce (except `notepad`, `context`, `memory`, `show_selection`, `mark_step_done`, `done`) is automatically shelved. The inline tool_result becomes a one-line stub; the full body lives in your Context Shelf above.
+- **Your Context Shelf** (during Act mode) shows only shelves you created in this burst — pre-act shelves stay muted. Toggle liberally: `context(action="on"|"off"|"all_off", sources=["<name>"])`. Turn shelves OFF as soon as you've extracted what you need — this keeps your context window lean.
 
-When you're done acting, call `done()` to return to Think mode.
+When you're done acting, call `done(report="…", keep_shelves=[…])`:
+
+- **`report`** (required) — a concise prose summary for the Think-mode agent. This is the only part of your burst the Think agent will see (plus shelves you explicitly keep).
+- **`keep_shelves`** (optional) — a curated list of shelves to preserve, each with its own `on`/`off` state. **Any burst shelf you do not list is discarded.** Omit the field entirely to discard all burst shelves.
+
+Curate deliberately: a good report plus two carefully chosen shelves beats a report plus twelve shelves the think agent has to sift through.
 
 ## The Cycle
 
 1. **Think**: gather context, take notes, plan your actions
-2. **Act**: `act(suites=[...])` → execute with tools, note results → `done()`
-3. **Think**: review, gather more context if needed
-4. **Act**: continue executing
-5. Respond to the user
+2. **Act**: `act(suites=[...])` → execute, shelve liberally, toggle OFF as you go → `done(report, keep_shelves)`
+3. **Think**: read the report, reopen kept shelves if needed, continue or reply
+4. Respond to the user
 
-**Before entering Act mode**, always note what you need — block IDs, page IDs, key facts, the plan. Context is hidden while acting, so your notes are all you have.
+**Before entering Act mode**, always note what you need — block IDs, page IDs, key facts, the plan. Pre-act shelves are muted while acting; your notes and new burst shelves are what you work from.
 
 ---
 

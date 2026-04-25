@@ -28,6 +28,7 @@ class AgentCalendarMonitor:
     async def start(self):
         self.running = True
         sync_counter = 0  # Track cycles for 5-minute database sync
+        empty_agents_streak = 0  # consecutive cycles with no calendar-enabled agents
 
         logger.info("Calendar monitor started (reloads agent configs each cycle).")
         logger.info("Tip: if you edit an agent (databases/MCP tools), you don't need to restart this monitor.")
@@ -38,8 +39,25 @@ class AgentCalendarMonitor:
             agents_with_calendars = [a for a in agents if a.calendar_id and a.enabled]
 
             if not agents_with_calendars:
-                logger.debug("No enabled agents with calendar integration (calendar_id missing).")
+                # Loud once when the streak starts and every 10 cycles after,
+                # so an agent silently disappearing from config (the recurring
+                # config-wipe bug — see memory/project_config_wipe_bug.md) is
+                # visible instead of being a DEBUG-level black hole.
+                empty_agents_streak += 1
+                if empty_agents_streak == 1 or empty_agents_streak % 10 == 0:
+                    logger.warning(
+                        f"No enabled agents with calendar integration found "
+                        f"(streak={empty_agents_streak}). Calendar triggers will "
+                        f"NOT fire. Check promaia.config.json — agents key may "
+                        f"have been wiped."
+                    )
             else:
+                if empty_agents_streak > 0:
+                    logger.warning(
+                        f"Calendar-enabled agents reappeared after "
+                        f"{empty_agents_streak} empty cycles."
+                    )
+                    empty_agents_streak = 0
                 for agent in agents_with_calendars:
                     google_account = google_account_for_workspace(getattr(agent, "workspace", None))
                     calendar_mgr = get_calendar_manager(account=google_account)
