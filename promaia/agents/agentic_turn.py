@@ -9105,6 +9105,20 @@ async def agentic_turn(
                     "role": "assistant",
                     "content": synth_text,
                 })
+                # The conversation must end with a user message — many models
+                # (Opus 4.6 included) reject a trailing assistant message as
+                # an unsupported "prefill" request.  Append a brief user-role
+                # nudge so the next iteration's API call is well-formed and
+                # the Think-mode agent picks up from the report cleanly.
+                internal_messages.append({
+                    "role": "user",
+                    "content": (
+                        "Act burst complete. Continue handling the user's "
+                        "request based on your report above. Reopen any kept "
+                        "shelves with context(action=\"on\", sources=[...]) "
+                        "if you need detail."
+                    ),
+                })
 
                 # Reset act state and restore full context visibility.
                 act_mode = False
