@@ -110,11 +110,10 @@ Ask the user to confirm, then call `create_agent` with:
 - name, workspace, databases, mcp_tools, prompt, description
 - messaging_platform if applicable (no channel_id needed for DMs)
 
-For Slack DMs: the agent can DM users by name using the `send_message` \
-tool with the `user` field, or use `start_conversation` for interactive \
-back-and-forth DMs. You don't need a channel_id for DMs — just set \
-messaging_platform to "slack" and the agent's prompt should mention \
-who to DM by name.
+For Slack DMs: the agent DMs users by name with `start_conversation`, \
+which sends the message and listens for the user's reply. You don't need \
+a channel_id for DMs — just set messaging_platform to "slack" and the \
+agent's prompt should mention who to DM by name.
 
 Do NOT pass schedule to create_agent — scheduling is done in the next phase.
 
@@ -192,11 +191,11 @@ Only mention capabilities that are relevant to their specific need.
 - All times are in the user's local timezone ({timezone})
 
 **Messaging & DMs**:
-- Agents can DM users by name using `send_message(user="Name", content="...")` \
-  — no channel ID needed, it resolves the user and opens a DM automatically
-- For interactive conversations: `start_conversation(user="Name", message="...")` \
-  sends a message and waits for the user's reply
-- Can also post to channels by channel_id
+- Agents DM users by name with `start_conversation(user="Name", message="...")` \
+  — no channel ID needed, it resolves the user, opens a DM, and listens for \
+  the reply so the thread keeps its history
+- Use `start_conversation` for every user-facing message, including one-off \
+  notifications
 - Platform: slack or discord
 
 **Journals**:

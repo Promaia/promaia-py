@@ -494,7 +494,6 @@ async def handle_agent_add(args):
         mcp_tools=mcp_tools,
         max_iterations=40,
         journal_memory_days=journal_memory_days,
-        messaging_platform=messaging_platform,
         messaging_enabled=messaging_enabled,
         enabled=True,
         description=description,
@@ -847,11 +846,8 @@ async def handle_agent_reset_default(args):
         sdk_permission_mode="bypassPermissions",
         sdk_allowed_tools=None,
         agentic_loop_enabled=True,
-        messaging_platform="slack",
         messaging_enabled=True,
-        initiate_conversation=False,
         conversation_timeout_minutes=15,
-        conversation_max_turns=None,
         journal_memory_days=7,
     )
 

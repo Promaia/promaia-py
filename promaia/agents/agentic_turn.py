@@ -451,54 +451,15 @@ GMAIL_READ_TOOL_DEFINITIONS = [
 
 MESSAGING_TOOL_DEFINITIONS = [
     {
-        "name": "send_message",
-        "description": (
-            "Send a one-way message (no reply expected). "
-            "Use 'user' to DM someone by name, or 'channel_id' for a channel. "
-            "For back-and-forth conversations, use start_conversation instead."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "channel_id": {
-                    "type": "string",
-                    "description": (
-                        "The channel ID to send the message to. "
-                        "Use 'current' to send to the current conversation's channel. "
-                        "Omit if using 'user' to send a DM instead."
-                    )
-                },
-                "user": {
-                    "type": "string",
-                    "description": (
-                        "The user's name to send a direct message to. "
-                        "Looks up the user by display name, real name, or username "
-                        "and opens a DM channel automatically."
-                    )
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The message content to send."
-                },
-                "thread_id": {
-                    "type": "string",
-                    "description": (
-                        "Optional thread ID to reply in a specific thread. "
-                        "Omit to post in the channel."
-                    )
-                }
-            },
-            "required": ["content"]
-        }
-    },
-    {
         "name": "start_conversation",
         "description": (
-            "Start a back-and-forth DM conversation with a user. "
-            "Sends the initial message, then waits for their reply. "
-            "Returns the user's response so you can continue the conversation. "
-            "Use this when you need a reply (e.g. asking a question, confirming something). "
-            "For one-way notifications, use send_message instead."
+            "Send the opening message of a DM to a user and hand off. "
+            "The conversation is registered so that when the user replies, "
+            "the Slack reply handler picks it up and continues it using your "
+            "agent personality. This tool returns as soon as the message is "
+            "sent — do NOT expect a reply back from this call, and do not "
+            "call it again just to wait. Use it once per user you want to "
+            "reach, then conclude your turn."
         ),
         "input_schema": {
             "type": "object",
@@ -1571,6 +1532,17 @@ _CONTROL_TOOL_NAMES: frozenset = frozenset({
     "done",
 })
 
+# Tools that already mount their own context source and return a stub.
+# The act-mode dispatch hook skips them to avoid double-shelving the
+# (already-shortened) stub as a second source.
+_SELF_SHELVING_TOOL_NAMES: frozenset = frozenset({
+    "web_fetch",
+    "query_sql",
+    "query_vector",
+    "query_source",
+    "sheets_read_range",
+})
+
 NOTEPAD_TOOL_DEFINITION = {
     "name": "notepad",
     "description": (
@@ -2554,7 +2526,7 @@ AGENT_TOOL_DEFINITIONS = [
                     "type": "boolean",
                     "description": (
                         "Whether this agent can use messaging tools "
-                        "(send_message, start_conversation, etc.)."
+                        "(start_conversation, end_conversation, etc.)."
                     )
                 },
                 "allowed_channel_ids": {
@@ -3172,6 +3144,11 @@ class ToolExecutor:
         # mounted_at_iteration >= this value are visible to the act agent even
         # while muted. None when not in an act burst.
         self._act_start_iteration: Optional[int] = None
+        # Monotonic counter for named context sources produced by _web_fetch
+        # (koii-prod's built-in pre-shelving path). Kept so merged web_fetch
+        # behaviour stays intact; uniform act-mode shelving uses
+        # self._tool_counters separately.
+        self._web_fetch_counter = 0
         # Updated each iteration by the agentic loop so source-management
         # paths (shelving, _context_action) can stamp mounted_at_iteration.
         self._current_iteration = 0
@@ -3194,8 +3171,6 @@ class ToolExecutor:
             elif tool_name == "write_agent_journal":
                 return await self._write_journal(tool_input)
             # Messaging tools
-            elif tool_name == "send_message":
-                return await self._send_message(tool_input)
             elif tool_name == "start_conversation":
                 return await self._start_conversation(tool_input)
             elif tool_name == "end_conversation":
@@ -3641,131 +3616,14 @@ class ToolExecutor:
 
         return None
 
-    async def _send_message(self, tool_input: Dict) -> str:
-        if not self.platform:
-            return "Error: messaging is not available in this context (no platform)."
-
-        content = tool_input.get("content", "")
-        if not content:
-            return "Error: missing 'content' parameter"
-
-        user_name = tool_input.get("user")
-        channel_id = tool_input.get("channel_id")
-        thread_id = tool_input.get("thread_id")
-
-        # DM by user name — resolve to channel via conversations.open
-        if user_name:
-            user_info = await self._resolve_user(user_name)
-            if not user_info:
-                return f"Error: could not find user matching '{user_name}'"
-            dm_channel = await self.platform.open_dm(user_info["id"])
-            if not dm_channel:
-                return f"Error: could not open DM with {user_info['real_name'] or user_name}"
-            channel_id = dm_channel
-            target_desc = f"DM to {user_info.get('real_name') or user_info.get('name', user_name)}"
-        elif channel_id == "current" or (not channel_id and not user_name):
-            if not self.channel_context:
-                return "Error: no current channel context available. Use 'user' to DM someone or provide a channel_id."
-            channel_id = self.channel_context["channel_id"]
-            thread_id = thread_id or self.channel_context.get("thread_id")
-            target_desc = f"channel {channel_id}"
-        else:
-            target_desc = f"channel {channel_id}"
-
-        if not channel_id:
-            return "Error: must provide either 'user' or 'channel_id'"
-
-        meta = await self.platform.send_message(
-            channel_id=channel_id,
-            content=content,
-            thread_id=thread_id,
-        )
-
-        # For top-level DMs, register a dormant conversation so replies
-        # can be routed back with full context of the original message.
-        if user_name and not thread_id:
-            await self._register_dormant_dm(
-                meta=meta,
-                user_info=user_info,
-                dm_channel=channel_id,
-                content=content,
-            )
-
-        if thread_id:
-            target_desc += f" (thread {thread_id[:12]})"
-        return f"Message sent to {target_desc}"
-
-    async def _register_dormant_dm(
-        self, meta, user_info: Dict, dm_channel: str, content: str,
-    ) -> None:
-        """Create a dormant ConversationState for a DM so replies are routable."""
-        try:
-            from promaia.agents.conversation_manager import (
-                ConversationManager, ConversationState,
-            )
-            from datetime import datetime, timezone
-
-            conv_manager = ConversationManager()
-            platform_name = getattr(self.platform, "platform_name", "slack")
-
-            if platform_name not in conv_manager.platforms:
-                conv_manager.register_platform(platform_name, self.platform)
-
-            agent_id = (
-                getattr(self.agent, "agent_id", None)
-                or getattr(self.agent, "name", "agent")
-            )
-            real_name = (
-                user_info.get("real_name")
-                or user_info.get("name")
-                or "unknown"
-            )
-
-            now = datetime.now(timezone.utc).isoformat()
-            msg_ts = str(int(datetime.now(timezone.utc).timestamp()))
-            conversation_id = f"{platform_name}_{dm_channel}_{msg_ts}"
-            dm_thread_id = meta.message_id
-
-            state = ConversationState(
-                conversation_id=conversation_id,
-                agent_id=agent_id,
-                platform=platform_name,
-                channel_id=dm_channel,
-                user_id=user_info["id"],
-                thread_id=dm_thread_id,
-                status="dormant",
-                last_message_at=now,
-                messages=[{
-                    "role": "assistant",
-                    "content": content,
-                    "timestamp": now,
-                }],
-                context={"is_dm": True, "user_name": real_name},
-                timeout_seconds=600,
-                max_turns=None,
-                turn_count=0,
-                created_at=now,
-                conversation_type="tag_to_chat",
-                is_active=True,
-                conversation_partner=real_name,
-            )
-            await conv_manager._save_state(state)
-            logger.info(
-                f"Registered dormant DM conversation {conversation_id} "
-                f"(thread {dm_thread_id[:12]}) for replies from {real_name}"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to register dormant DM conversation: {e}")
-
     async def _start_conversation(self, tool_input: Dict) -> str:
-        """Start a real interactive DM conversation and wait for it to complete.
+        """Send the opening message of a DM and hand off to the reply handler.
 
-        Creates a TagToChatLoop that drives a full back-and-forth conversation
-        using the agent's personality. The agentic turn suspends until the
-        conversation goes dormant (user stops replying), then resumes with
-        the full transcript.
+        Persists a ConversationState keyed by the message's thread_id. When the
+        user replies, the Slack bot's dormant-thread waker rehydrates a
+        TagToChatLoop in its own process and drives the conversation. This tool
+        returns immediately so the current agentic turn can conclude.
         """
-        import asyncio
         if not self.platform:
             return "Error: messaging is not available in this context (no platform)."
 
@@ -3778,12 +3636,10 @@ class ToolExecutor:
         if not message:
             return "Error: missing 'message' parameter"
 
-        # Resolve user
         user_info = await self._resolve_user(user_name)
         if not user_info:
             return f"Error: could not find user matching '{user_name}'"
 
-        # Open DM channel
         dm_channel = await self.platform.open_dm(user_info["id"])
         if not dm_channel:
             return f"Error: could not open DM with {user_info['real_name'] or user_name}"
@@ -3792,13 +3648,11 @@ class ToolExecutor:
             from promaia.agents.conversation_manager import (
                 ConversationManager, ConversationState,
             )
-            from promaia.agents.tag_to_chat import TagToChatLoop
             from datetime import datetime, timezone
 
             conv_manager = ConversationManager()
             platform_name = getattr(self.platform, "platform_name", "slack")
 
-            # Register platform so the Slack bot can route replies
             if platform_name not in conv_manager.platforms:
                 conv_manager.register_platform(platform_name, self.platform)
 
@@ -3808,13 +3662,11 @@ class ToolExecutor:
             )
             real_name = user_info.get("real_name") or user_info.get("name") or user_name
 
-            # Send message at top-level — this becomes the thread parent
             meta = await self.platform.send_message(
                 channel_id=dm_channel, content=message,
             )
             dm_thread_id = meta.message_id
 
-            # Create a real conversation state (not passive — agent personality drives it)
             now = datetime.now(timezone.utc).isoformat()
             msg_ts = str(int(datetime.now(timezone.utc).timestamp()))
             conversation_id = f"{platform_name}_{dm_channel}_{msg_ts}"
@@ -3826,7 +3678,7 @@ class ToolExecutor:
                 channel_id=dm_channel,
                 user_id=user_info["id"],
                 thread_id=dm_thread_id,
-                status="active",
+                status="dormant",
                 last_message_at=now,
                 messages=[{
                     "role": "assistant",
@@ -3843,54 +3695,16 @@ class ToolExecutor:
                 conversation_partner=real_name,
             )
             await conv_manager._save_state(state)
-
-            # Start a real TagToChatLoop — agent personality drives the conversation
-            loop = TagToChatLoop(
-                conversation_id=conversation_id,
-                channel_id=dm_channel,
-                thread_id=dm_thread_id,
-                platform=platform_name,
-                agent_id=agent_id,
-                platform_impl=self.platform,
-                conv_manager=conv_manager,
-                is_dm=True,
+            logger.info(
+                f"Started conversation {conversation_id} with {real_name} "
+                f"(dormant; reply handler will wake it)"
             )
 
-            # Dormancy signal — fires when the loop exits (dormant/stopped)
-            done_event = asyncio.Event()
-            loop.on_done(done_event.set)
-
-            # Start the conversation loop
-            asyncio.create_task(loop.run())
-            logger.info(f"Started interactive conversation {conversation_id} with {real_name}")
-
-            # Suspend the agentic turn until conversation goes dormant or times out
-            try:
-                await asyncio.wait_for(
-                    done_event.wait(),
-                    timeout=timeout_minutes * 60,
-                )
-            except asyncio.TimeoutError:
-                logger.info(f"Conversation {conversation_id} timed out after {timeout_minutes}min")
-                loop._stop_requested = True
-
-            # Load final transcript
-            final_state = await conv_manager._load_state(conversation_id)
-            if final_state and final_state.messages:
-                transcript_lines = []
-                for msg in final_state.messages:
-                    role = msg.get("role", "unknown")
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        text_parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
-                        content = "\n".join(text_parts)
-                    if isinstance(content, str) and content.strip():
-                        speaker = real_name if role == "user" else "You"
-                        transcript_lines.append(f"[{speaker}]: {content}")
-                transcript = "\n".join(transcript_lines)
-                return f"Conversation with {real_name} completed.\n\nTranscript:\n{transcript}"
-            else:
-                return f"Conversation with {real_name} ended (no messages exchanged)."
+            return (
+                f"Sent the opening message to {real_name}. "
+                f"The conversation is now live — when they reply, the Slack "
+                f"reply handler will continue it. Nothing more for you to do here."
+            )
 
         except Exception as e:
             logger.error(f"start_conversation error: {e}", exc_info=True)
@@ -5977,7 +5791,14 @@ class ToolExecutor:
         return "Error: web_search is handled server-side by the Anthropic API. This method should not be called."
 
     async def _web_fetch(self, tool_input: Dict) -> str:
-        """Fetch and extract text content from a URL."""
+        """Fetch a URL and mount the extracted text as a context source.
+
+        The body lands in ``self._sources`` (visible/ON by default) so the
+        context trimmer can LRU it off losslessly when budget tightens —
+        same pattern ``query_source`` uses. The tool_result sent back to the
+        model is a short stub, not the full body, which keeps message
+        history lean across many fetches.
+        """
         import httpx
 
         url = tool_input.get("url", "")
@@ -6045,10 +5866,33 @@ class ToolExecutor:
             return f"Could not extract readable content from {url}"
 
         # Truncate if too long
+        truncated = False
         if len(text) > MAX_CONTENT_CHARS:
             text = text[:MAX_CONTENT_CHARS] + "\n\n[Content truncated at 50,000 characters]"
+            truncated = True
 
-        return f"Content from {url}:\n\n{text}"
+        # Mount the body as a named context source. ON by default so the
+        # agent can read it right now; the trimmer will LRU it off when
+        # budget tightens. Name scheme mirrors `sql_…`, `search_…`, etc.
+        self._web_fetch_counter += 1
+        source_name = f"web_fetch_{self._web_fetch_counter}"
+        header = f"# Web fetch: {url}\n\n"
+        self._sources[source_name] = {
+            "content": header + text,
+            "on": True,
+            "page_count": 1,
+            "source": "web_fetch",
+            "titles": [url],
+            "mounted_at_iteration": self._current_iteration,
+        }
+
+        truncation_note = " (truncated)" if truncated else ""
+        return (
+            f"Fetched {url} → {len(text):,} chars{truncation_note} → "
+            f"source '{source_name}' [ON]. The full body is now visible in "
+            f"your context shelf; use the `context` tool to toggle it off "
+            f"when you no longer need it."
+        )
 
     async def _ensure_notion(self):
         """Lazy-initialize Notion client."""
@@ -6946,6 +6790,18 @@ class ToolExecutor:
                     titles.append(title)
         return titles
 
+    def _sorted_sources(self) -> List[tuple]:
+        """Return (name, src) pairs with msg-anchored sources first, newest-msg first."""
+        indexed = []
+        unindexed = []
+        for name, src in self._sources.items():
+            if src.get("shelved_from_msg") is not None:
+                indexed.append((name, src))
+            else:
+                unindexed.append((name, src))
+        indexed.sort(key=lambda pair: pair[1]["shelved_from_msg"], reverse=True)
+        return indexed + unindexed
+
     def _is_source_visible(self, src: Dict) -> bool:
         """Filter applied while muted. Burst shelves (mounted at or after
         _act_start_iteration) stay visible to the act agent; pre-burst shelves
@@ -6957,24 +6813,38 @@ class ToolExecutor:
         return src.get("mounted_at_iteration", -1) >= self._act_start_iteration
 
     def build_context_index(self) -> str:
-        """Build the context index string for the system prompt."""
+        """Build the context shelf index for the system prompt.
+
+        Sources produced by tool calls carry a @msg#N anchor matching the
+        stub that replaced their tool_result in message history. The model
+        can cross-reference the tool_use at message N with the body on
+        the shelf to see 'I did this, here's what came back.'
+
+        During an act burst, only shelves created in the current burst are
+        shown — pre-burst shelves stay muted.
+        """
         if not self._sources:
             return ""
-        items = [(name, src) for name, src in self._sources.items()
+        items = [(name, src) for name, src in self._sorted_sources()
                  if self._is_source_visible(src)]
         if not items:
             return ""
         lines = [
-            "## Your Context\n",
-            "Toggle sources ON/OFF with the `context` tool.",
-            "Check here BEFORE searching — the data you need may already be loaded.\n",
+            "## Context Shelf\n",
+            "Sources retrieved from tool calls in this conversation. Toggle ON/OFF with the `context` tool.",
+            "Shown newest first. `(from msg #N)` means the source was produced by the tool call at message N of this conversation — the stub at that message points back here.\n",
         ]
         for name, src in items:
             state = "ON" if src["on"] else "OFF"
             origin = src.get("source", "unknown")
             count = src.get("page_count", 0)
             chars = len(src.get("content", ""))
-            lines.append(f"- [{state}] **{name}** ({count} entries, {chars // 1000}k chars, source: {origin})")
+            msg_ref = src.get("shelved_from_msg")
+            if msg_ref is not None:
+                anchor = f"from msg #{msg_ref}, via {origin}"
+            else:
+                anchor = f"via {origin}"
+            lines.append(f"- [{state}] **{name}** ({anchor}, {count} entries, {chars // 1000}k chars)")
             # OFF sources show titles so agent knows what's available without loading
             if not src["on"]:
                 titles = src.get("titles", [])
@@ -6983,9 +6853,14 @@ class ToolExecutor:
         return "\n".join(lines)
 
     def build_active_source_content(self) -> str:
-        """Build the combined content of all ON sources for the system prompt."""
+        """Build the combined content of all ON sources for the system prompt.
+
+        Follows the same newest-first order as the index so body position
+        matches the index listing. During an act burst, only shelves created
+        this burst contribute content — pre-burst shelves stay muted.
+        """
         parts = []
-        for name, src in self._sources.items():
+        for name, src in self._sorted_sources():
             if not src.get("on") or not src.get("content"):
                 continue
             if not self._is_source_visible(src):
@@ -8546,6 +8421,7 @@ async def agentic_turn(
     context_data_block: str = "",
     suite_registry: Optional[Dict] = None,
     mcp_suites: Optional[Dict] = None,
+    model: str = "claude-sonnet-4-6",
 ) -> AgenticTurnResult:
     """
     Run a self-contained agentic turn with tool use.
@@ -8739,8 +8615,9 @@ async def agentic_turn(
                 logger.debug(f"Failed to log agentic prompt: {log_err}")
 
         # Build API call kwargs
+        from promaia.ai.models import resolve_anthropic_model_id
         api_kwargs = dict(
-            model=f"{prefix}claude-sonnet-4-6",
+            model=f"{prefix}{resolve_anthropic_model_id(model)}",
             system=trimmed_system,
             messages=internal_messages,
             max_tokens=4096,
@@ -9001,11 +8878,14 @@ async def agentic_turn(
                 result_text = await tool_executor.execute(tool_use.name, tool_use.input)
 
             # During act mode, uniformly shelve every non-control tool result.
-            # Control tools (notepad/context/memory/show_selection/mark_step_done/done)
-            # return acks or sentinels and pass through unchanged.
+            # Control tools return acks or sentinels and pass through.
+            # Self-shelving tools (_web_fetch, query_sql/_vector/_source,
+            # sheets_read_range) already mounted their body to _sources and
+            # returned a stub — shelving the stub a second time is wasteful.
             if (
                 act_mode
                 and tool_use.name not in _CONTROL_TOOL_NAMES
+                and tool_use.name not in _SELF_SHELVING_TOOL_NAMES
                 and isinstance(result_text, str)
                 and not result_text.startswith("__")  # don't shelf other internal sentinels
             ):
@@ -9552,10 +9432,6 @@ def _summarize_tool_result(
 
     elif tool_name == "delete_calendar_event":
         return _vs("Delete event", tool_input.get("event_id", "")[:12])
-
-    elif tool_name == "send_message":
-        target = tool_input.get("channel_id", "")
-        return _vs("Send message", target)
 
     elif tool_name == "notion_search":
         phrase = _extract_count_phrase(result)

@@ -81,9 +81,33 @@ def _load_agent_calendars(workspace: str) -> Dict[str, str]:
         if not creds:
             return {}
 
-        # Find or create "maia" agent
+        # Find or create "maia" agent. Auto-creating only happens if there's
+        # no maia at all. If maia is missing because the config-wipe bug
+        # nuked her (see memory/project_config_wipe_bug.md), we'd rather
+        # FAIL LOUDLY than silently resurrect a bare-bones agent with
+        # databases=[] and a hardcoded mcp_tools list — that pattern was
+        # the smoking gun for today's nested-field wipe.
         maia_agent = next((a for a in agents if a.name == "maia"), None)
         if not maia_agent:
+            # Check whether agents.json has a maia we just failed to load —
+            # if so, refuse to overwrite, force human investigation.
+            try:
+                from promaia.config.atomic_io import read_section
+                section = read_section("agents") or {}
+                if isinstance(section, dict):
+                    on_disk = section.get("agents", [])
+                else:
+                    on_disk = section if isinstance(section, list) else []
+                if any(a.get("name") == "maia" for a in on_disk):
+                    logger.error(
+                        "Refusing to auto-create maia: agents.json HAS a maia "
+                        "but load_agents() did not return her. This is the "
+                        "config-wipe failure mode. NOT overwriting. See "
+                        "memory/project_config_wipe_bug.md."
+                    )
+                    return {}
+            except Exception:
+                logger.warning("agents.json check before auto-create failed", exc_info=True)
             maia_agent = AgentConfig(
                 name="maia",
                 agent_id="maia",
@@ -137,6 +161,7 @@ def detect_available_tools(workspace: str) -> List[str]:
                 tools.append("gmail")
                 tools.append("calendar")
                 tools.append("google_sheets")
+                tools.append("google_drive")
     except Exception:
         pass
 
@@ -160,6 +185,29 @@ def detect_available_tools(workspace: str) -> List[str]:
         pass
 
     return tools
+
+
+def resolve_effective_mcp_tools(agent, workspace: str) -> List[str]:
+    """Return the mcp_tools list the agent should actually run with.
+
+    Default agent (`is_default_agent=True`, i.e. maia): union of its stored
+    mcp_tools with everything `detect_available_tools()` can probe from the
+    current environment. This is the "default agent gets everything" rule
+    and it's applied identically in terminal, Slack, and scheduled paths.
+
+    Non-default agents: their stored mcp_tools verbatim. What the operator
+    configured via `maia agent add/edit` is the source of truth, and it does
+    not drift between environments.
+    """
+    stored = list(getattr(agent, "mcp_tools", None) or [])
+    if not getattr(agent, "is_default_agent", False):
+        return stored
+    detected = detect_available_tools(workspace)
+    merged = list(stored)
+    for t in detected:
+        if t not in merged:
+            merged.append(t)
+    return merged
 
 
 # ── Prompt enhancement ────────────────────────────────────────────────────
@@ -216,12 +264,13 @@ def build_agentic_system_prompt(
     if has_platform:
         tool_sections_parts.append(
             "## Messaging Tools\n\n"
-            "- **send_message**: Send a one-way message (no reply expected).\n"
-            "  Use 'user' to DM someone by name, or 'channel_id' for a channel.\n"
-            "- **start_conversation**: Start a back-and-forth DM conversation.\n"
-            "  Sends your message and waits for the user's reply (up to 15 min).\n"
-            "  Returns the user's response. Use this when you need a reply.\n"
-            "  You can call it multiple times to continue the conversation."
+            "- **start_conversation**: DM a user. This is the only tool for "
+            "messaging a user directly — use it for questions, confirmations, "
+            "and notifications alike. It sends the opening message and hands "
+            "off to the Slack reply handler, which continues the conversation "
+            "when the user replies. The tool returns immediately; do not wait "
+            "for a reply inside your turn. Call it once per user you want to "
+            "reach, then wrap up."
         )
     if "gmail" in mcp_tools:
         tool_sections_parts.append(
@@ -669,6 +718,7 @@ async def run_agentic_turn(
     source_states: Optional[Dict[str, Dict]] = None,
     on_tool_activity: Optional[Callable] = None,
     messaging_enabled: bool = False,
+    model: Optional[str] = None,
 ) -> AgenticTurnResult:
     """Run an agentic turn using the full autonomous tool loop.
 
@@ -839,7 +889,7 @@ async def run_agentic_turn(
 
     # Run the agentic loop
     try:
-        result = await agentic_turn(
+        agentic_kwargs = dict(
             system_prompt=enhanced_prompt,
             messages=messages,
             tools=tools,
@@ -850,6 +900,9 @@ async def run_agentic_turn(
             suite_registry=suite_registry,
             mcp_suites=mcp_suites if mcp_suites else None,
         )
+        if model:
+            agentic_kwargs["model"] = model
+        result = await agentic_turn(**agentic_kwargs)
     finally:
         await executor.disconnect_mcp_servers()
 
