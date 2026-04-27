@@ -3311,21 +3311,32 @@ def main():
     # Check both CLI flag and environment variable for debug mode
     debug_mode = args.debug or os.getenv("MAIA_DEBUG", "0") == "1"
     log_level = logging.DEBUG if debug_mode else logging.WARNING  # Use WARNING to suppress INFO messages
-    
-    # In non-interactive mode (like in the app), send logs to a file
-    # and only critical errors to stderr.
+
     if not sys.stdout.isatty():
-        logging.basicConfig(level=log_level,
-                            format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-                            filename='maia_desktop.log',
-                            filemode='w')
-        # Also log critical errors to stderr for the app to see
+        # Non-interactive (desktop app shell-out): keep stderr-only console
+        # output for the parent app, and let session_logging (below) handle
+        # the on-disk record. The legacy `maia_desktop.log` file in CWD is
+        # gone — it was a relative path that broke under Docker and got
+        # superseded by the rotating file in <data_dir>/logs/maia.log.
         stderr_handler = logging.StreamHandler(sys.stderr)
         stderr_handler.setLevel(logging.ERROR)
+        stderr_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s")
+        )
         logging.getLogger().addHandler(stderr_handler)
+        logging.getLogger().setLevel(log_level)
     else:
         # Standard terminal logging
         logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+
+    # Always-on session logging: rotates daily, prunes >30 days, tees
+    # stdout/stderr to <data_dir>/logs/sessions/today.log.
+    try:
+        from promaia.utils.session_logging import setup_session_logging
+        setup_session_logging()
+    except Exception:
+        # Logging is best-effort — never block the CLI on a failure here.
+        pass
     
     # Suppress noisy HTTP request logging unless in debug mode
     if not debug_mode:
