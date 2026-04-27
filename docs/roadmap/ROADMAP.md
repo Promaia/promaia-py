@@ -8,6 +8,16 @@ work with it.
 
 ## Active
 
+### Agent permissions — unified external-tools picker
+
+Collapse the agent-edit menu's separate "MCP Tools" and "Channel
+Permissions" entries into one "External Tools" picker with two
+visible sections: built-in external tools (notion, gmail, calendar,
+sheets, slack, discord) and user-added MCP servers. Each ticked
+tool drills into its own sub-flow. Underlying gates are unchanged.
+
+See [`agent-permissions-unified-picker.md`](agent-permissions-unified-picker.md).
+
 ### Agent permissions — read/write split for internal sources (SQL & friends)
 
 Gate writes separately from reads. Today `SourcePermission.WRITE` is
