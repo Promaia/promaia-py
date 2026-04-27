@@ -1396,3 +1396,115 @@ async def select_mcp_tool_allowlist(
         if enabled:
             out.setdefault(srv, []).append(tool)
     return out
+
+
+# ============================================================================
+# Channel groups picker (Gap C — DM/channel + wildcards)
+# ============================================================================
+
+
+def _prompt_group_for_side(
+    console: "Console",
+    side_label: str,
+    current_groups: Optional[Dict[str, List[str]]],
+) -> Optional[Dict[str, List[str]]]:
+    """Walk the user through configuring one side (read or write) of the
+    channel groups. Returns None if the user picks "no restriction" (which
+    the caller maps to leaving the field as None / legacy-allow), or a
+    dict with "dm" / "channel" buckets.
+
+    Each bucket is either ``["*"]`` (any channel of that type) or a list
+    of specific channel IDs the user types in. Empty bucket means
+    "deny everything in this bucket".
+    """
+    cur = current_groups or {}
+    cur_dm = cur.get("dm", [])
+    cur_ch = cur.get("channel", [])
+
+    def _show(label, val):
+        if val == ["*"]:
+            return f"[green]any {label}[/green]"
+        if not val:
+            return f"[red]none[/red]"
+        return f"[cyan]{', '.join(val[:3])}{'…' if len(val) > 3 else ''}[/cyan]"
+
+    console.print(f"\n[bold]Channel permissions — {side_label}[/bold]")
+    console.print(f"  Current DMs:      {_show('DM', cur_dm)}")
+    console.print(f"  Current channels: {_show('channel', cur_ch)}")
+
+    console.print(
+        "\n[dim]Choose what the agent can {} from. Enter '*' for any of "
+        "that type, a comma-separated list of channel IDs (e.g. "
+        "C0123, D0456), or press Enter to deny that bucket entirely.[/dim]".format(
+            "read" if side_label == "READ" else "post to"
+        )
+    )
+
+    def _parse(raw: str, default: List[str]) -> List[str]:
+        raw = raw.strip()
+        if not raw:
+            # Pressed enter without input — treat as "deny" (empty list).
+            return []
+        if raw == "*":
+            return ["*"]
+        return [s.strip() for s in raw.split(",") if s.strip()]
+
+    dm_in = input(f"  DMs (current={cur_dm or '[]'}, blank=deny, '*'=any): ").strip()
+    new_dm = _parse(dm_in, cur_dm)
+    ch_in = input(f"  Channels (current={cur_ch or '[]'}, blank=deny, '*'=any): ").strip()
+    new_ch = _parse(ch_in, cur_ch)
+
+    # If both buckets empty, ask whether they meant "no restriction" (None)
+    # or really wanted to deny everything.
+    if not new_dm and not new_ch:
+        confirm = input(
+            "  Both buckets are empty — that means deny everything. Did you "
+            "mean to remove all channel restrictions instead? [y/N] "
+        ).strip().lower()
+        if confirm == "y":
+            return None  # caller maps this to legacy-allow
+
+    return {"dm": new_dm, "channel": new_ch}
+
+
+async def select_channel_groups(
+    current_input: Optional[Dict[str, List[str]]] = None,
+    current_output: Optional[Dict[str, List[str]]] = None,
+) -> Tuple[Optional[Dict[str, List[str]]], Optional[Dict[str, List[str]]]]:
+    """Picker for ``allowed_channel_groups`` (read) and
+    ``allowed_output_channel_groups`` (write).
+
+    Two-step prompt:
+      1. Configure the READ side (input).
+      2. Ask whether the WRITE side mirrors READ or should be different.
+
+    Returns a tuple ``(input_groups, output_groups)``. Either may be None
+    (= legacy-allow / inherit from input).
+    """
+    console = Console()
+
+    # Step 1: read side
+    console.print(
+        "\n[bold cyan]Configure channel permissions[/bold cyan]\n"
+        "[dim]These split into two groups: 'dm' (Slack DMs, Discord direct "
+        "messages) and 'channel' (everything else). Each can be a wildcard "
+        "or a specific list.[/dim]"
+    )
+    new_input = _prompt_group_for_side(console, "READ", current_input)
+
+    # Step 2: write side — offer "same as read" shortcut
+    console.print()
+    console.print("[bold]WRITE side (where the agent can post)[/bold]")
+    console.print("  1. Same as read (recommended)")
+    console.print("  2. More restrictive than read (configure separately)")
+    console.print("  3. No write restrictions (inherit from input gate)")
+    choice = input("Select (1-3): ").strip() or "1"
+
+    if choice == "1":
+        new_output = new_input
+    elif choice == "3":
+        new_output = None
+    else:
+        new_output = _prompt_group_for_side(console, "WRITE", current_output)
+
+    return new_input, new_output

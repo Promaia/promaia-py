@@ -1919,12 +1919,13 @@ async def handle_agent_edit(args):
     console.print("  6. Description")
     console.print("  7. All fields (full edit)")
     console.print("  8. Calendar Settings")
+    console.print("  9. Channel Permissions (Slack/Discord read & write)")
     console.print("  0. Cancel")
     console.print()
 
     session = PromptSession()
     try:
-        choice = await session.prompt_async("Select option (0-8): ")
+        choice = await session.prompt_async("Select option (0-9): ")
         choice = choice.strip()
     except (EOFError, KeyboardInterrupt):
         console.print("\n❌ Cancelled", style="red")
@@ -2084,6 +2085,27 @@ async def handle_agent_edit(args):
                 console.print(f"✓ Updated description", style="dim")
         except (EOFError, KeyboardInterrupt):
             pass
+
+    if choice == "9":
+        console.print("\n💬 Channel Permissions", style="bold cyan")
+        from promaia.cli.agent_creation_selector import select_channel_groups
+        try:
+            new_in, new_out = await select_channel_groups(
+                current_input=getattr(agent, "allowed_channel_groups", None),
+                current_output=getattr(agent, "allowed_output_channel_groups", None),
+            )
+            agent.allowed_channel_groups = new_in
+            agent.allowed_output_channel_groups = new_out
+            # If user picked groups, also clear the legacy flat list so
+            # the resolution order doesn't surprise them by overriding.
+            agent.allowed_channel_ids = None
+            agent.allowed_output_channel_ids = None
+            console.print(
+                f"✓ Updated channel permissions (read={new_in}, write={new_out})",
+                style="dim",
+            )
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n❌ Cancelled channel permissions edit", style="red")
 
     if choice == "8":
         console.print("\n📅 Calendar Settings", style="bold cyan")
