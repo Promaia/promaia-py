@@ -8,7 +8,30 @@ work with it.
 
 ## Active
 
-_(no active workstreams — granular agent permissions shipped to the koii-prod test surface 2026-04-26; main → Glacier merge pending separate sign-off)_
+### Agent permissions — read/write split for internal sources (SQL & friends)
+
+Gate writes separately from reads. Today `SourcePermission.WRITE` is
+defined but unenforced; any source the agent can read it can also
+modify. Adds an explicit per-source read-only / read+write toggle.
+
+See [`agent-permissions-sql-rw-split.md`](agent-permissions-sql-rw-split.md).
+
+### Agent permissions — Notion page-level scope
+
+Per-page allowlist within a Notion database. Today scoping ends at
+the database level; adds an `allowed_pages` list per source so an
+agent can be restricted to specific Notion pages. UX mirrors
+`maia setup notion`.
+
+See [`agent-permissions-notion-page-scope.md`](agent-permissions-notion-page-scope.md).
+
+## Recently shipped
+
+- Granular agent permissions (per-tool MCP, channel groups, column
+  redaction, allowed_tables, is_default uniqueness, CLI pickers,
+  chat-side schema). Shipped to koii-prod 2026-04-26; main → Glacier
+  merge pending separate sign-off. See
+  [`Archive/2026-04-26-agent-permissions.md`](Archive/2026-04-26-agent-permissions.md).
 
 ## Future
 
