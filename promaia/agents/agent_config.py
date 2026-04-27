@@ -320,6 +320,31 @@ class AgentConfig:
                 return True
         return False
 
+    def can_write_source(self, source_name: str) -> bool:
+        """Check if agent can WRITE to this source (modify pages, append blocks, etc).
+
+        Distinct from can_query_source — read access does NOT imply write
+        access. Default is **deny**: an agent must have an explicit
+        SourceAccess entry whose permissions include
+        SourcePermission.WRITE before any agent-elective write call site
+        will go through.
+
+        Bypass: is_default_agent=True (currently maia) skips this gate
+        the same way it skips MCP/channel gates. Caller should check
+        that BEFORE calling this method if it wants the bypass to apply.
+
+        Today the gate is consulted by the three notion_* write tools
+        in agentic_turn (notion_create_page, notion_update_page,
+        notion_append_blocks). MCP-mediated writes are gated separately
+        by mcp_tool_allowlist.
+        """
+        if not self.source_access:
+            return False  # Deny-by-default: no source_access → no writes
+        for access in self.source_access:
+            if access.source_name == source_name:
+                return SourcePermission.WRITE in access.permissions
+        return False
+
     def get_source_access(self, source_name: str) -> Optional['SourceAccess']:
         """Return the SourceAccess record for *source_name*, or None."""
         if not self.source_access:

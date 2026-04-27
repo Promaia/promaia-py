@@ -519,6 +519,66 @@ def test_cache_diff_no_old_marks_all_added():
 
 
 # ---------------------------------------------------------------------------
+# can_write_source — read/write split for internal sources
+# ---------------------------------------------------------------------------
+
+
+def test_can_write_source_denies_when_no_source_access():
+    """Deny-by-default: agent with no source_access can't write anywhere."""
+    from promaia.agents.agent_config import AgentConfig
+    cfg = AgentConfig(name="t", workspace="koii", databases=["x"], prompt_file="", mcp_tools=[])
+    assert cfg.can_write_source("x") is False
+    assert cfg.can_write_source("nonexistent") is False
+
+
+def test_can_write_source_denies_when_query_only():
+    """Read access (QUERY) does NOT imply write access."""
+    from promaia.agents.agent_config import AgentConfig, SourceAccess, SourcePermission
+    cfg = AgentConfig(
+        name="t", workspace="koii", databases=["journal"], prompt_file="", mcp_tools=[],
+        source_access=[
+            SourceAccess(
+                source_name="journal", initial_days=None,
+                permissions=[SourcePermission.QUERY],
+            )
+        ],
+    )
+    assert cfg.can_write_source("journal") is False
+
+
+def test_can_write_source_allows_when_write_granted():
+    from promaia.agents.agent_config import AgentConfig, SourceAccess, SourcePermission
+    cfg = AgentConfig(
+        name="t", workspace="koii", databases=["journal", "gmail"], prompt_file="", mcp_tools=[],
+        source_access=[
+            SourceAccess(
+                source_name="journal", initial_days=None,
+                permissions=[SourcePermission.QUERY, SourcePermission.WRITE],
+            )
+        ],
+    )
+    assert cfg.can_write_source("journal") is True
+    # Other sources still denied
+    assert cfg.can_write_source("gmail") is False
+
+
+def test_can_write_source_other_source_denied():
+    """An entry for source A doesn't grant writes to source B."""
+    from promaia.agents.agent_config import AgentConfig, SourceAccess, SourcePermission
+    cfg = AgentConfig(
+        name="t", workspace="koii", databases=["a", "b"], prompt_file="", mcp_tools=[],
+        source_access=[
+            SourceAccess(
+                source_name="a", initial_days=None,
+                permissions=[SourcePermission.WRITE],
+            )
+        ],
+    )
+    assert cfg.can_write_source("a") is True
+    assert cfg.can_write_source("b") is False
+
+
+# ---------------------------------------------------------------------------
 # Manual runner (so this works without pytest, since the project has no
 # configured test runner today)
 # ---------------------------------------------------------------------------

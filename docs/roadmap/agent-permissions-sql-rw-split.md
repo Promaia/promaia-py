@@ -24,8 +24,9 @@ choose to call them. The TRUE agent-elective writes are:
 `SourcePermission.WRITE` is already defined in `agent_config.py:32`.
 What's missing is the convention + helpers:
 
-- [ ] `AgentConfig.can_write_source(source_name) -> bool` returning True iff the agent has a `SourceAccess` entry for that source AND the entry's `permissions` list contains `SourcePermission.WRITE`. Default false (deny).
-- [ ] Document the deny-by-default shift in `agent_config.py` docstring: agents with no `source_access` entry for a source can READ if `databases` lists it (legacy), but cannot WRITE unless explicitly granted.
+- [x] `AgentConfig.can_write_source(source_name) -> bool` — added 2026-04-26. Returns True iff a `SourceAccess` entry for the source exists AND its `permissions` list contains `SourcePermission.WRITE`. Default false (deny).
+- [x] Docstring documents the deny-by-default shift.
+- [x] 4 new tests (no source_access / query-only / write granted / other-source isolation). 35/35 total pass.
 
 ## Phase 2 — Wire enforcement
 
