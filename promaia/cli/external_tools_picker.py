@@ -88,7 +88,11 @@ async def select_external_tools(
     Phase 2c plugs in real fetchers; default is the stub.
     """
     if fetch_children is None:
-        fetch_children = _stub_fetch
+        try:
+            from promaia.cli.external_tools_picker_fetchers import make_fetch_children
+            fetch_children = make_fetch_children(workspace, agent)
+        except Exception:
+            fetch_children = _stub_fetch
 
     nodes = build_initial_tree(agent, mcp_server_names=mcp_server_names or [])
     if not nodes:
