@@ -96,7 +96,7 @@ Notes on the matrix:
 A canonical place that maps each built-in external tool name to its
 gates, label, and "shape" (single row vs sub-list).
 
-- [ ] Add `promaia/cli/builtin_tools_registry.py` with one entry per built-in:
+- [x] Added `promaia/cli/builtin_tools_registry.py` with one entry per built-in:
   ```python
   BUILTIN_TOOLS = [
       # tool_id        label              shape          gates
@@ -108,8 +108,8 @@ gates, label, and "shape" (single row vs sub-list).
       ("discord",       "Discord",         "channel_sublist", ["databases", "allowed_channel_groups", "allowed_output_channel_groups", "messaging_enabled"]),
   ]
   ```
-- [ ] Helpers: `is_builtin_tool(name)`, `get_tool_shape(name)`, `get_tool_label(name)`
-- [ ] Tests: registry round-trip, every entry has all required fields, no duplicates
+- [x] Helpers: `is_builtin_tool(name)`, `get_tool_shape(name)`, `get_tool_label(name)`, `get_builtin_tool(name)`
+- [x] Tests: registry round-trip, expected-set, helpers, invalid-shape rejection (40/40 passing total)
 
 ## Phase 2 — Inline tree picker (the screen)
 

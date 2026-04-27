@@ -579,6 +579,63 @@ def test_can_write_source_other_source_denied():
 
 
 # ---------------------------------------------------------------------------
+# Built-in tools registry (unified-picker Phase 1)
+# ---------------------------------------------------------------------------
+
+
+def test_builtin_tools_registry_well_formed():
+    """Every entry has the expected fields and a recognised shape."""
+    from promaia.cli.builtin_tools_registry import BUILTIN_TOOLS, PICKER_SHAPES
+    assert len(BUILTIN_TOOLS) > 0
+    seen_ids = set()
+    for t in BUILTIN_TOOLS:
+        assert t.id, "missing id"
+        assert t.label, f"missing label for {t.id}"
+        assert t.shape in PICKER_SHAPES, f"bad shape {t.shape} for {t.id}"
+        assert t.gates, f"empty gates for {t.id}"
+        assert t.description, f"missing description for {t.id}"
+        assert t.id not in seen_ids, f"duplicate id {t.id}"
+        seen_ids.add(t.id)
+
+
+def test_builtin_tools_includes_expected_set():
+    """Pilot must have notion, gmail, calendar, sheets, slack, discord."""
+    from promaia.cli.builtin_tools_registry import BUILTIN_TOOLS
+    ids = {t.id for t in BUILTIN_TOOLS}
+    expected = {"notion", "gmail", "calendar", "google_sheets", "slack", "discord"}
+    assert expected.issubset(ids), f"missing built-in tools: {expected - ids}"
+
+
+def test_is_builtin_tool_recognises_builtins_and_rejects_others():
+    from promaia.cli.builtin_tools_registry import is_builtin_tool
+    assert is_builtin_tool("notion") is True
+    assert is_builtin_tool("slack") is True
+    assert is_builtin_tool("po-manager") is False  # MCP server
+    assert is_builtin_tool("nonexistent") is False
+    assert is_builtin_tool("") is False
+
+
+def test_get_tool_shape_and_label():
+    from promaia.cli.builtin_tools_registry import get_tool_shape, get_tool_label
+    assert get_tool_shape("gmail") == "single_row"
+    assert get_tool_shape("notion") == "sublist"
+    assert get_tool_shape("slack") == "channel_sublist"
+    assert get_tool_label("google_sheets") == "Google Sheets"
+    assert get_tool_label("notion") == "Notion"
+
+
+def test_invalid_shape_raises():
+    """Constructor rejects unknown shapes."""
+    from promaia.cli.builtin_tools_registry import BuiltinTool
+    try:
+        BuiltinTool(id="bad", label="Bad", shape="bogus", gates=("x",), description="d")
+    except ValueError as e:
+        assert "Unknown picker shape" in str(e)
+    else:
+        raise AssertionError("expected ValueError for bogus shape")
+
+
+# ---------------------------------------------------------------------------
 # Manual runner (so this works without pytest, since the project has no
 # configured test runner today)
 # ---------------------------------------------------------------------------
