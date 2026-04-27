@@ -636,6 +636,102 @@ def test_invalid_shape_raises():
 
 
 # ---------------------------------------------------------------------------
+# Picker tree state (unified-picker Phase 2a)
+# ---------------------------------------------------------------------------
+
+
+def test_initial_tree_includes_all_builtins_then_mcp_servers():
+    from promaia.agents.agent_config import AgentConfig
+    from promaia.cli.external_tools_picker_state import build_initial_tree
+    from promaia.cli.builtin_tools_registry import BUILTIN_TOOLS
+
+    agent = AgentConfig(name="t", workspace="koii", databases=[], prompt_file="", mcp_tools=[])
+    nodes = build_initial_tree(agent, mcp_server_names=["po-manager", "mrp"])
+    expected_ids = [t.id for t in BUILTIN_TOOLS] + ["po-manager", "mrp"]
+    assert [n.id for n in nodes] == expected_ids
+
+
+def test_builtin_node_enabled_when_tool_in_databases():
+    from promaia.agents.agent_config import AgentConfig
+    from promaia.cli.external_tools_picker_state import build_initial_tree
+
+    agent = AgentConfig(
+        name="t", workspace="koii",
+        databases=["gmail", "calendar"],
+        prompt_file="", mcp_tools=[],
+    )
+    nodes = build_initial_tree(agent)
+    by_id = {n.id: n for n in nodes}
+    assert by_id["gmail"].enabled is True
+    assert by_id["calendar"].enabled is True
+    assert by_id["slack"].enabled is False  # not in databases
+
+
+def test_mcp_server_node_enabled_when_in_mcp_tools():
+    from promaia.agents.agent_config import AgentConfig
+    from promaia.cli.external_tools_picker_state import build_initial_tree
+
+    agent = AgentConfig(
+        name="t", workspace="koii",
+        databases=[],
+        prompt_file="",
+        mcp_tools=["po-manager"],
+    )
+    nodes = build_initial_tree(agent, mcp_server_names=["po-manager"])
+    by_id = {n.id: n for n in nodes}
+    assert by_id["po-manager"].enabled is True
+    assert by_id["po-manager"].shape == "mcp_server"
+    assert by_id["po-manager"].has_w_column is False  # MCP per-tool is allow/deny only
+
+
+def test_single_row_rw_reflects_source_access():
+    from promaia.agents.agent_config import AgentConfig, SourceAccess, SourcePermission
+    from promaia.cli.external_tools_picker_state import build_initial_tree
+
+    agent = AgentConfig(
+        name="t", workspace="koii",
+        databases=["gmail"],
+        prompt_file="",
+        mcp_tools=[],
+        source_access=[
+            SourceAccess(
+                source_name="gmail", initial_days=None,
+                permissions=[SourcePermission.QUERY, SourcePermission.WRITE],
+            )
+        ],
+    )
+    nodes = build_initial_tree(agent)
+    by_id = {n.id: n for n in nodes}
+    assert by_id["gmail"].r_state is True
+    assert by_id["gmail"].w_state is True
+
+
+def test_collect_picker_result_shape():
+    from promaia.cli.external_tools_picker_state import (
+        ToolNode, ChildNode, collect_picker_result,
+    )
+
+    nodes = [
+        ToolNode(id="gmail", label="Gmail", shape="single_row", description="",
+                 enabled=True, r_state=True, w_state=False),
+        ToolNode(
+            id="po-manager", label="po-manager", shape="mcp_server",
+            description="", enabled=True, has_w_column=False,
+            children=[
+                ChildNode(id="list_vendors", label="list_vendors",
+                          parent_id="po-manager", enabled=True, has_w_column=False),
+            ],
+        ),
+    ]
+    result = collect_picker_result(nodes)
+    assert result["gmail"]["enabled"] is True
+    assert result["gmail"]["r"] is True
+    assert result["gmail"]["w"] is False
+    assert result["po-manager"]["children"][0]["id"] == "list_vendors"
+    assert result["po-manager"]["children"][0]["enabled"] is True
+
+
+# ---------------------------------------------------------------------------
 # Manual runner (so this works without pytest, since the project has no
 # configured test runner today)
 # ---------------------------------------------------------------------------
