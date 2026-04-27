@@ -350,6 +350,87 @@ def test_vector_path_drops_disallowed_tables_per_source():
 
 
 # ---------------------------------------------------------------------------
+# Channel groups (Gap C — DM/channel buckets + wildcards)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_channel_dm_vs_channel():
+    from promaia.agents.agent_config import AgentConfig
+    assert AgentConfig._classify_channel("D12345") == "dm"
+    assert AgentConfig._classify_channel("C67890") == "channel"
+    assert AgentConfig._classify_channel("") == "channel"
+
+
+def test_can_access_channel_groups_wildcard_dm():
+    from promaia.agents.agent_config import AgentConfig
+    cfg = AgentConfig(
+        name="t", workspace="koii", databases=["x"], prompt_file="", mcp_tools=[],
+        allowed_channel_groups={"dm": ["*"]},
+    )
+    assert cfg.can_access_channel("D1") is True
+    assert cfg.can_access_channel("D2") is True
+    # Channel bucket not granted → deny
+    assert cfg.can_access_channel("C1") is False
+
+
+def test_can_access_channel_groups_specific_channel():
+    from promaia.agents.agent_config import AgentConfig
+    cfg = AgentConfig(
+        name="t", workspace="koii", databases=["x"], prompt_file="", mcp_tools=[],
+        allowed_channel_groups={"dm": ["*"], "channel": ["C_eng"]},
+    )
+    assert cfg.can_access_channel("D1") is True
+    assert cfg.can_access_channel("C_eng") is True
+    assert cfg.can_access_channel("C_other") is False
+
+
+def test_can_access_channel_flat_list_wins_over_groups():
+    """Legacy flat list is authoritative when set, even if groups would say otherwise."""
+    from promaia.agents.agent_config import AgentConfig
+    cfg = AgentConfig(
+        name="t", workspace="koii", databases=["x"], prompt_file="", mcp_tools=[],
+        allowed_channel_ids=["C_specific"],
+        allowed_channel_groups={"dm": ["*"]},  # would say D1=ok, but flat list wins
+    )
+    assert cfg.can_access_channel("D1") is False  # not in flat list
+    assert cfg.can_access_channel("C_specific") is True
+
+
+def test_can_post_to_channel_falls_back_to_input_gate():
+    from promaia.agents.agent_config import AgentConfig
+    cfg = AgentConfig(
+        name="t", workspace="koii", databases=["x"], prompt_file="", mcp_tools=[],
+        allowed_channel_groups={"dm": ["*"]},  # input: any DM
+        # no output-side config → should fall through to input
+    )
+    assert cfg.can_post_to_channel("D1") is True   # inherited from input
+    assert cfg.can_post_to_channel("C1") is False  # input denies it too
+
+
+def test_can_post_to_channel_separate_output_group():
+    from promaia.agents.agent_config import AgentConfig
+    cfg = AgentConfig(
+        name="t", workspace="koii", databases=["x"], prompt_file="", mcp_tools=[],
+        allowed_channel_groups={"dm": ["*"], "channel": ["*"]},  # input: anywhere
+        allowed_output_channel_groups={"channel": ["C_announce"]},  # output: only one
+    )
+    assert cfg.can_access_channel("D1") is True       # input: any DM
+    assert cfg.can_post_to_channel("D1") is False     # output: not in output groups
+    assert cfg.can_post_to_channel("C_announce") is True
+    assert cfg.can_post_to_channel("C_other") is False
+
+
+def test_legacy_no_config_allows_everything():
+    from promaia.agents.agent_config import AgentConfig
+    cfg = AgentConfig(
+        name="t", workspace="koii", databases=["x"], prompt_file="", mcp_tools=[],
+    )
+    assert cfg.can_access_channel("D1") is True
+    assert cfg.can_access_channel("C1") is True
+    assert cfg.can_post_to_channel("anything") is True
+
+
+# ---------------------------------------------------------------------------
 # is_default_agent uniqueness (Q7)
 # ---------------------------------------------------------------------------
 

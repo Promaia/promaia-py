@@ -119,6 +119,21 @@ class AgentConfig:
     # back to, messaging tools refuse the publish step.
     allowed_output_channel_ids: Optional[List[str]] = None
 
+    # Group-typed channel allowlists. Lets an agent express "any DM" vs
+    # "a specific public channel" without listing every DM ID. Keys are
+    # channel-type buckets ("dm" or "channel"), values are lists of
+    # channel IDs OR ["*"] for "any channel of this type".
+    #
+    # Resolution order in can_access_channel():
+    #   1. allowed_channel_ids (legacy flat list) — checked first if set,
+    #      so existing agents keep working unchanged.
+    #   2. allowed_channel_groups — checked if flat list is None.
+    #   3. Both None → allow (legacy default).
+    #
+    # The same applies on the output side via allowed_output_channel_groups.
+    allowed_channel_groups: Optional[Dict[str, List[str]]] = None
+    allowed_output_channel_groups: Optional[Dict[str, List[str]]] = None
+
     # Per-tool MCP allow list. Keys are MCP server names (must also appear in
     # `mcp_tools`); values are the specific tool names the agent may call on
     # that server. None for a server entry = all tools allowed (backwards
@@ -214,15 +229,82 @@ class AgentConfig:
         else:
             return []  # Legacy mode: no write permissions
 
+    @staticmethod
+    def _classify_channel(channel_id: str) -> str:
+        """Classify a channel ID into a coarse type bucket.
+
+        Slack convention used today: 'D' prefix = DM, anything else =
+        channel. Discord IDs are numeric strings — treat as 'channel'
+        unless we get richer metadata from the platform later.
+
+        Returns 'dm' or 'channel'.
+        """
+        if not channel_id:
+            return "channel"
+        if channel_id.startswith("D"):
+            return "dm"
+        return "channel"
+
+    @staticmethod
+    def _channel_in_groups(
+        channel_id: str,
+        groups: Optional[Dict[str, List[str]]],
+    ) -> Optional[bool]:
+        """Resolve a channel_id against a group allowlist.
+
+        Returns True/False if the groups dict is set and we can decide,
+        or None if groups is unset (caller should fall through to other
+        gates).
+        """
+        if groups is None:
+            return None
+        bucket = AgentConfig._classify_channel(channel_id)
+        entry = groups.get(bucket)
+        if entry is None:
+            # Bucket not granted at all → deny
+            return False
+        if "*" in entry:
+            return True
+        return channel_id in entry
+
     def can_access_channel(self, channel_id: str) -> bool:
         """Check if agent is allowed to operate in a given channel.
 
-        Returns True when the allowlist is None (legacy/unrestricted) or
-        when *channel_id* is explicitly listed.
+        Resolution order:
+          1. allowed_channel_ids (legacy flat list) — if set, that's
+             authoritative. Keeps existing agents working.
+          2. allowed_channel_groups — if set, classify the channel and
+             check the matching bucket. Wildcard "*" = any of that type.
+          3. Both None → allow (legacy default).
         """
-        if self.allowed_channel_ids is None:
-            return True
-        return channel_id in self.allowed_channel_ids
+        if self.allowed_channel_ids is not None:
+            return channel_id in self.allowed_channel_ids
+        group_decision = self._channel_in_groups(
+            channel_id, self.allowed_channel_groups
+        )
+        if group_decision is not None:
+            return group_decision
+        return True
+
+    def can_post_to_channel(self, channel_id: str) -> bool:
+        """Output-side check used by messaging tools before publishing.
+
+        Layered the same way as can_access_channel:
+          1. allowed_output_channel_ids (flat list) wins if set.
+          2. allowed_output_channel_groups checked if 1 is None.
+          3. Falls back to read-side gate (can_access_channel) so
+             agents that haven't separately configured output keep
+             the legacy "if you can read it you can write to it"
+             semantic.
+        """
+        if self.allowed_output_channel_ids is not None:
+            return channel_id in self.allowed_output_channel_ids
+        group_decision = self._channel_in_groups(
+            channel_id, self.allowed_output_channel_groups
+        )
+        if group_decision is not None:
+            return group_decision
+        return self.can_access_channel(channel_id)
 
     def can_query_source(self, source_name: str, days: int) -> bool:
         """Check if agent can query this source with given time range"""

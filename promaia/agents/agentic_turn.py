@@ -7241,18 +7241,13 @@ class ToolExecutor:
     def _check_output_channel_allowed(self, channel_id: str) -> Optional[str]:
         """Output-side channel gate.
 
-        Returns None if the agent is allowed to post to *channel_id*, else
-        an error string the caller surfaces back to the agent in place of
-        the publish.
+        Returns None if the agent is allowed to post to *channel_id*,
+        else an error string the caller surfaces back to the agent.
 
-        Decision order:
-        1. is_default_agent=True → bypass.
-        2. allowed_output_channel_ids set → must contain channel_id.
-        3. allowed_output_channel_ids is None → fall back to the input
-           gate (allowed_channel_ids). This keeps existing single-list
-           agents working: if you can read it, you can write to it.
-        4. Both None → allow (legacy default; the deny-default migration
-           tightens this on edit, not implicitly).
+        Delegates to AgentConfig.can_post_to_channel which handles the
+        full resolution order (output-flat-list → output-groups →
+        input-flat-list → input-groups → legacy-allow). is_default_agent
+        bypasses the gate entirely.
         """
         agent = self.agent
         if agent is None:
@@ -7261,24 +7256,13 @@ class ToolExecutor:
         if getattr(agent, "is_default_agent", False):
             return None
 
-        out = getattr(agent, "allowed_output_channel_ids", None)
-        if out is not None:
-            if channel_id in out:
-                return None
-            return (
-                f"Permission denied: agent {getattr(agent, 'name', '?')!r} is not "
-                f"granted output access to channel {channel_id!r}. Configure "
-                f"`allowed_output_channel_ids` via `maia agents edit`."
-            )
-
-        # Inherit from input gate
-        inp = getattr(agent, "allowed_channel_ids", None)
-        if inp is not None and channel_id not in inp:
+        if hasattr(agent, "can_post_to_channel") and not agent.can_post_to_channel(channel_id):
             return (
                 f"Permission denied: agent {getattr(agent, 'name', '?')!r} is "
-                f"restricted to specific input channels and {channel_id!r} is "
-                f"not among them. Either add it to `allowed_channel_ids` or "
-                f"set a separate `allowed_output_channel_ids`."
+                f"not allowed to post to channel {channel_id!r}. Configure "
+                f"`allowed_output_channel_ids` (flat list) or "
+                f"`allowed_output_channel_groups` (DM / channel buckets) "
+                f"via `maia agents edit`."
             )
         return None
 
