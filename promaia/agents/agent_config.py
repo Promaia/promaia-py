@@ -247,6 +247,43 @@ class AgentConfig:
                 return access
         return None
 
+    def get_allowed_tables(self, source_name: str) -> Optional[List[str]]:
+        """Return the agent's allowed_tables list for *source_name*.
+
+        Returns None when no SourceAccess entry exists, or when the
+        entry leaves allowed_tables unset (= no per-table restriction).
+        Callers should treat None as "all tables allowed".
+        """
+        access = self.get_source_access(source_name)
+        if access is None:
+            return None
+        return access.allowed_tables
+
+    def filter_pages_by_table(
+        self,
+        source_name: str,
+        pages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Drop pages whose ``table`` field isn't in allowed_tables.
+
+        Pages without a ``table`` field are passed through unchanged
+        (single-table sources like Notion don't need this gate). When
+        allowed_tables is None for the source, returns pages unchanged.
+        """
+        allowed = self.get_allowed_tables(source_name)
+        if allowed is None:
+            return pages
+        allowed_set = set(allowed)
+        out = []
+        for p in pages:
+            if not isinstance(p, dict):
+                out.append(p)
+                continue
+            table = p.get("table")
+            if table is None or table in allowed_set:
+                out.append(p)
+        return out
+
     def filter_page_columns(
         self,
         source_name: str,

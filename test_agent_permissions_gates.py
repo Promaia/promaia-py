@@ -217,6 +217,68 @@ def test_filter_page_columns_other_source_unchanged():
 
 
 # ---------------------------------------------------------------------------
+# Per-table allowlist (Gap A — allowed_tables enforcement)
+# ---------------------------------------------------------------------------
+
+
+def test_filter_pages_by_table_no_access_unchanged():
+    from promaia.agents.agent_config import AgentConfig
+    cfg = AgentConfig(name="t", workspace="koii", databases=["x"], prompt_file="", mcp_tools=[])
+    pages = [{"table": "a", "id": 1}, {"table": "b", "id": 2}]
+    assert cfg.filter_pages_by_table("x", pages) == pages
+
+
+def test_filter_pages_by_table_drops_disallowed():
+    from promaia.agents.agent_config import AgentConfig, SourceAccess, SourcePermission
+    cfg = AgentConfig(
+        name="t", workspace="koii", databases=["x"], prompt_file="", mcp_tools=[],
+        source_access=[
+            SourceAccess(
+                source_name="x", initial_days=None,
+                permissions=[SourcePermission.QUERY],
+                allowed_tables=["a"],
+            )
+        ],
+    )
+    pages = [{"table": "a", "id": 1}, {"table": "b", "id": 2}, {"table": "a", "id": 3}]
+    out = cfg.filter_pages_by_table("x", pages)
+    assert out == [{"table": "a", "id": 1}, {"table": "a", "id": 3}]
+
+
+def test_filter_pages_by_table_passes_through_when_no_table_field():
+    """Single-table sources (Notion-style) don't have a 'table' field on pages
+    and should pass through even when allowed_tables is set."""
+    from promaia.agents.agent_config import AgentConfig, SourceAccess, SourcePermission
+    cfg = AgentConfig(
+        name="t", workspace="koii", databases=["x"], prompt_file="", mcp_tools=[],
+        source_access=[
+            SourceAccess(
+                source_name="x", initial_days=None,
+                permissions=[SourcePermission.QUERY],
+                allowed_tables=["whatever"],
+            )
+        ],
+    )
+    pages = [{"id": 1, "title": "p1"}, {"id": 2, "title": "p2"}]  # no "table"
+    assert cfg.filter_pages_by_table("x", pages) == pages
+
+
+def test_get_allowed_tables_returns_none_when_unset():
+    from promaia.agents.agent_config import AgentConfig, SourceAccess, SourcePermission
+    cfg = AgentConfig(
+        name="t", workspace="koii", databases=["x"], prompt_file="", mcp_tools=[],
+        source_access=[
+            SourceAccess(
+                source_name="x", initial_days=None,
+                permissions=[SourcePermission.QUERY],
+            )
+        ],
+    )
+    assert cfg.get_allowed_tables("x") is None
+    assert cfg.get_allowed_tables("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
 # is_default_agent uniqueness (Q7)
 # ---------------------------------------------------------------------------
 

@@ -444,6 +444,22 @@ async def _handle_query_source(args: dict) -> list[TextContent]:
             if pre_count != len(pages):
                 logger.info(f"Channel filter: {pre_count} → {len(pages)} pages")
 
+        # Per-table allowlist via SourceAccess.allowed_tables. No-op when
+        # the agent has no source_access entry or no allowed_tables set,
+        # and a no-op for Notion-style single-table sources where pages
+        # lack a "table" field. Multi-table SQL sources will see only
+        # rows whose table field is in the allowlist.
+        if AGENT_CONFIG and hasattr(AGENT_CONFIG, "filter_pages_by_table"):
+            try:
+                pre_count = len(pages)
+                pages = AGENT_CONFIG.filter_pages_by_table(database, pages)
+                if len(pages) != pre_count:
+                    logger.info(
+                        f"Table allowlist filter: {pre_count} → {len(pages)} pages"
+                    )
+            except Exception as e:
+                logger.warning(f"Table allowlist skipped due to error: {e}")
+
         # Per-column redaction via SourceAccess.allowed_columns. No-op when
         # the agent has no source_access entry, or no allowed_columns set
         # for this source — keeps existing agents working unchanged.
