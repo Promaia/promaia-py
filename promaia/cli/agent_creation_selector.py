@@ -1176,3 +1176,182 @@ async def select_mcp_tools(available_tools: List[str], preselected: Optional[Lis
         return result_tools
     else:
         return []
+
+
+# ============================================================================
+# Per-tool MCP allow list selector (Q5 / Q5b / Q9)
+# ============================================================================
+
+
+async def select_mcp_tool_allowlist(
+    selected_servers: List[str],
+    preselected: Optional[Dict[str, Optional[List[str]]]] = None,
+) -> Optional[Dict[str, Optional[List[str]]]]:
+    """Interactive picker that builds an `mcp_tool_allowlist` dict.
+
+    For each server the agent has access to (already chosen via
+    ``select_mcp_tools``), live-discovers what tools the server
+    currently exposes and presents them as a single flat checkbox
+    list with ``server.tool`` rows. The user ticks the tools the
+    agent should be allowed to call.
+
+    **Q5b — server-offline UX**: if any selected server is unreachable
+    at edit time, this function returns ``None`` after telling the
+    user via stderr/console; the caller should NOT save the agent.
+    The intentional "refuse to save" semantic comes from the Q5b
+    answer.
+
+    Returns:
+        Dict[server, List[tool]] on confirm, ``{}`` on cancel,
+        or ``None`` if discovery failed and the user aborted.
+    """
+    console = Console()
+
+    if not selected_servers:
+        return {}
+
+    preselected = preselected or {}
+
+    # Live discovery — refresh cache for each server.
+    from promaia.agents import mcp_tool_cache
+    from promaia.config.mcp_servers import McpServerManager
+    from promaia.agents.mcp_loader import _find_mcp_servers_json
+
+    config_path = _find_mcp_servers_json()
+    if config_path is None:
+        console.print("[red]No mcp_servers.json found — cannot configure tool allowlist.[/red]")
+        return None
+    manager = McpServerManager(str(config_path))
+
+    rows: List[Tuple[str, str, str]] = []  # (server, tool, description)
+    unreachable: List[str] = []
+    for srv in selected_servers:
+        cfg = manager.servers.get(srv)
+        if cfg is None:
+            unreachable.append(f"{srv} (not in mcp_servers.json)")
+            continue
+        try:
+            cache = await mcp_tool_cache.refresh_from_server(srv, cfg)
+        except Exception as e:
+            unreachable.append(f"{srv} ({e})")
+            continue
+        for tool in cache.tools:
+            rows.append((srv, tool.name, tool.description or ""))
+
+    if unreachable:
+        console.print(
+            "[red]Refusing to save: cannot reach the following MCP servers "
+            "to discover their tools:[/red]"
+        )
+        for u in unreachable:
+            console.print(f"  • {u}")
+        console.print(
+            "[yellow]Either bring the servers online, remove them from this "
+            "agent's mcp_tools, or wait until they recover.[/yellow]"
+        )
+        return None
+
+    if not rows:
+        # All servers reachable but advertise no tools. Save an empty allow
+        # list (the agent can call nothing on these servers). Surface this
+        # to the user so they don't think it silently succeeded.
+        console.print(
+            "[yellow]All selected MCP servers connected but advertised no "
+            "tools. Allow list will be empty for now.[/yellow]"
+        )
+        return {srv: [] for srv in selected_servers}
+
+    # Pre-fill enabled state from preselected dict.
+    def _is_preselected(server: str, tool: str) -> bool:
+        entry = preselected.get(server)
+        if entry is None:
+            # Wholesale-grant marker: all tools allowed
+            return server in preselected
+        return tool in entry
+
+    enabled_states = [_is_preselected(s, t) for s, t, _ in rows]
+    current_focus = 0
+    confirmed = False
+
+    def get_status_display():
+        n_on = sum(enabled_states)
+        n_total = len(rows)
+        return (
+            f"MCP Tool allow list | "
+            f"Selected: {n_on}/{n_total} | "
+            f"↑↓:Navigate SPACE:Toggle ENTER:Confirm ESC:Cancel"
+        )
+
+    def get_entry_display(idx: int) -> str:
+        srv, tool, desc = rows[idx]
+        check = "☑" if enabled_states[idx] else "☐"
+        line = f"{check}  {srv}.{tool}"
+        if desc:
+            short = desc.strip().splitlines()[0]
+            if len(short) > 60:
+                short = short[:57] + "..."
+            line = f"{line}  — {short}"
+        return line
+
+    def create_layout():
+        status = Window(FormattedTextControl(text=get_status_display), height=1)
+        title = Window(
+            FormattedTextControl(text=_styled_header("Per-tool MCP Permissions")),
+            height=1, style="class:title",
+        )
+        entries = []
+        for i in range(len(rows)):
+            entries.append(Window(
+                FormattedTextControl(text=lambda i=i: get_entry_display(i)),
+                height=1,
+                style=f"class:{'selected' if i == current_focus else 'unselected'}",
+            ))
+        return Layout(HSplit([status, title, Window(height=1), *entries]))
+
+    layout = create_layout()
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.Up)
+    def _up(event):
+        nonlocal current_focus
+        if current_focus > 0:
+            current_focus -= 1
+            event.app.layout = create_layout()
+
+    @bindings.add(Keys.Down)
+    def _down(event):
+        nonlocal current_focus
+        if current_focus < len(rows) - 1:
+            current_focus += 1
+            event.app.layout = create_layout()
+
+    @bindings.add(' ')
+    def _toggle(event):
+        enabled_states[current_focus] = not enabled_states[current_focus]
+        event.app.layout = create_layout()
+
+    @bindings.add(Keys.Enter)
+    def _confirm(event):
+        nonlocal confirmed
+        confirmed = True
+        event.app.exit()
+
+    @bindings.add(Keys.Escape)
+    def _cancel(event):
+        event.app.exit()
+
+    app = Application(layout=layout, key_bindings=bindings,
+                      full_screen=False, mouse_support=False)
+    await app.run_async()
+
+    if not confirmed:
+        return {}
+
+    # Group results by server. Always include every selected server in the
+    # output (with an empty list if the user ticked nothing) so the agent's
+    # mcp_tool_allowlist explicitly covers each server they asked for.
+    out: Dict[str, Optional[List[str]]] = {srv: [] for srv in selected_servers}
+    for (srv, tool, _), enabled in zip(rows, enabled_states):
+        if enabled:
+            out.setdefault(srv, []).append(tool)
+    return out

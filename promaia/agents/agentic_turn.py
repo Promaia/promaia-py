@@ -3663,6 +3663,10 @@ class ToolExecutor:
         if not dm_channel:
             return f"Error: could not open DM with {user_info['real_name'] or user_name}"
 
+        denied = self._check_output_channel_allowed(dm_channel)
+        if denied is not None:
+            return denied
+
         try:
             from promaia.agents.conversation_manager import (
                 ConversationManager, ConversationState,
@@ -7197,6 +7201,12 @@ class ToolExecutor:
                     connected = await self._mcp_client.connect_to_server(config)
                     if connected:
                         logger.info(f"MCP server connected: {name}")
+                        # Diff live tools against the user's last-reviewed
+                        # snapshot — never block on this; new/removed/changed
+                        # tools just get logged so the agent owner sees them
+                        # in the session log (Q10 working assumption: yes,
+                        # log at run-start in addition to the Q5c surface).
+                        await self._log_mcp_new_tools_at_connect(name)
                     else:
                         logger.warning(f"MCP server failed to connect: {name}")
                 except Exception as e:
@@ -7228,6 +7238,195 @@ class ToolExecutor:
         logger.info(f"Discovered {len(definitions)} MCP tools from external servers")
         return definitions
 
+    def _check_output_channel_allowed(self, channel_id: str) -> Optional[str]:
+        """Output-side channel gate.
+
+        Returns None if the agent is allowed to post to *channel_id*, else
+        an error string the caller surfaces back to the agent in place of
+        the publish.
+
+        Decision order:
+        1. is_default_agent=True → bypass.
+        2. allowed_output_channel_ids set → must contain channel_id.
+        3. allowed_output_channel_ids is None → fall back to the input
+           gate (allowed_channel_ids). This keeps existing single-list
+           agents working: if you can read it, you can write to it.
+        4. Both None → allow (legacy default; the deny-default migration
+           tightens this on edit, not implicitly).
+        """
+        agent = self.agent
+        if agent is None:
+            return None
+
+        if getattr(agent, "is_default_agent", False):
+            return None
+
+        out = getattr(agent, "allowed_output_channel_ids", None)
+        if out is not None:
+            if channel_id in out:
+                return None
+            return (
+                f"Permission denied: agent {getattr(agent, 'name', '?')!r} is not "
+                f"granted output access to channel {channel_id!r}. Configure "
+                f"`allowed_output_channel_ids` via `maia agents edit`."
+            )
+
+        # Inherit from input gate
+        inp = getattr(agent, "allowed_channel_ids", None)
+        if inp is not None and channel_id not in inp:
+            return (
+                f"Permission denied: agent {getattr(agent, 'name', '?')!r} is "
+                f"restricted to specific input channels and {channel_id!r} is "
+                f"not among them. Either add it to `allowed_channel_ids` or "
+                f"set a separate `allowed_output_channel_ids`."
+            )
+        return None
+
+    async def _log_mcp_new_tools_at_connect(self, server_name: str) -> None:
+        """Diff the freshly-connected server's tool list against the cached
+        last-reviewed snapshot and log any that have appeared/changed.
+
+        Cheap: we already hold an MCP session; one extra tools/list call.
+        Never raises into the connect path — this is a debugging signal,
+        not a permission gate. The actual gate runs at call time in
+        _execute_mcp_tool / _check_mcp_tool_allowed.
+        """
+        try:
+            from promaia.agents.mcp_tool_cache import (
+                CachedTool,
+                ServerCache,
+                load as _load_cache,
+                diff as _diff,
+            )
+            from datetime import datetime, timezone
+
+            protocol = (self._mcp_client.connected_servers or {}).get(server_name)
+            if protocol is None:
+                return
+            live = await protocol.list_tools() or []
+            live_cache = ServerCache(
+                server=server_name,
+                fetched_at=datetime.now(timezone.utc),
+                tools=[CachedTool.from_mcp_tool(t) for t in live],
+            )
+            snap = _load_cache(server_name)
+            if snap is None:
+                # First time we've seen this server — nothing to diff. The
+                # user will get a snapshot the next time they `agents edit`.
+                logger.info(
+                    "MCP server %s: %d tools available (no reviewed snapshot yet)",
+                    server_name,
+                    len(live_cache.tools),
+                )
+                return
+            d = _diff(snap, live_cache)
+            if d["added"]:
+                logger.warning(
+                    "MCP server %s has %d new tool(s) since last review: %s. "
+                    "These will be denied to non-default agents until reviewed via "
+                    "`maia agents edit`.",
+                    server_name,
+                    len(d["added"]),
+                    ", ".join(d["added"]),
+                )
+            if d["removed"]:
+                logger.info(
+                    "MCP server %s lost %d tool(s) since last review: %s",
+                    server_name,
+                    len(d["removed"]),
+                    ", ".join(d["removed"]),
+                )
+            if d["changed"]:
+                logger.info(
+                    "MCP server %s has %d tool(s) with changed input schemas: %s "
+                    "(Q5d schema-drift detection deferred — informational only)",
+                    server_name,
+                    len(d["changed"]),
+                    ", ".join(d["changed"]),
+                )
+        except Exception as e:
+            logger.debug("new-tools diff failed for %s (non-fatal): %s", server_name, e)
+
+    def _check_mcp_tool_allowed(self, server_name: str, tool_name: str) -> Optional[str]:
+        """Per-tool MCP permission gate.
+
+        Returns None if the call should proceed, else an error string
+        (which the caller surfaces back to the agent in place of the
+        tool result, so the agent sees and can react to the denial).
+
+        Decision order:
+        1. is_default_agent=True → bypass (allow-all). Currently maia.
+        2. mcp_tool_allowlist is None → legacy unmigrated agent;
+           allow-all but log a one-time warning.
+        3. server has no entry in allowlist → server is loaded but
+           none of its tools were granted; deny.
+        4. server entry is None → "all tools on this server" (rarely
+           used; lets users opt into a server wholesale).
+        5. server entry is a list → must contain tool_name.
+        Tool also has to be in the cached "last reviewed" snapshot;
+        if not, it's a new tool the user hasn't seen → deny + log.
+        """
+        agent = self.agent
+        if agent is None:
+            return None  # No agent context (e.g. ad-hoc CLI use); skip gate.
+
+        if getattr(agent, "is_default_agent", False):
+            return None
+
+        allowlist = getattr(agent, "mcp_tool_allowlist", None)
+        if allowlist is None:
+            # Unmigrated agent — log once per (server, tool) pair, allow.
+            log_key = f"_mcp_unmigrated_warned_{server_name}_{tool_name}"
+            if not getattr(self, log_key, False):
+                logger.warning(
+                    "Agent %r calls MCP tool %s.%s without mcp_tool_allowlist set "
+                    "— allowing under legacy backwards-compat. Run "
+                    "`maia agents migrate-permissions` to lock this down.",
+                    getattr(agent, "name", "?"),
+                    server_name,
+                    tool_name,
+                )
+                setattr(self, log_key, True)
+            return None
+
+        if server_name not in allowlist:
+            return (
+                f"Permission denied: agent {getattr(agent, 'name', '?')!r} is not "
+                f"granted access to MCP server {server_name!r}. Add it via "
+                f"`maia agents edit`."
+            )
+
+        granted = allowlist[server_name]
+        if granted is not None and tool_name not in granted:
+            # Distinguish "not yet granted" from "new tool since last review".
+            try:
+                from promaia.agents.mcp_tool_cache import load as _load_cache
+
+                snap = _load_cache(server_name)
+                if snap is not None and tool_name not in snap.tool_names:
+                    logger.warning(
+                        "Agent %r tried MCP tool %s.%s which is NEW since last "
+                        "review of %s. Treating as denied. Run `maia agents edit` "
+                        "to review.",
+                        getattr(agent, "name", "?"),
+                        server_name,
+                        tool_name,
+                        server_name,
+                    )
+                    return (
+                        f"Permission denied: tool {tool_name!r} on server "
+                        f"{server_name!r} is new since you last reviewed this "
+                        f"agent's permissions. Edit the agent to grant access."
+                    )
+            except Exception:
+                pass
+            return (
+                f"Permission denied: tool {tool_name!r} on server "
+                f"{server_name!r} is not in this agent's allow list."
+            )
+
+        return None
+
     async def _execute_mcp_tool(self, tool_name: str, tool_input: Dict) -> str:
         """Execute a tool on an external MCP server."""
         mapping = self._mcp_tool_map.get(tool_name)
@@ -7235,6 +7434,11 @@ class ToolExecutor:
             return f"Error: unknown MCP tool '{tool_name}'"
 
         server_name, original_name = mapping
+
+        denied = self._check_mcp_tool_allowed(server_name, original_name)
+        if denied is not None:
+            return denied
+
         protocol_client = self._mcp_client.connected_servers.get(server_name)
         if not protocol_client:
             return f"Error: MCP server '{server_name}' is not connected"

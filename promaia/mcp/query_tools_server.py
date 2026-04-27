@@ -444,6 +444,15 @@ async def _handle_query_source(args: dict) -> list[TextContent]:
             if pre_count != len(pages):
                 logger.info(f"Channel filter: {pre_count} → {len(pages)} pages")
 
+        # Per-column redaction via SourceAccess.allowed_columns. No-op when
+        # the agent has no source_access entry, or no allowed_columns set
+        # for this source — keeps existing agents working unchanged.
+        if AGENT_CONFIG and hasattr(AGENT_CONFIG, "filter_page_columns"):
+            try:
+                pages = AGENT_CONFIG.filter_page_columns(database, pages)
+            except Exception as e:  # never block the query on a redaction bug
+                logger.warning(f"Column redaction skipped due to error: {e}")
+
         # Format results
         formatted = format_context_data({database: pages})
 

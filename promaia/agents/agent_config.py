@@ -40,6 +40,18 @@ class SourceAccess:
     permissions: List[SourcePermission]  # What agent can do
     max_query_days: Optional[int] = None  # Max days for query_source (safety limit)
 
+    # Per-table scoping for SQL/structured sources. None = all tables in this
+    # source are accessible. When set, query tools will reject queries
+    # touching tables not in this list and the database loader will skip
+    # those tables when materialising rows for the agent.
+    allowed_tables: Optional[List[str]] = None
+
+    # Per-column scoping. Map of table_name -> list of allowed column names.
+    # None or missing key = all columns. Use this to redact sensitive fields
+    # like email body / private notes / admin-only flags from an otherwise
+    # accessible table.
+    allowed_columns: Optional[Dict[str, List[str]]] = None
+
 
 @dataclass
 class AgentConfig:
@@ -100,6 +112,24 @@ class AgentConfig:
     # Channel-level permissions: restrict which Slack/Discord channels this agent
     # can respond in and query messages from.  None = all channels (backwards compat).
     allowed_channel_ids: Optional[List[str]] = None
+
+    # OUTPUT-side channel gate: restrict which channels the agent can POST to.
+    # None = inherit from allowed_channel_ids (the input gate). When the agent
+    # is called from a channel it has read access to but is not allowed to post
+    # back to, messaging tools refuse the publish step.
+    allowed_output_channel_ids: Optional[List[str]] = None
+
+    # Per-tool MCP allow list. Keys are MCP server names (must also appear in
+    # `mcp_tools`); values are the specific tool names the agent may call on
+    # that server. None for a server entry = all tools allowed (backwards
+    # compat for agents that haven't been migrated yet). Empty list = the
+    # agent gets the server's resources but cannot call any tools (rarely
+    # useful — usually you'd just remove the server).
+    #
+    # NOTE: this field is enforced as a deny-by-default gate for ALL agents
+    # except the one with `is_default_agent=True` (currently maia), which
+    # keeps legacy allow-all behavior.
+    mcp_tool_allowlist: Optional[Dict[str, Optional[List[str]]]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -207,6 +237,65 @@ class AgentConfig:
                     return False
                 return True
         return False
+
+    def get_source_access(self, source_name: str) -> Optional['SourceAccess']:
+        """Return the SourceAccess record for *source_name*, or None."""
+        if not self.source_access:
+            return None
+        for access in self.source_access:
+            if access.source_name == source_name:
+                return access
+        return None
+
+    def filter_page_columns(
+        self,
+        source_name: str,
+        pages: List[Dict[str, Any]],
+        table_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Strip page properties not in this agent's allowed_columns list.
+
+        v1 column-redaction pass for source_access. Each page is expected
+        to be a dict with a top-level ``properties`` mapping (Notion-style)
+        and/or a ``content`` string. Anything outside ``allowed_columns``
+        for the matching ``(source, table)`` is removed in-place from a
+        copy of the page.
+
+        - When the agent has no source_access entry for ``source_name``,
+          or the entry has no ``allowed_columns``, returns pages unchanged.
+        - When ``table_name`` is None, looks up the dict under any key
+          (single-table sources). When set, looks up the specific table.
+
+        Tables that map cleanly to source name (Notion: each source IS
+        the table) can pass ``table_name=None`` and put the column list
+        under the source name in ``allowed_columns``.
+        """
+        access = self.get_source_access(source_name)
+        if access is None or access.allowed_columns is None:
+            return pages
+        cols_map = access.allowed_columns
+        if table_name and table_name in cols_map:
+            allowed = set(cols_map[table_name])
+        elif None in cols_map:
+            allowed = set(cols_map[None])
+        elif source_name in cols_map:
+            allowed = set(cols_map[source_name])
+        else:
+            return pages
+
+        out = []
+        for p in pages:
+            if not isinstance(p, dict):
+                out.append(p)
+                continue
+            new_page = dict(p)
+            props = new_page.get("properties")
+            if isinstance(props, dict):
+                new_page["properties"] = {
+                    k: v for k, v in props.items() if k in allowed
+                }
+            out.append(new_page)
+        return out
 
 
 def get_config_file_path() -> Path:
@@ -374,6 +463,27 @@ def save_agent(agent: AgentConfig, *, force: bool = False) -> None:
         (a for a in existing_agents if a.get('name') == agent.name),
         None,
     )
+
+    # Q7: is_default_agent uniqueness — exactly one agent per workspace
+    # may carry the bypass flag. Reject saves that would create a second
+    # default agent in the same workspace. Allow zero (workspaces with
+    # no bypass agent are valid; their agents are all explicitly
+    # permissioned).
+    if agent.is_default_agent:
+        ws = agent.workspace
+        for other in existing_agents:
+            if (
+                other.get('name') != agent.name
+                and other.get('workspace') == ws
+                and other.get('is_default_agent')
+            ):
+                raise ValueError(
+                    f"Cannot save: agent {other['name']!r} in workspace {ws!r} "
+                    f"already has is_default_agent=True. Only one default "
+                    f"agent per workspace is allowed. Either unset the flag "
+                    f"on {other['name']!r} first, or save {agent.name!r} "
+                    f"without is_default_agent."
+                )
 
     # Apply wipe protection BEFORE upsert.
     safe_dict = _apply_wipe_protection(agent_dict, existing_for_this_name, force=force)

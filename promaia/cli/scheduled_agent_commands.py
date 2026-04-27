@@ -419,6 +419,8 @@ async def handle_agent_add(args):
         if builtin not in available_tools:
             available_tools.append(builtin)
 
+    mcp_tool_allowlist: Optional[Dict[str, Optional[List[str]]]] = None
+
     if available_tools:
         console.print(f"   Available: {', '.join(available_tools)}", style="dim")
         configure_mcp = input("\nConfigure MCP tools? (y/N): ").strip().lower()
@@ -426,6 +428,24 @@ async def handle_agent_add(args):
             mcp_tools = await select_mcp_tools(available_tools)
             if mcp_tools:
                 console.print(f"✓ MCP Tools: {', '.join(mcp_tools)}", style="dim")
+                # Q9 — non-default agents start with deny-by-default. Walk
+                # the user through picking specific tools right now.
+                from promaia.cli.agent_creation_selector import select_mcp_tool_allowlist
+                mcp_tool_allowlist = await select_mcp_tool_allowlist(mcp_tools)
+                if mcp_tool_allowlist is None:
+                    # Q5b — refuse to save: at least one server unreachable.
+                    console.print(
+                        "[red]Aborting agent creation: tool allow list could "
+                        "not be configured (some MCP server unreachable).[/red]"
+                    )
+                    return
+                else:
+                    n_tools = sum(len(v or []) for v in mcp_tool_allowlist.values())
+                    console.print(
+                        f"✓ Allow list: {n_tools} tool(s) across "
+                        f"{len(mcp_tool_allowlist)} server(s)",
+                        style="dim",
+                    )
             else:
                 console.print("✓ No MCP tools selected", style="dim")
         else:
@@ -492,6 +512,7 @@ async def handle_agent_add(args):
         schedule=None,  # No schedule grid - use calendar events or interval
         interval_minutes=interval_minutes,  # Optional interval
         mcp_tools=mcp_tools,
+        mcp_tool_allowlist=mcp_tool_allowlist,  # Q9: deny-by-default for new agents
         max_iterations=40,
         journal_memory_days=journal_memory_days,
         messaging_enabled=messaging_enabled,
@@ -2001,6 +2022,33 @@ async def handle_agent_edit(args):
             agent.mcp_tools = selected_tools
             tools_display = ', '.join(selected_tools) if selected_tools else "None"
             console.print(f"✓ Updated MCP tools: [cyan]{tools_display}[/cyan]", style="dim")
+
+            # Q9 — re-walk the per-tool allow list whenever servers change.
+            # Q5b — refuse to save the new mcp_tools change if any selected
+            # server is unreachable; the in-memory agent.mcp_tools update is
+            # rolled back so the on-disk config stays correct.
+            if selected_tools:
+                from promaia.cli.agent_creation_selector import select_mcp_tool_allowlist
+                new_allowlist = await select_mcp_tool_allowlist(
+                    selected_tools, preselected=agent.mcp_tool_allowlist
+                )
+                if new_allowlist is None:
+                    console.print(
+                        "[red]Allow list could not be configured (server "
+                        "unreachable). Reverting tool change for this edit.[/red]"
+                    )
+                    agent.mcp_tools = list(agent.mcp_tools or [])  # noop on type
+                else:
+                    agent.mcp_tool_allowlist = new_allowlist
+                    n = sum(len(v or []) for v in new_allowlist.values())
+                    console.print(
+                        f"✓ Allow list updated: {n} tool(s) across "
+                        f"{len(new_allowlist)} server(s)",
+                        style="dim",
+                    )
+            else:
+                # No servers selected → drop the allow list too
+                agent.mcp_tool_allowlist = None
 
     if choice in ["5", "7"]:
         console.print(f"\nCurrent max iterations: [cyan]{agent.max_iterations}[/cyan]")
