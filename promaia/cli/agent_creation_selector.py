@@ -1183,6 +1183,17 @@ async def select_mcp_tools(available_tools: List[str], preselected: Optional[Lis
 # ============================================================================
 
 
+class McpServerUnreachableError(RuntimeError):
+    """Raised by select_mcp_tool_allowlist when one or more required
+    MCP servers cannot be reached for live tool discovery.
+
+    Per Q5b, callers should treat this as a refuse-to-save signal
+    and abort whatever flow they were in (create / edit). The
+    exception message lists every unreachable server with its
+    failure reason, suitable for surfacing to the user verbatim.
+    """
+
+
 async def select_mcp_tool_allowlist(
     selected_servers: List[str],
     preselected: Optional[Dict[str, Optional[List[str]]]] = None,
@@ -1195,20 +1206,31 @@ async def select_mcp_tool_allowlist(
     list with ``server.tool`` rows. The user ticks the tools the
     agent should be allowed to call.
 
-    **Q5b — server-offline UX**: if any selected server is unreachable
-    at edit time, this function returns ``None`` after telling the
-    user via stderr/console; the caller should NOT save the agent.
-    The intentional "refuse to save" semantic comes from the Q5b
-    answer.
+    Built-in integrations (entries in *selected_servers* that don't
+    appear in ``mcp_servers.json`` — e.g. "gmail", "calendar") are
+    silently skipped because they have their own runtime gates
+    (messaging_enabled, source_access, etc.) and don't need per-MCP-
+    tool allowlisting.
 
     Returns:
-        Dict[server, List[tool]] on confirm, ``{}`` on cancel,
-        or ``None`` if discovery failed and the user aborted.
+        Dict[server, List[tool]] on confirm with at least one MCP
+            server picked.
+        ``None`` when no MCP-server allowlist is needed (every
+            selection was a built-in integration, or *selected_servers*
+            was empty). Caller should leave AgentConfig.mcp_tool_allowlist
+            unset.
+        ``{}`` on user cancel (escape) — caller can keep any
+            previous allowlist intact.
+
+    Raises:
+        McpServerUnreachableError: per Q5b — at least one selected
+            MCP server could not be reached for live tool discovery.
+            Caller should NOT save the agent.
     """
     console = Console()
 
     if not selected_servers:
-        return {}
+        return None
 
     preselected = preselected or {}
 
@@ -1219,16 +1241,23 @@ async def select_mcp_tool_allowlist(
 
     config_path = _find_mcp_servers_json()
     if config_path is None:
-        console.print("[red]No mcp_servers.json found — cannot configure tool allowlist.[/red]")
+        # No config file at all → there can't be any MCP servers, so the
+        # selection must be all built-ins. Nothing to allowlist.
         return None
     manager = McpServerManager(str(config_path))
 
     rows: List[Tuple[str, str, str]] = []  # (server, tool, description)
     unreachable: List[str] = []
+    skipped_builtins: List[str] = []
     for srv in selected_servers:
         cfg = manager.servers.get(srv)
         if cfg is None:
-            unreachable.append(f"{srv} (not in mcp_servers.json)")
+            # Not an MCP server — likely a built-in integration like
+            # "gmail" or "calendar" that has its own runtime gates
+            # (messaging_enabled, source_access, etc) and doesn't need
+            # per-tool MCP allowlisting. Skip silently; don't trigger
+            # the Q5b refuse-to-save path.
+            skipped_builtins.append(srv)
             continue
         try:
             cache = await mcp_tool_cache.refresh_from_server(srv, cfg)
@@ -1239,27 +1268,38 @@ async def select_mcp_tool_allowlist(
             rows.append((srv, tool.name, tool.description or ""))
 
     if unreachable:
-        console.print(
-            "[red]Refusing to save: cannot reach the following MCP servers "
-            "to discover their tools:[/red]"
-        )
+        # Q5b — refuse to save. Raise so the caller's exception handler
+        # surfaces this without ambiguity vs. the "no allowlist needed"
+        # None return.
+        msg_lines = ["Cannot reach the following MCP servers to discover their tools:"]
         for u in unreachable:
-            console.print(f"  • {u}")
-        console.print(
-            "[yellow]Either bring the servers online, remove them from this "
-            "agent's mcp_tools, or wait until they recover.[/yellow]"
+            msg_lines.append(f"  • {u}")
+        msg_lines.append(
+            "Either bring the servers online, remove them from this agent's "
+            "mcp_tools, or wait until they recover."
         )
+        raise McpServerUnreachableError("\n".join(msg_lines))
+
+    non_builtin = [s for s in selected_servers if s not in skipped_builtins]
+
+    if not non_builtin:
+        # Every selection was a built-in integration — no MCP allowlist
+        # needed. Caller should leave AgentConfig.mcp_tool_allowlist unset.
+        if skipped_builtins:
+            console.print(
+                f"[dim]Built-in integrations ({', '.join(skipped_builtins)}) "
+                f"don't need per-MCP-tool allowlisting; skipping picker.[/dim]"
+            )
         return None
 
     if not rows:
-        # All servers reachable but advertise no tools. Save an empty allow
-        # list (the agent can call nothing on these servers). Surface this
-        # to the user so they don't think it silently succeeded.
+        # MCP server(s) connected but advertised no tools. Save an empty
+        # allow list per server so the deny-by-default semantic is explicit.
         console.print(
-            "[yellow]All selected MCP servers connected but advertised no "
-            "tools. Allow list will be empty for now.[/yellow]"
+            f"[yellow]MCP server(s) {', '.join(non_builtin)} connected but "
+            f"advertised no tools. Allow list will be empty for now.[/yellow]"
         )
-        return {srv: [] for srv in selected_servers}
+        return {srv: [] for srv in non_builtin}
 
     # Pre-fill enabled state from preselected dict.
     def _is_preselected(server: str, tool: str) -> bool:
@@ -1347,10 +1387,11 @@ async def select_mcp_tool_allowlist(
     if not confirmed:
         return {}
 
-    # Group results by server. Always include every selected server in the
-    # output (with an empty list if the user ticked nothing) so the agent's
-    # mcp_tool_allowlist explicitly covers each server they asked for.
-    out: Dict[str, Optional[List[str]]] = {srv: [] for srv in selected_servers}
+    # Group results by server. Always include every NON-BUILTIN selected
+    # server (with an empty list if the user ticked nothing) so the agent's
+    # mcp_tool_allowlist explicitly covers each MCP server they picked.
+    # Built-ins are excluded — the picker doesn't manage their gates.
+    out: Dict[str, Optional[List[str]]] = {srv: [] for srv in non_builtin}
     for (srv, tool, _), enabled in zip(rows, enabled_states):
         if enabled:
             out.setdefault(srv, []).append(tool)

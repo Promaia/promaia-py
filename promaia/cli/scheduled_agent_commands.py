@@ -428,22 +428,29 @@ async def handle_agent_add(args):
             mcp_tools = await select_mcp_tools(available_tools)
             if mcp_tools:
                 console.print(f"✓ MCP Tools: {', '.join(mcp_tools)}", style="dim")
-                # Q9 — non-default agents start with deny-by-default. Walk
-                # the user through picking specific tools right now.
-                from promaia.cli.agent_creation_selector import select_mcp_tool_allowlist
-                mcp_tool_allowlist = await select_mcp_tool_allowlist(mcp_tools)
-                if mcp_tool_allowlist is None:
-                    # Q5b — refuse to save: at least one server unreachable.
+                # Q9 — non-default agents start with deny-by-default for
+                # any actual MCP server they selected. Built-in integrations
+                # (gmail, calendar) are gated elsewhere and skip this picker.
+                from promaia.cli.agent_creation_selector import (
+                    select_mcp_tool_allowlist, McpServerUnreachableError,
+                )
+                try:
+                    mcp_tool_allowlist = await select_mcp_tool_allowlist(mcp_tools)
+                except McpServerUnreachableError as e:
+                    # Q5b — refuse to save.
+                    console.print(f"[red]Refusing to save:[/red]\n{e}")
                     console.print(
-                        "[red]Aborting agent creation: tool allow list could "
-                        "not be configured (some MCP server unreachable).[/red]"
+                        "[red]Aborting agent creation.[/red]"
                     )
                     return
+                if mcp_tool_allowlist is None:
+                    # All built-ins or no MCP servers — no allowlist needed.
+                    pass
                 else:
                     n_tools = sum(len(v or []) for v in mcp_tool_allowlist.values())
                     console.print(
                         f"✓ Allow list: {n_tools} tool(s) across "
-                        f"{len(mcp_tool_allowlist)} server(s)",
+                        f"{len(mcp_tool_allowlist)} MCP server(s)",
                         style="dim",
                     )
             else:
@@ -2025,29 +2032,35 @@ async def handle_agent_edit(args):
 
             # Q9 — re-walk the per-tool allow list whenever servers change.
             # Q5b — refuse to save the new mcp_tools change if any selected
-            # server is unreachable; the in-memory agent.mcp_tools update is
-            # rolled back so the on-disk config stays correct.
+            # MCP server is unreachable; revert the in-memory tool change.
             if selected_tools:
-                from promaia.cli.agent_creation_selector import select_mcp_tool_allowlist
-                new_allowlist = await select_mcp_tool_allowlist(
-                    selected_tools, preselected=agent.mcp_tool_allowlist
+                from promaia.cli.agent_creation_selector import (
+                    select_mcp_tool_allowlist, McpServerUnreachableError,
                 )
-                if new_allowlist is None:
-                    console.print(
-                        "[red]Allow list could not be configured (server "
-                        "unreachable). Reverting tool change for this edit.[/red]"
+                try:
+                    new_allowlist = await select_mcp_tool_allowlist(
+                        selected_tools, preselected=agent.mcp_tool_allowlist
                     )
-                    agent.mcp_tools = list(agent.mcp_tools or [])  # noop on type
+                except McpServerUnreachableError as e:
+                    console.print(f"[red]Refusing to update tool list:[/red]\n{e}")
+                    console.print(
+                        "[red]Reverting tool change for this edit.[/red]"
+                    )
+                    # Roll back: don't save the new selection.
+                    return
+                if new_allowlist is None:
+                    # All built-ins → no allowlist needed; clear any previous one.
+                    agent.mcp_tool_allowlist = None
                 else:
                     agent.mcp_tool_allowlist = new_allowlist
                     n = sum(len(v or []) for v in new_allowlist.values())
                     console.print(
                         f"✓ Allow list updated: {n} tool(s) across "
-                        f"{len(new_allowlist)} server(s)",
+                        f"{len(new_allowlist)} MCP server(s)",
                         style="dim",
                     )
             else:
-                # No servers selected → drop the allow list too
+                # No tools selected → drop the allow list too
                 agent.mcp_tool_allowlist = None
 
     if choice in ["5", "7"]:
