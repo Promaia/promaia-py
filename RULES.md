@@ -1,5 +1,15 @@
 # Rules
 
+## Roadmap reflects current progress
+
+Checklist items in `docs/roadmap/*.md` must reflect actual completion
+status. Items that have been implemented should be checked off
+(`- [x]`). Items that have been descoped or moved should be removed
+or relocated (e.g. into `docs/roadmap/future.md`), not left as
+unchecked stale entries. Active roadmap files at the root of
+`docs/roadmap/` describe in-flight work; date-prefixed files belong
+in `docs/roadmap/archive/`.
+
 ## Use get_data_dir() for all data directory paths
 
 Never use hardcoded paths like `~/.promaia` or `maia-data/`, and never read `PROMAIA_DATA_DIR` or other path-related env vars directly with `os.environ` or `os.getenv`. Always use the helpers from `promaia.utils.env_writer` — `get_data_dir()`, `get_project_root()`, etc. This ensures code works both locally and inside Docker containers.

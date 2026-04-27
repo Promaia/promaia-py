@@ -1,5 +1,24 @@
 # Claude Code Project Instructions
 
+## Roadmap-driven work
+
+Non-trivial features follow the roadmap convention in
+[`docs/roadmap/`](docs/roadmap/README.md). Before starting work on a
+feature, read or create the relevant roadmap file. Implement
+phase-by-phase, checking boxes as you go. Don't leave stale unchecked
+items lying around — if something gets descoped, move it to
+`docs/roadmap/future.md` or remove it.
+
+Per-step loop:
+1. Implement all items in the step
+2. Run `prosecheck`; fix anything it surfaces (loop until clean)
+3. Self-review the diff
+4. Update `docs/architecture/` if the change affects architecture
+5. Present the change to the user; user picks next action
+
+When all phases are complete, move the file to
+`docs/roadmap/archive/YYYY-MM-DD-<slug>.md`.
+
 ## Python tooling
 
 - Use `uv` for all Python commands: `uv pip install`, `uv run`, `uv venv`
