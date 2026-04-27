@@ -90,7 +90,16 @@ def main() -> None:
         if child is not None:
             return child
         _log(service_name, f"starting: {' '.join(child_cmd)}")
-        child = subprocess.Popen(child_cmd)
+        # Tee the child's stdout/stderr into <data_dir>/logs/sessions/today.log
+        # so every service's output ends up in the same shared log Claude
+        # can tail. Falls back to a plain Popen if the logger is unavailable.
+        try:
+            from promaia.utils.session_logging import spawn_logged_child
+
+            child = spawn_logged_child(child_cmd, service_name)
+        except Exception as exc:
+            _log(service_name, f"session log tee unavailable ({exc}); using plain Popen")
+            child = subprocess.Popen(child_cmd)
         return child
 
     def stop_child() -> None:
