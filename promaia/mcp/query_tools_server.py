@@ -362,6 +362,29 @@ async def _handle_query_vector(args: dict) -> list[TextContent]:
         if ALLOWED_CHANNEL_IDS:
             loaded_content = _filter_loaded_content_by_channel(loaded_content, ALLOWED_CHANNEL_IDS)
 
+        # Per-source allowed_tables + allowed_columns filters. Vector
+        # search returns the same loaded_content shape as query_source,
+        # so the same helpers apply — just per source key. Without this
+        # an agent with allowed_columns=["subject"] on gmail would still
+        # see body content via vector search (Gap B fix).
+        if AGENT_CONFIG:
+            try:
+                for src_name in list(loaded_content.keys()):
+                    pages = loaded_content[src_name]
+                    if hasattr(AGENT_CONFIG, "filter_pages_by_table"):
+                        pre = len(pages)
+                        pages = AGENT_CONFIG.filter_pages_by_table(src_name, pages)
+                        if len(pages) != pre:
+                            logger.info(
+                                f"[vector] Table allowlist on {src_name}: "
+                                f"{pre} → {len(pages)} pages"
+                            )
+                    if hasattr(AGENT_CONFIG, "filter_page_columns"):
+                        pages = AGENT_CONFIG.filter_page_columns(src_name, pages)
+                    loaded_content[src_name] = pages
+            except Exception as e:
+                logger.warning(f"Vector-search source_access filter skipped: {e}")
+
         # Format results
         formatted = format_context_data(loaded_content)
         total_pages = sum(len(pages) for pages in loaded_content.values())

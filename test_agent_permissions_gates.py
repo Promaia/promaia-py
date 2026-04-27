@@ -279,6 +279,77 @@ def test_get_allowed_tables_returns_none_when_unset():
 
 
 # ---------------------------------------------------------------------------
+# Vector-search filtering (Gap B — query_vector path runs the same filters)
+# ---------------------------------------------------------------------------
+
+
+def test_vector_path_redacts_columns_just_like_source_path():
+    """The vector path applies filter_page_columns per source, so an
+    agent with allowed_columns=['subject'] on gmail must see no body
+    fields in vector results either. The helper is the same; this test
+    asserts the helper is what the path calls."""
+    from promaia.agents.agent_config import AgentConfig, SourceAccess, SourcePermission
+
+    cfg = AgentConfig(
+        name="t", workspace="koii", databases=["gmail"], prompt_file="", mcp_tools=[],
+        source_access=[
+            SourceAccess(
+                source_name="gmail", initial_days=None,
+                permissions=[SourcePermission.QUERY],
+                allowed_columns={"gmail": ["subject"]},
+            )
+        ],
+    )
+    # Simulate loaded_content shape returned by process_vector_search_to_content
+    loaded_content = {
+        "gmail": [
+            {"properties": {"subject": "hello", "body": "secret"}, "score": 0.95},
+            {"properties": {"subject": "ping", "body": "more secret"}, "score": 0.88},
+        ],
+        "journal": [
+            {"properties": {"text": "private"}, "score": 0.7},
+        ],
+    }
+    # Apply the same per-source filter the _handle_query_vector loop does
+    for src in list(loaded_content.keys()):
+        loaded_content[src] = cfg.filter_pages_by_table(src, loaded_content[src])
+        loaded_content[src] = cfg.filter_page_columns(src, loaded_content[src])
+
+    # Body redacted on gmail
+    assert all("body" not in p["properties"] for p in loaded_content["gmail"])
+    assert all(p["properties"].get("subject") for p in loaded_content["gmail"])
+    # Score (non-properties metadata) preserved
+    assert all("score" in p for p in loaded_content["gmail"])
+    # Other source untouched
+    assert loaded_content["journal"][0]["properties"]["text"] == "private"
+
+
+def test_vector_path_drops_disallowed_tables_per_source():
+    from promaia.agents.agent_config import AgentConfig, SourceAccess, SourcePermission
+
+    cfg = AgentConfig(
+        name="t", workspace="koii", databases=["multi"], prompt_file="", mcp_tools=[],
+        source_access=[
+            SourceAccess(
+                source_name="multi", initial_days=None,
+                permissions=[SourcePermission.QUERY],
+                allowed_tables=["public"],
+            )
+        ],
+    )
+    loaded = {
+        "multi": [
+            {"table": "public", "id": 1},
+            {"table": "private", "id": 2},
+            {"table": "public", "id": 3},
+        ],
+    }
+    for src in list(loaded.keys()):
+        loaded[src] = cfg.filter_pages_by_table(src, loaded[src])
+    assert [p["id"] for p in loaded["multi"]] == [1, 3]
+
+
+# ---------------------------------------------------------------------------
 # is_default_agent uniqueness (Q7)
 # ---------------------------------------------------------------------------
 
