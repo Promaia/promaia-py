@@ -2091,6 +2091,7 @@ async def handle_agent_edit(args):
         from promaia.cli.agent_creation_selector import select_channel_groups
         try:
             new_in, new_out = await select_channel_groups(
+                workspace=agent.workspace,
                 current_input=getattr(agent, "allowed_channel_groups", None),
                 current_output=getattr(agent, "allowed_output_channel_groups", None),
             )

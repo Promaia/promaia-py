@@ -44,7 +44,33 @@ Default posture is deny-by-default for non-default agents
 
 - [x] `test_agent_permissions_gates.py` covers all gates + uniqueness + cache diff (31/31 pass)
 
-## Phase 4 — Chat-side interview surface
+## Phase 4 — Real channel list in CLI picker
+
+The current `select_channel_groups` picker takes user-typed channel
+IDs. The existing `_browse_slack_channels` (in `cli/setup_commands.py`)
+calls Slack's `conversations.list` API to fetch real `(id, name)`
+tuples and shows a checkbox UI. Reuse that pattern so the agent-edit
+picker shows real channel names instead of asking for opaque IDs.
+
+- [x] Refactor `select_channel_groups` to live-fetch channels via Slack API for each bucket
+- [x] Wildcards (`* DMs`, `* channels`) stay as toggles ABOVE the channel checkbox list (separator-divided in the same prompt_toolkit picker)
+- [x] Single-pane UX: wildcards + real channels in one checkbox list
+- [ ] Discord: same pattern when bot token is available; else fall back to channel-free wildcard-only (deferred — slack bot not always present locally either; current code falls back gracefully)
+- [ ] Manual smoke test: `maia agent edit <name>` → option 9 → see real channels with names
+
+## Phase 5 — End-to-end deny test
+
+Today: 31 unit tests prove the GATE FUNCTION returns the right answer.
+Nothing exercises the full path "agent calls a tool → MCP layer → gate
+fires → agent sees deny string → adapts."
+
+- [ ] Build a fixture agent with deliberately-restricted `mcp_tool_allowlist` (e.g. po-manager.list_vendors only)
+- [ ] Run it via `maia agent run-scheduled` (or equivalent) with a prompt that would call `po-manager.delete_vendor`
+- [ ] Verify the runtime gate fires (WARN log line, deny string in tool result)
+- [ ] Verify the agent reads the deny string and stops (doesn't loop on it)
+- [ ] Same end-to-end test for the channel output gate
+
+## Phase 6 — Chat-side interview surface
 
 The agent-editing-agent in `chat/workflows/` walks the user through
 agent edits via conversation. Today its `update_agent` tool only
@@ -56,7 +82,7 @@ the new fields.
 - [ ] Update `create_agent.py` workflow prompt the same way
 - [ ] Manual smoke test: `maia chat` → "edit my bondu agent so it can only post in DMs" → verify the right fields land in `agents.json`
 
-## Phase 5 — Sign-off + ship to main
+## Phase 7 — Sign-off + ship to main
 
 - [ ] User signs off after live testing on `koii-prod`
 - [ ] Squash-merge `feat/agent-permissions-granular` → `main`

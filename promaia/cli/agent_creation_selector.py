@@ -1403,108 +1403,260 @@ async def select_mcp_tool_allowlist(
 # ============================================================================
 
 
-def _prompt_group_for_side(
-    console: "Console",
-    side_label: str,
-    current_groups: Optional[Dict[str, List[str]]],
-) -> Optional[Dict[str, List[str]]]:
-    """Walk the user through configuring one side (read or write) of the
-    channel groups. Returns None if the user picks "no restriction" (which
-    the caller maps to leaving the field as None / legacy-allow), or a
-    dict with "dm" / "channel" buckets.
+async def _fetch_slack_channels(workspace: str) -> Optional[List[Tuple[str, str, bool]]]:
+    """Fetch real channels from Slack via the workspace's bot token.
 
-    Each bucket is either ``["*"]`` (any channel of that type) or a list
-    of specific channel IDs the user types in. Empty bucket means
-    "deny everything in this bucket".
+    Returns a list of ``(id, name, is_member)`` tuples sorted by name,
+    or ``None`` if the token isn't configured / the API call fails.
+    Mirrors the pattern in ``cli/setup_commands._browse_slack_channels``
+    so the agent-edit UI matches ``maia setup slack``.
     """
-    cur = current_groups or {}
-    cur_dm = cur.get("dm", [])
-    cur_ch = cur.get("channel", [])
+    import httpx
+    try:
+        from promaia.auth import get_integration
+        slack = get_integration("slack")
+        cred = slack.get_slack_credentials(workspace)
+    except Exception:
+        return None
+    if not cred or not cred.get("bot_token"):
+        return None
+    bot_token = cred["bot_token"]
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                "https://slack.com/api/conversations.list",
+                headers={"Authorization": f"Bearer {bot_token}"},
+                json={"types": "public_channel,private_channel", "limit": 200},
+            )
+        data = resp.json()
+        if not data.get("ok"):
+            return None
+    except Exception:
+        return None
+    channels = [
+        (ch.get("id", ""), ch.get("name", "unknown"), bool(ch.get("is_member")))
+        for ch in data.get("channels", [])
+    ]
+    channels.sort(key=lambda x: x[1].lower())
+    return channels
 
-    def _show(label, val):
-        if val == ["*"]:
-            return f"[green]any {label}[/green]"
-        if not val:
-            return f"[red]none[/red]"
-        return f"[cyan]{', '.join(val[:3])}{'…' if len(val) > 3 else ''}[/cyan]"
 
-    console.print(f"\n[bold]Channel permissions — {side_label}[/bold]")
-    console.print(f"  Current DMs:      {_show('DM', cur_dm)}")
-    console.print(f"  Current channels: {_show('channel', cur_ch)}")
+async def _select_channels_with_wildcards(
+    side_label: str,
+    available_channels: List[Tuple[str, str, bool]],
+    preselected_ids: Optional[List[str]] = None,
+    preselected_dm_wildcard: bool = False,
+    preselected_channel_wildcard: bool = False,
+) -> Tuple[bool, bool, List[str]]:
+    """Render one checkbox list with two virtual rows on top:
 
-    console.print(
-        "\n[dim]Choose what the agent can {} from. Enter '*' for any of "
-        "that type, a comma-separated list of channel IDs (e.g. "
-        "C0123, D0456), or press Enter to deny that bucket entirely.[/dim]".format(
-            "read" if side_label == "READ" else "post to"
-        )
+        [ ] ✱ Any DM (wildcard)
+        [ ] ✱ Any non-DM channel (wildcard)
+        ────────────────────────────────────
+        [ ] #engineering        (real channels)
+        [ ] #announcements
+        ...
+
+    Returns ``(dm_wildcard, channel_wildcard, [specific_channel_ids])``.
+    If ``channel_wildcard`` is True, the specific list is ignored on the
+    caller side — the wildcard supersedes individual picks.
+    """
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.layout import Layout
+
+    preselected_ids = set(preselected_ids or [])
+
+    # Row 0 = any-DM wildcard, row 1 = any-channel wildcard, then real channels.
+    rows = [
+        ("__dm_wildcard__", "✱ Any DM"),
+        ("__channel_wildcard__", "✱ Any non-DM channel"),
+    ] + [(cid, f"#{name}") for cid, name, _is_member in available_channels]
+    selected = [preselected_dm_wildcard, preselected_channel_wildcard] + [
+        cid in preselected_ids for cid, _, _ in available_channels
+    ]
+    current = [0]
+    confirmed = False
+    max_visible = 22
+
+    def viewport():
+        total = len(rows)
+        cur = current[0]
+        half = max_visible // 2
+        if total <= max_visible:
+            start = 0
+        elif cur < half:
+            start = 0
+        elif cur >= total - half:
+            start = max(0, total - max_visible)
+        else:
+            start = cur - half
+        end = min(start + max_visible, total)
+
+        lines = []
+        if start > 0:
+            lines.append("  ... more above")
+        for i in range(start, end):
+            check = "[x]" if selected[i] else "[ ]"
+            arrow = " >" if i == cur else "  "
+            label = rows[i][1]
+            if i == 1:
+                # Add a separator line under the second wildcard row
+                lines.append(f" {arrow} {check} {label}")
+                lines.append("    ────────────────────────────────────")
+            else:
+                lines.append(f" {arrow} {check} {label}")
+        if end < total:
+            lines.append("  ... more below")
+        return "\n".join(lines)
+
+    def status():
+        n = sum(selected)
+        return f" {side_label}: SPACE toggle  ENTER confirm ({n} picked)  ESC cancel"
+
+    def make_layout():
+        visible = min(len(rows), max_visible) + 4  # +1 for separator
+        return Layout(HSplit([
+            Window(FormattedTextControl(text=lambda: f"\n  Pick what the agent can {side_label.lower()}:\n"), height=2),
+            Window(FormattedTextControl(text=viewport), height=visible),
+            Window(FormattedTextControl(text=status), height=1, style="fg:gray"),
+        ]))
+
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.Up)
+    def _up(event):
+        if current[0] > 0:
+            current[0] -= 1
+            event.app.layout = make_layout()
+
+    @bindings.add(Keys.Down)
+    def _down(event):
+        if current[0] < len(rows) - 1:
+            current[0] += 1
+            event.app.layout = make_layout()
+
+    @bindings.add(" ")
+    def _toggle(event):
+        selected[current[0]] = not selected[current[0]]
+        event.app.layout = make_layout()
+
+    @bindings.add(Keys.Enter)
+    def _confirm(event):
+        nonlocal confirmed
+        confirmed = True
+        event.app.exit()
+
+    @bindings.add(Keys.Escape)
+    def _cancel(event):
+        event.app.exit()
+
+    app = Application(
+        layout=make_layout(), key_bindings=bindings,
+        full_screen=False, mouse_support=False,
     )
+    await app.run_async()
 
-    def _parse(raw: str, default: List[str]) -> List[str]:
-        raw = raw.strip()
-        if not raw:
-            # Pressed enter without input — treat as "deny" (empty list).
-            return []
-        if raw == "*":
-            return ["*"]
-        return [s.strip() for s in raw.split(",") if s.strip()]
+    if not confirmed:
+        return (False, False, [])
 
-    dm_in = input(f"  DMs (current={cur_dm or '[]'}, blank=deny, '*'=any): ").strip()
-    new_dm = _parse(dm_in, cur_dm)
-    ch_in = input(f"  Channels (current={cur_ch or '[]'}, blank=deny, '*'=any): ").strip()
-    new_ch = _parse(ch_in, cur_ch)
-
-    # If both buckets empty, ask whether they meant "no restriction" (None)
-    # or really wanted to deny everything.
-    if not new_dm and not new_ch:
-        confirm = input(
-            "  Both buckets are empty — that means deny everything. Did you "
-            "mean to remove all channel restrictions instead? [y/N] "
-        ).strip().lower()
-        if confirm == "y":
-            return None  # caller maps this to legacy-allow
-
-    return {"dm": new_dm, "channel": new_ch}
+    dm_wc = selected[0]
+    ch_wc = selected[1]
+    specific_ids = [
+        rows[i][0]
+        for i in range(2, len(rows))
+        if selected[i]
+    ]
+    return dm_wc, ch_wc, specific_ids
 
 
 async def select_channel_groups(
+    workspace: str,
     current_input: Optional[Dict[str, List[str]]] = None,
     current_output: Optional[Dict[str, List[str]]] = None,
 ) -> Tuple[Optional[Dict[str, List[str]]], Optional[Dict[str, List[str]]]]:
     """Picker for ``allowed_channel_groups`` (read) and
     ``allowed_output_channel_groups`` (write).
 
-    Two-step prompt:
-      1. Configure the READ side (input).
-      2. Ask whether the WRITE side mirrors READ or should be different.
+    Live-fetches Slack channels for the *workspace* via the bot token
+    and shows them in a checkbox UI alongside two wildcard rows
+    (any-DM, any-channel). Discord support TBD; falls back to channel-
+    free wildcard-only if no Slack creds are available.
 
-    Returns a tuple ``(input_groups, output_groups)``. Either may be None
-    (= legacy-allow / inherit from input).
+    Returns ``(input_groups, output_groups)``. Either may be ``None``
+    (= no restriction; legacy-allow / inherit-from-input).
     """
     console = Console()
 
-    # Step 1: read side
     console.print(
         "\n[bold cyan]Configure channel permissions[/bold cyan]\n"
-        "[dim]These split into two groups: 'dm' (Slack DMs, Discord direct "
-        "messages) and 'channel' (everything else). Each can be a wildcard "
-        "or a specific list.[/dim]"
+        "[dim]Channels split into two buckets: DMs and non-DM channels. "
+        "Use ✱ wildcard rows for \"any of that type\", or pick specific "
+        "channels from the live list.[/dim]"
     )
-    new_input = _prompt_group_for_side(console, "READ", current_input)
 
-    # Step 2: write side — offer "same as read" shortcut
-    console.print()
-    console.print("[bold]WRITE side (where the agent can post)[/bold]")
+    console.print("[dim]  Fetching channel list from Slack...[/dim]")
+    available = await _fetch_slack_channels(workspace) or []
+    if not available:
+        console.print(
+            "[yellow]  No Slack channels found (bot token missing or API "
+            "call failed). Wildcard-only configuration available.[/yellow]"
+        )
+
+    cur_in = current_input or {}
+    cur_out = current_output or {}
+
+    def _wildcard(bucket: Dict[str, List[str]], key: str) -> bool:
+        return bucket.get(key) == ["*"]
+
+    def _specific(bucket: Dict[str, List[str]], key: str) -> List[str]:
+        v = bucket.get(key, [])
+        return [] if v == ["*"] else list(v)
+
+    # READ side
+    console.print("\n[bold]READ — channels the agent can read from[/bold]")
+    dm_wc_r, ch_wc_r, ids_r = await _select_channels_with_wildcards(
+        "READ",
+        available,
+        preselected_ids=_specific(cur_in, "channel"),
+        preselected_dm_wildcard=_wildcard(cur_in, "dm"),
+        preselected_channel_wildcard=_wildcard(cur_in, "channel"),
+    )
+
+    def _build_groups(dm_wc: bool, ch_wc: bool, ids: List[str]) -> Optional[Dict[str, List[str]]]:
+        dm_bucket = ["*"] if dm_wc else []
+        if ch_wc:
+            ch_bucket = ["*"]
+        else:
+            ch_bucket = ids
+        if not dm_bucket and not ch_bucket:
+            return None  # treat empty-everywhere as "no restriction"
+        return {"dm": dm_bucket, "channel": ch_bucket}
+
+    new_input = _build_groups(dm_wc_r, ch_wc_r, ids_r)
+
+    # WRITE side
+    console.print("\n[bold]WRITE — channels the agent can post to[/bold]")
     console.print("  1. Same as read (recommended)")
-    console.print("  2. More restrictive than read (configure separately)")
-    console.print("  3. No write restrictions (inherit from input gate)")
-    choice = input("Select (1-3): ").strip() or "1"
+    console.print("  2. Configure separately")
+    console.print("  3. No write restrictions (fall back to read gate)")
+    write_choice = input("Select (1-3): ").strip() or "1"
 
-    if choice == "1":
+    if write_choice == "1":
         new_output = new_input
-    elif choice == "3":
+    elif write_choice == "3":
         new_output = None
     else:
-        new_output = _prompt_group_for_side(console, "WRITE", current_output)
+        dm_wc_w, ch_wc_w, ids_w = await _select_channels_with_wildcards(
+            "WRITE",
+            available,
+            preselected_ids=_specific(cur_out, "channel"),
+            preselected_dm_wildcard=_wildcard(cur_out, "dm"),
+            preselected_channel_wildcard=_wildcard(cur_out, "channel"),
+        )
+        new_output = _build_groups(dm_wc_w, ch_wc_w, ids_w)
 
     return new_input, new_output
