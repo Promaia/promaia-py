@@ -23,12 +23,14 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
-from typing import IO, Optional
+from typing import IO, List, Optional
 
 # Strip ANSI CSI/OSC sequences so the on-disk log is plain text and grep-able.
 _ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
@@ -185,3 +187,109 @@ def setup_session_logging(level: Optional[int] = None) -> None:
         pass
 
     _setup_done = True
+
+
+def _today_session_path() -> Optional[Path]:
+    """Resolve today's session log path. Returns None if logs dir is unavailable."""
+    try:
+        from promaia.utils.env_writer import get_logs_dir
+
+        session_dir = get_logs_dir() / _SESSION_DIR_NAME
+        session_dir.mkdir(parents=True, exist_ok=True)
+        return session_dir / f"{datetime.now().strftime('%Y-%m-%d')}.log"
+    except Exception:
+        return None
+
+
+def spawn_logged_child(
+    cmd: List[str],
+    service_name: str,
+    **popen_kwargs,
+) -> subprocess.Popen:
+    """Spawn a subprocess that mirrors stdout+stderr to the shared session log.
+
+    Designed for `promaia.services.supervisor`: every non-CLI container
+    (web, scheduler, slack, discord, calendar, mail) routes its child
+    through this so its output also lands in
+    `<data_dir>/logs/sessions/today.log` with a `[service_name]` prefix.
+
+    Capturing happens at the OS pipe level, so anything the child writes
+    to FD 1 or FD 2 — including its own subprocesses — is included.
+
+    The original stdout/stderr (which is the docker container's log
+    stream) still receives every byte unchanged, so `docker logs <svc>`
+    keeps working exactly as before.
+    """
+    # Resolve the shared log path once. If unavailable, fall back to a
+    # plain Popen so the supervisor never breaks just because logging
+    # infrastructure isn't ready.
+    log_path = _today_session_path()
+    if log_path is None:
+        return subprocess.Popen(cmd, **popen_kwargs)
+
+    try:
+        log_handle: Optional[IO] = open(log_path, "a", encoding="utf-8", buffering=1)
+    except OSError:
+        return subprocess.Popen(cmd, **popen_kwargs)
+
+    header = (
+        f"\n=== [{service_name}] supervisor child start "
+        f"{datetime.now().isoformat(timespec='seconds')} "
+        f"pid={os.getpid()} cmd={' '.join(cmd)} ===\n"
+    )
+    try:
+        log_handle.write(header)
+        log_handle.flush()
+    except Exception:
+        pass
+
+    # Refresh today.log symlink so external readers can always tail one path.
+    try:
+        _refresh_today_symlink(log_path.parent, log_path)
+    except Exception:
+        pass
+
+    popen_kwargs.setdefault("stdout", subprocess.PIPE)
+    popen_kwargs.setdefault("stderr", subprocess.STDOUT)
+    popen_kwargs.setdefault("bufsize", 1)
+    popen_kwargs.setdefault("text", True)
+    popen_kwargs.setdefault("errors", "replace")
+
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+
+    def _relay() -> None:
+        prefix = f"[{service_name}] "
+        try:
+            assert proc.stdout is not None
+            for line in iter(proc.stdout.readline, ""):
+                # Echo to docker's captured stream verbatim
+                try:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+                # Tee into shared session log, ANSI-stripped + prefixed
+                try:
+                    clean = _ANSI_RE.sub("", line)
+                    if not clean.endswith("\n"):
+                        clean += "\n"
+                    log_handle.write(prefix + clean)
+                    log_handle.flush()
+                except Exception:
+                    pass
+        finally:
+            try:
+                log_handle.close()
+            except Exception:
+                pass
+
+    relay_thread = threading.Thread(
+        target=_relay,
+        name=f"log-relay-{service_name}",
+        daemon=True,
+    )
+    relay_thread.start()
+    # Stash the relay thread on the proc object so callers can join if they
+    # want a clean shutdown — supervisor.py doesn't have to bother.
+    proc._log_relay = relay_thread  # type: ignore[attr-defined]
+    return proc
