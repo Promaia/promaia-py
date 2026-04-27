@@ -8,14 +8,7 @@ work with it.
 
 ## Active
 
-### Granular agent permissions
-
-Per-tool MCP allow lists, per-column source redaction, channel groups
-(DM / channel + wildcards), `is_default_agent` uniqueness. Schema +
-runtime gates + CLI pickers shipped on `koii-prod`; chat-side
-interview prompts and main merge still pending.
-
-See [`agent-permissions.md`](agent-permissions.md).
+_(no active workstreams — granular agent permissions shipped to the koii-prod test surface 2026-04-26; main → Glacier merge pending separate sign-off)_
 
 ## Future
 

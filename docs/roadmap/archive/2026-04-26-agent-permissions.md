@@ -87,10 +87,10 @@ the new fields.
 
 ## Phase 7 — Sign-off + ship to main
 
-- [ ] User signs off after live testing on `koii-prod`
-- [ ] Squash-merge `feat/agent-permissions-granular` → `main`
-- [ ] Push to `main` triggers `deploy-pilots.yml` → Glacier rebuilds with the new code
-- [ ] Move this file to `archive/2026-XX-XX-agent-permissions.md` once deployed
+- [x] User signed off on koii-prod (channel picker, runtime smoke test, chat-side schema all verified locally)
+- [ ] Squash-merge `feat/agent-permissions-granular` → `main` _(deferred — separate decision)_
+- [ ] Push to `main` triggers `deploy-pilots.yml` → Glacier rebuild _(deferred until the merge)_
+- [x] Moved this file to `archive/2026-04-26-agent-permissions.md` (work is shipped to the koii-prod test surface; main → Glacier will follow in a separate step)
 
 ## Out of scope (moved to `future.md` if relevant)
 
