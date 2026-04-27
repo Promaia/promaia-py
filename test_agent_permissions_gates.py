@@ -732,6 +732,132 @@ def test_collect_picker_result_shape():
 
 
 # ---------------------------------------------------------------------------
+# Picker → AgentConfig routing (unified-picker Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def test_router_single_row_gmail_rw_sets_databases_source_access_and_messaging():
+    from promaia.agents.agent_config import AgentConfig, SourcePermission
+    from promaia.cli.external_tools_picker_router import apply_picker_result
+
+    agent = AgentConfig(name="t", workspace="koii", databases=[], prompt_file="", mcp_tools=[])
+    apply_picker_result(agent, {
+        "gmail": {"shape": "single_row", "enabled": True, "r": True, "w": True, "children": []},
+    })
+    assert "gmail" in agent.databases
+    assert agent.messaging_enabled is True
+    sa = next(s for s in agent.source_access if s.source_name == "gmail")
+    assert SourcePermission.QUERY in sa.permissions
+    assert SourcePermission.WRITE in sa.permissions
+
+
+def test_router_single_row_disable_removes_everything():
+    from promaia.agents.agent_config import AgentConfig, SourceAccess, SourcePermission
+    from promaia.cli.external_tools_picker_router import apply_picker_result
+
+    agent = AgentConfig(
+        name="t", workspace="koii",
+        databases=["gmail", "calendar"], prompt_file="", mcp_tools=[],
+        messaging_enabled=True,
+        source_access=[
+            SourceAccess(source_name="gmail", initial_days=None,
+                         permissions=[SourcePermission.QUERY, SourcePermission.WRITE]),
+        ],
+    )
+    apply_picker_result(agent, {
+        "gmail": {"shape": "single_row", "enabled": False, "r": False, "w": False, "children": []},
+    })
+    assert "gmail" not in agent.databases
+    assert "calendar" in agent.databases  # untouched
+    assert agent.messaging_enabled is False
+    assert (agent.source_access or []) == []
+
+
+def test_router_channel_sublist_builds_groups():
+    from promaia.agents.agent_config import AgentConfig
+    from promaia.cli.external_tools_picker_router import apply_picker_result
+
+    agent = AgentConfig(name="t", workspace="koii", databases=[], prompt_file="", mcp_tools=[])
+    apply_picker_result(agent, {
+        "slack": {
+            "shape": "channel_sublist",
+            "enabled": True, "r": False, "w": False,
+            "children": [
+                {"id": "__wildcard_dm__", "label": "✱ Any DM", "enabled": True, "r": True, "w": True},
+                {"id": "__wildcard_channel__", "label": "✱ Any non-DM", "enabled": False, "r": False, "w": False},
+                {"id": "C_eng", "label": "#engineering", "enabled": True, "r": True, "w": True},
+                {"id": "C_design", "label": "#design", "enabled": True, "r": True, "w": False},
+            ],
+        },
+    })
+    assert agent.allowed_channel_groups == {"dm": ["*"], "channel": ["C_eng", "C_design"]}
+    assert agent.allowed_output_channel_groups == {"dm": ["*"], "channel": ["C_eng"]}
+    assert agent.messaging_enabled is True
+
+
+def test_router_mcp_server_sets_allowlist():
+    from promaia.agents.agent_config import AgentConfig
+    from promaia.cli.external_tools_picker_router import apply_picker_result
+
+    agent = AgentConfig(name="t", workspace="koii", databases=[], prompt_file="", mcp_tools=[])
+    apply_picker_result(agent, {
+        "po-manager": {
+            "shape": "mcp_server",
+            "enabled": True, "r": False, "w": False,
+            "children": [
+                {"id": "list_vendors", "label": "list_vendors", "enabled": True, "r": True, "w": False},
+                {"id": "list_parts", "label": "list_parts", "enabled": True, "r": True, "w": False},
+                {"id": "delete_vendor", "label": "delete_vendor", "enabled": False, "r": False, "w": False},
+            ],
+        },
+    })
+    assert "po-manager" in agent.mcp_tools
+    assert agent.mcp_tool_allowlist == {"po-manager": ["list_vendors", "list_parts"]}
+
+
+def test_router_mcp_server_disable_removes():
+    from promaia.agents.agent_config import AgentConfig
+    from promaia.cli.external_tools_picker_router import apply_picker_result
+
+    agent = AgentConfig(
+        name="t", workspace="koii", databases=[], prompt_file="",
+        mcp_tools=["po-manager"],
+        mcp_tool_allowlist={"po-manager": ["list_vendors"]},
+    )
+    apply_picker_result(agent, {
+        "po-manager": {
+            "shape": "mcp_server",
+            "enabled": False, "r": False, "w": False, "children": [],
+        },
+    })
+    assert agent.mcp_tools == []
+    assert agent.mcp_tool_allowlist is None
+
+
+def test_router_sublist_notion_writes_source_access_per_db():
+    from promaia.agents.agent_config import AgentConfig, SourcePermission
+    from promaia.cli.external_tools_picker_router import apply_picker_result
+
+    agent = AgentConfig(name="t", workspace="koii", databases=[], prompt_file="", mcp_tools=[])
+    apply_picker_result(agent, {
+        "notion": {
+            "shape": "sublist",
+            "enabled": True, "r": False, "w": False,
+            "children": [
+                {"id": "stories", "label": "stories", "enabled": True, "r": True, "w": True},
+                {"id": "journal", "label": "journal", "enabled": True, "r": True, "w": False},
+                {"id": "cms", "label": "cms", "enabled": False, "r": False, "w": False},
+            ],
+        },
+    })
+    by_name = {s.source_name: s for s in agent.source_access or []}
+    assert SourcePermission.WRITE in by_name["stories"].permissions
+    assert SourcePermission.QUERY in by_name["journal"].permissions
+    assert SourcePermission.WRITE not in by_name["journal"].permissions
+    assert "cms" not in by_name
+
+
+# ---------------------------------------------------------------------------
 # Manual runner (so this works without pytest, since the project has no
 # configured test runner today)
 # ---------------------------------------------------------------------------

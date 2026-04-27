@@ -113,15 +113,15 @@ gates, label, and "shape" (single row vs sub-list).
 
 ## Phase 2 — Inline tree picker (the screen)
 
-- [ ] New helper `select_external_tools(agent, workspace)` in `agent_creation_selector.py`
-- [ ] Reuse `workspace_browser`'s multi-column row pattern; add expand/collapse state per top-level row
-- [ ] Top-level rows: read pre-state from agent's existing config
-  - Built-ins: row pre-checked iff any of their gates are non-default for this agent
-  - MCP servers: row pre-checked iff in `agent.mcp_tools`
-- [ ] Children rendered when expanded, hidden when collapsed
-  - Lazy-load: don't fetch live data (Slack channels, MCP tools) until the row is expanded the first time
-  - Show "Fetching..." inline placeholder during the load
-- [ ] Keybindings: `↑↓ row`, `L/R expand/collapse`, `SPACE toggle current cell`, `TAB column (R↔W)`, `ENTER save`, `ESC cancel`
+- [x] **2a** State model + pre-state computation (`external_tools_picker_state.py`)
+- [x] **2b** Renderer + keybindings (`external_tools_picker.py`). `select_external_tools(agent, workspace)` is the entry point.
+- [x] **2c** Real fetch callbacks per shape (`external_tools_picker_fetchers.py`):
+  notion/sheets read configured DBs from the database manager;
+  slack live-fetches channels (reuses `_fetch_slack_channels`);
+  mcp_server reads from `mcp_tool_cache`. Discord falls back to
+  wildcard-only until a channel-list helper exists.
+- [x] Lazy-load: `fetch_children` only fires on first expand
+- [x] Keybindings: ↑↓ row (skip section headers), L/R expand/collapse, SPACE toggle current cell, TAB / Shift-TAB column, ENTER save, ESC cancel
 
 ## Phase 3 — Per-tool routing
 
@@ -129,20 +129,19 @@ When the picker saves, route each tool's state into the right
 underlying field. This is mostly bookkeeping but the per-tool logic
 is what determines correctness.
 
-- [ ] **Notion**: source list with R/W matrix → `databases` (read rows) + `SourceAccess` entries with `permissions=[QUERY]` or `[QUERY, WRITE]`
-- [ ] **Gmail single-row**: R/W → `databases` includes "gmail" + `source_access[gmail].permissions` reflects R/W; W also flips `messaging_enabled=True`
-- [ ] **Calendar single-row**: R/W → same shape as Gmail (databases + source_access)
-- [ ] **Google Sheets sublist**: per-spreadsheet R/W matrix → `databases` + `SourceAccess` per sheet
-- [ ] **Slack channel sublist**: live-fetched channels + R/W matrix → `allowed_channel_groups` (R column) + `allowed_output_channel_groups` (W column); W on any row flips `messaging_enabled=True`
-- [ ] **Discord channel sublist**: same as Slack but Discord API; falls back to wildcard-only if no Discord bot token configured
-- [ ] **MCP server tool sublist**: per-tool ALLOWED column (no R/W split — per-tool allow/deny only) → `mcp_tool_allowlist[server]`
+- [x] **Notion / Sheets sublist**: per-DB R/W → `databases` + `SourceAccess.permissions=[QUERY]` or `[QUERY, WRITE]`
+- [x] **Gmail single-row**: R/W → `databases` + `source_access[gmail]`; W flips `messaging_enabled=True`
+- [x] **Calendar single-row**: R/W → `databases` + `source_access[calendar]`
+- [x] **Slack / Discord channel sublist**: wildcard rows + per-channel R/W → `allowed_channel_groups` (R) + `allowed_output_channel_groups` (W); W flips `messaging_enabled=True`. Legacy flat lists cleared when groups are written.
+- [x] **MCP server**: per-tool allowed column → `mcp_tool_allowlist[server]`. Disabling the server removes it from `mcp_tools` and drops the allowlist entry.
+- [x] All routed via `external_tools_picker_router.apply_picker_result`. 6 new tests cover each shape's routing path. (51/51 total pass.)
 
 ## Phase 4 — Replace the old menu options
 
-- [ ] In `handle_agent_edit`: replace options **4** and **9** with a single **4 — External tools and MCP** that calls `select_external_tools`
-- [ ] In `handle_agent_create`: replace the separate "Configure MCP tools?" prompt and the channel-permissions step with the same unified picker
-- [ ] Hard-cut: old options literally disappear from the menu. No deprecation alias.
-- [ ] Update help text / `maia agent --help` if any of it lists the old option numbers
+- [x] `handle_agent_edit` option **4 — External tools and MCP** calls `select_external_tools` and routes via `apply_picker_result`. Old option 4 (MCP Tools) and option 9 (Channel Permissions) hard-cut from the menu.
+- [ ] `handle_agent_create`: same unified picker replaces the separate "Configure MCP tools?" prompt and channel-permissions step. _(next slice)_
+- [x] Hard-cut: no deprecation aliases.
+- [ ] Update help text / `maia agent --help` if any of it lists the old option numbers _(audit pending — most help comes from argparse defaults so likely fine)_
 
 ## Phase 5 — Chat-side schema
 

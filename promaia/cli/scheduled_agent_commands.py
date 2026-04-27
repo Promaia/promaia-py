@@ -13,7 +13,7 @@ import random
 import signal
 import time
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from pathlib import Path
 
 from promaia.agents import (
@@ -1914,18 +1914,17 @@ async def handle_agent_edit(args):
     console.print("  1. Name")
     console.print("  2. Databases")
     console.print("  3. Schedule")
-    console.print("  4. MCP Tools")
+    console.print("  4. External tools and MCP")
     console.print("  5. Max Iterations")
     console.print("  6. Description")
     console.print("  7. All fields (full edit)")
     console.print("  8. Calendar Settings")
-    console.print("  9. Channel Permissions (Slack/Discord read & write)")
     console.print("  0. Cancel")
     console.print()
 
     session = PromptSession()
     try:
-        choice = await session.prompt_async("Select option (0-9): ")
+        choice = await session.prompt_async("Select option (0-8): ")
         choice = choice.strip()
     except (EOFError, KeyboardInterrupt):
         console.print("\n❌ Cancelled", style="red")
@@ -2002,9 +2001,9 @@ async def handle_agent_edit(args):
             console.print(f"✓ Updated schedule: [cyan]{schedule_to_string(new_schedule)}[/cyan]", style="dim")
 
     if choice in ["4", "7"]:
-        console.print("\nSelect MCP tools...")
-        # Load available MCP servers from mcp_servers.json + built-in integrations
-        available_tools = []
+        console.print("\n🛠 External tools and MCP", style="bold cyan")
+        # Discover available MCP servers from mcp_servers.json
+        mcp_server_names: List[str] = []
         try:
             import json
             from promaia.agents.mcp_loader import _find_mcp_servers_json
@@ -2013,56 +2012,30 @@ async def handle_agent_edit(args):
                 with open(mcp_config_file, "r") as f:
                     mcp_config = json.load(f)
                     servers = mcp_config.get("servers", {})
-                    available_tools = [
+                    mcp_server_names = [
                         name for name, config in servers.items()
                         if config.get("enabled", True)
                     ]
         except Exception as e:
             logger.warning(f"Could not load MCP servers: {e}")
 
-        # Add built-in integrations that have tool support
-        for builtin in ("gmail", "calendar"):
-            if builtin not in available_tools:
-                available_tools.append(builtin)
+        try:
+            from promaia.cli.external_tools_picker import select_external_tools
+            from promaia.cli.external_tools_picker_router import apply_picker_result
 
-        selected_tools = await select_mcp_tools(available_tools, preselected=agent.mcp_tools)
-        if selected_tools is not None:  # Allow empty list
-            agent.mcp_tools = selected_tools
-            tools_display = ', '.join(selected_tools) if selected_tools else "None"
-            console.print(f"✓ Updated MCP tools: [cyan]{tools_display}[/cyan]", style="dim")
-
-            # Q9 — re-walk the per-tool allow list whenever servers change.
-            # Q5b — refuse to save the new mcp_tools change if any selected
-            # MCP server is unreachable; revert the in-memory tool change.
-            if selected_tools:
-                from promaia.cli.agent_creation_selector import (
-                    select_mcp_tool_allowlist, McpServerUnreachableError,
-                )
-                try:
-                    new_allowlist = await select_mcp_tool_allowlist(
-                        selected_tools, preselected=agent.mcp_tool_allowlist
-                    )
-                except McpServerUnreachableError as e:
-                    console.print(f"[red]Refusing to update tool list:[/red]\n{e}")
-                    console.print(
-                        "[red]Reverting tool change for this edit.[/red]"
-                    )
-                    # Roll back: don't save the new selection.
-                    return
-                if new_allowlist is None:
-                    # All built-ins → no allowlist needed; clear any previous one.
-                    agent.mcp_tool_allowlist = None
-                else:
-                    agent.mcp_tool_allowlist = new_allowlist
-                    n = sum(len(v or []) for v in new_allowlist.values())
-                    console.print(
-                        f"✓ Allow list updated: {n} tool(s) across "
-                        f"{len(new_allowlist)} MCP server(s)",
-                        style="dim",
-                    )
+            result = await select_external_tools(
+                agent=agent,
+                workspace=agent.workspace,
+                mcp_server_names=mcp_server_names,
+            )
+            if result is not None:
+                changes = apply_picker_result(agent, result)
+                for c in changes:
+                    console.print(f"  ✓ {c}", style="dim")
             else:
-                # No tools selected → drop the allow list too
-                agent.mcp_tool_allowlist = None
+                console.print("  ❌ Cancelled external tools edit", style="red")
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n❌ Cancelled external tools edit", style="red")
 
     if choice in ["5", "7"]:
         console.print(f"\nCurrent max iterations: [cyan]{agent.max_iterations}[/cyan]")
@@ -2085,28 +2058,6 @@ async def handle_agent_edit(args):
                 console.print(f"✓ Updated description", style="dim")
         except (EOFError, KeyboardInterrupt):
             pass
-
-    if choice == "9":
-        console.print("\n💬 Channel Permissions", style="bold cyan")
-        from promaia.cli.agent_creation_selector import select_channel_groups
-        try:
-            new_in, new_out = await select_channel_groups(
-                workspace=agent.workspace,
-                current_input=getattr(agent, "allowed_channel_groups", None),
-                current_output=getattr(agent, "allowed_output_channel_groups", None),
-            )
-            agent.allowed_channel_groups = new_in
-            agent.allowed_output_channel_groups = new_out
-            # If user picked groups, also clear the legacy flat list so
-            # the resolution order doesn't surprise them by overriding.
-            agent.allowed_channel_ids = None
-            agent.allowed_output_channel_ids = None
-            console.print(
-                f"✓ Updated channel permissions (read={new_in}, write={new_out})",
-                style="dim",
-            )
-        except (EOFError, KeyboardInterrupt):
-            console.print("\n❌ Cancelled channel permissions edit", style="red")
 
     if choice == "8":
         console.print("\n📅 Calendar Settings", style="bold cyan")
