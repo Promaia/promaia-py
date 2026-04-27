@@ -13,17 +13,11 @@ access without granting modification access.
 
 ## Phase 0 — Audit write paths
 
-Before touching the gate we need to know exactly where an agent can
-WRITE to an internal source. Likely candidates:
+- [x] Audit complete (results below)
 
-- [ ] Promaia internal SQLite (`hybrid_metadata.db`, `conversations.db`, `workflows.db`) — find every codepath an agent invocation can reach that mutates these tables
-- [ ] Notion DB writes (create/update/delete page) — usually MCP-mediated; confirm
-- [ ] Slack/Discord write APIs (post message, react, edit) — gated by `messaging_enabled` + channel groups; confirm no extra source-level gate is needed
-- [ ] Filesystem sandbox writes — gated separately; confirm no overlap
-- [ ] Anything else surfaced by `grep -r "INSERT\|UPDATE\|DELETE\|create_page\|update_page" promaia/` (filtered to call sites reachable from `agentic_turn`)
-
-Output: a one-liner inventory in this file under "Audit results"
-listing each call site + the source it modifies.
+Findings: most internal SQLite mutations are sync-system-internal
+(hybrid_storage cache updates, sync_cache pruning) — agents don't
+choose to call them. The TRUE agent-elective writes are:
 
 ## Phase 1 — Schema
 
@@ -66,6 +60,35 @@ For each write path found in Phase 0:
 - [ ] Squash-merge to main → Glacier deploy
 - [ ] Move this file to `archive/`
 
-## Audit results (Phase 0 fills this in)
+## Audit results
 
-_(empty until Phase 0 runs)_
+**Agent-elective writes that need a source-level gate:**
+
+| Tool | Call site | Source resolution | Notes |
+|---|---|---|---|
+| `notion_create_page` | `agentic_turn.py:6096-6138` | takes a `database_id` directly → lookup nickname in `promaia.config.json` | Creates a new page in a Notion DB. Cleanest case. |
+| `notion_update_page` | `agentic_turn.py:6142-6177` | takes `page_id`; need to resolve parent database via `client.pages.retrieve` or local cache | Updates page properties + optionally appends blocks. |
+| `notion_append_blocks` | `agentic_turn.py:6290-6305` | same as above (`page_id` → parent DB) | Appends content to a page. |
+
+**Already gated elsewhere — no source-level gate needed:**
+
+- MCP server tool calls (`po_manager.update_vendor`, etc.) — gated by `mcp_tool_allowlist` and the per-tool runtime check. Source-level WRITE doesn't add anything.
+- Slack / Discord output — gated by `messaging_enabled` + `allowed_output_channel_ids` / `allowed_output_channel_groups`.
+- Filesystem sandbox writes — separate gate in `promaia.tools.sandbox`.
+- Memory / notepad — agent-private state, not a "source" in the access-control sense.
+
+**Sync-system-internal writes (not agent-elective, no gate added):**
+
+- `hybrid_storage.py` — cache mutations during Notion sync.
+- `sync_cache.py` — stale-page pruning.
+- `task_queue.py`, `execution_tracker.py`, `orchestrator.py` — orchestrator bookkeeping; the agent doesn't pick to write to these, the system writes on its behalf.
+- `agentic_turn.py:4924, 5357` — google_sheets cache writes during sync, not agent-driven.
+
+**Implication for Phase 1+:** the gate hangs off the three `notion_*`
+write tools. Each resolves the destination Notion database (the
+"source" in `source_access` parlance) and checks
+`agent.can_write_source(<source_nickname>)` before invoking the
+Notion API. Source-name resolution is the only fiddly bit — for
+`notion_update_page` / `notion_append_blocks` we likely cache the
+mapping in `hybrid_metadata.db` already; if not, a single
+`client.pages.retrieve` call gives us the parent.
