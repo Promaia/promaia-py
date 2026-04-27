@@ -2534,9 +2534,64 @@ AGENT_TOOL_DEFINITIONS = [
                     "items": {"type": "string"},
                     "description": (
                         "Slack/Discord channel IDs this agent can respond in "
-                        "and query messages from. Pass empty array to remove "
-                        "restrictions (allow all channels). Omit to leave unchanged."
+                        "and query messages from (LEGACY flat list — prefer "
+                        "allowed_channel_groups for new edits). Pass empty "
+                        "array to remove restrictions. Omit to leave unchanged."
                     )
+                },
+                "allowed_output_channel_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Channel IDs the agent may POST to. Separate from the "
+                        "input gate (allowed_channel_ids). When omitted, the "
+                        "input gate also governs output (\"if you can read "
+                        "it, you can write to it\")."
+                    )
+                },
+                "allowed_channel_groups": {
+                    "type": "object",
+                    "description": (
+                        "Group-typed input gate. Keys: \"dm\" (Slack DMs / "
+                        "Discord direct messages), \"channel\" (everything "
+                        "else). Values: list of channel IDs OR [\"*\"] for "
+                        "any channel of that type. e.g. "
+                        "{\"dm\": [\"*\"], \"channel\": [\"C_engineering\"]}. "
+                        "Takes precedence over allowed_channel_ids only when "
+                        "the flat list is null."
+                    ),
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                },
+                "allowed_output_channel_groups": {
+                    "type": "object",
+                    "description": (
+                        "Group-typed output gate, same shape as "
+                        "allowed_channel_groups. When omitted, output falls "
+                        "back to the input gate."
+                    ),
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                },
+                "mcp_tool_allowlist": {
+                    "type": "object",
+                    "description": (
+                        "Per-tool MCP allow list — deny-by-default for any "
+                        "MCP tool not listed here. Keys are MCP server names "
+                        "from mcp_tools (e.g. \"po-manager\"); values are "
+                        "lists of tool names the agent is allowed to call on "
+                        "that server. e.g. "
+                        "{\"po-manager\": [\"list_vendors\", \"list_parts\"]}. "
+                        "Use null as the value to grant the entire server "
+                        "wholesale (rare). Built-in integrations like "
+                        "\"gmail\" and \"calendar\" don't need entries here "
+                        "— they have their own runtime gates."
+                    ),
+                    "additionalProperties": True
                 },
             },
             "required": ["name"]
@@ -2617,9 +2672,55 @@ AGENT_TOOL_DEFINITIONS = [
                     "items": {"type": "string"},
                     "description": (
                         "Slack/Discord channel IDs (e.g. ['C0ABC123']) this agent "
-                        "can respond in and query messages from. Get IDs from "
+                        "can respond in and query messages from (LEGACY flat list "
+                        "— prefer allowed_channel_groups). Get IDs from "
                         "list_channels. Omit for unrestricted access."
                     )
+                },
+                "allowed_output_channel_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Channel IDs the agent may POST to. Separate from input "
+                        "gate (allowed_channel_ids). Omit to inherit from input."
+                    )
+                },
+                "allowed_channel_groups": {
+                    "type": "object",
+                    "description": (
+                        "Group-typed channel allow list. Keys: \"dm\" / "
+                        "\"channel\". Values: list of IDs OR [\"*\"] for any "
+                        "of that type. e.g. {\"dm\": [\"*\"], \"channel\": "
+                        "[\"C_engineering\"]} = any DM + only #engineering. "
+                        "Preferred over allowed_channel_ids for new agents."
+                    ),
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                },
+                "allowed_output_channel_groups": {
+                    "type": "object",
+                    "description": (
+                        "Group-typed output gate, same shape. Omit to inherit "
+                        "from allowed_channel_groups."
+                    ),
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                },
+                "mcp_tool_allowlist": {
+                    "type": "object",
+                    "description": (
+                        "Per-tool MCP allow list — deny-by-default. Keys: "
+                        "MCP server names from mcp_tools. Values: lists of "
+                        "tool names allowed on that server. e.g. "
+                        "{\"po-manager\": [\"list_vendors\", \"list_parts\"]}. "
+                        "Built-ins like \"gmail\" / \"calendar\" don't need "
+                        "entries here."
+                    ),
+                    "additionalProperties": True
                 },
             },
             "required": ["name"]
@@ -7724,6 +7825,29 @@ class ToolExecutor:
                 ids = tool_input["allowed_channel_ids"]
                 agent.allowed_channel_ids = ids if ids else None
                 changes.append("allowed_channel_ids")
+            if "allowed_output_channel_ids" in tool_input:
+                ids = tool_input["allowed_output_channel_ids"]
+                agent.allowed_output_channel_ids = ids if ids else None
+                changes.append("allowed_output_channel_ids")
+            if "allowed_channel_groups" in tool_input:
+                grp = tool_input["allowed_channel_groups"]
+                agent.allowed_channel_groups = grp if grp else None
+                # When the chat agent sets groups, clear the legacy flat list
+                # so the resolution order doesn't shadow what the user just
+                # asked for. Keeps behavior consistent with the CLI picker.
+                if grp:
+                    agent.allowed_channel_ids = None
+                changes.append("allowed_channel_groups")
+            if "allowed_output_channel_groups" in tool_input:
+                grp = tool_input["allowed_output_channel_groups"]
+                agent.allowed_output_channel_groups = grp if grp else None
+                if grp:
+                    agent.allowed_output_channel_ids = None
+                changes.append("allowed_output_channel_groups")
+            if "mcp_tool_allowlist" in tool_input:
+                al = tool_input["mcp_tool_allowlist"]
+                agent.mcp_tool_allowlist = al if al else None
+                changes.append("mcp_tool_allowlist")
 
             if not changes:
                 return "No fields to update were provided."
@@ -7844,6 +7968,18 @@ class ToolExecutor:
             if "allowed_channel_ids" in tool_input:
                 ids = tool_input["allowed_channel_ids"]
                 agent_config.allowed_channel_ids = ids if ids else None
+            if "allowed_output_channel_ids" in tool_input:
+                ids = tool_input["allowed_output_channel_ids"]
+                agent_config.allowed_output_channel_ids = ids if ids else None
+            if "allowed_channel_groups" in tool_input:
+                grp = tool_input["allowed_channel_groups"]
+                agent_config.allowed_channel_groups = grp if grp else None
+            if "allowed_output_channel_groups" in tool_input:
+                grp = tool_input["allowed_output_channel_groups"]
+                agent_config.allowed_output_channel_groups = grp if grp else None
+            if "mcp_tool_allowlist" in tool_input:
+                al = tool_input["mcp_tool_allowlist"]
+                agent_config.mcp_tool_allowlist = al if al else None
 
             # Validate
             errors = agent_config.validate()

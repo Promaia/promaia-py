@@ -29,9 +29,25 @@ current configuration. Present it clearly.
    - **Max iterations**: Per-run iteration limit
    - **Messaging**: Enable/disable messaging tools (start_conversation, end_conversation)
    - **Channel permissions**: Restrict which Slack/Discord channels the \
-agent can respond in and query. Use `list_channels` to show available \
-channels. Pass channel IDs as `allowed_channel_ids` via `update_agent`. \
-Pass an empty array to remove restrictions.
+agent can respond in (read) and post to (write). Two ways:
+     - **Group form (preferred):** pass `allowed_channel_groups` as an \
+object with keys "dm" and "channel"; values are either `["*"]` (any of \
+that type) or a list of specific channel IDs. e.g. \
+`{"dm": ["*"], "channel": ["C_engineering"]}` = "any DM, only \
+#engineering." Pass `allowed_output_channel_groups` separately if write \
+should differ from read; omit it to mirror read.
+     - **Flat list (legacy):** pass `allowed_channel_ids` as a list of \
+specific IDs. Use `list_channels` to find IDs first. Output side: \
+`allowed_output_channel_ids`.
+     - Pass `null`/empty to remove restrictions in either form.
+   - **MCP tool allow list**: Restrict which tools on each MCP server \
+the agent may call. Pass `mcp_tool_allowlist` as an object keyed by \
+server name (matching entries in `mcp_tools`), with values being lists \
+of tool names. e.g. `{"po-manager": ["list_vendors", "list_parts"]}` \
+means the agent can call those two tools and nothing else on \
+po-manager. Built-in integrations (`gmail`, `calendar`) don't need \
+entries — they have their own runtime gates. Pass `null` to remove \
+the restriction (legacy allow-all).
    - **Name**: Rename the agent (uses `rename_agent`)
    - **Enable/Disable**: Toggle the agent on/off
 

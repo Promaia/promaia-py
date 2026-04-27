@@ -78,10 +78,12 @@ agent edits via conversation. Today its `update_agent` tool only
 knows about `allowed_channel_ids` and `mcp_tools`. Needs to learn
 the new fields.
 
-- [ ] Extend the chat-side `update_agent` tool schema with `mcp_tool_allowlist`, `allowed_channel_groups`, `allowed_output_channel_groups`, `allowed_output_channel_ids`
-- [ ] Update `agent_edit.py` workflow prompt to mention the new fields and walk the user through them
-- [ ] Update `create_agent.py` workflow prompt the same way
-- [ ] Manual smoke test: `maia chat` → "edit my bondu agent so it can only post in DMs" → verify the right fields land in `agents.json`
+- [x] Extend the chat-side `update_agent` tool schema with `mcp_tool_allowlist`, `allowed_channel_groups`, `allowed_output_channel_groups`, `allowed_output_channel_ids`
+- [x] Extend the `create_agent` tool schema with the same new fields
+- [x] Wire all five new fields through `_update_agent` and `_create_agent` handlers (clearing legacy flat-list when groups are set, mirroring the CLI picker behavior)
+- [x] Update `agent_edit.py` workflow prompt to mention the new fields and walk the user through them
+- [x] Update `create_agent.py` workflow prompt the same way (split into 8b channels + 8c mcp tools)
+- [ ] Manual smoke test: `maia chat` → "edit my agent so it can only post in DMs and only call po-manager.list_vendors" → verify the right fields land in `agents.json`
 
 ## Phase 7 — Sign-off + ship to main
 
