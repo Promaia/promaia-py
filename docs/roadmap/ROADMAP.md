@@ -26,12 +26,13 @@ modify. Adds an explicit per-source read-only / read+write toggle.
 
 See [`agent-permissions-sql-rw-split.md`](agent-permissions-sql-rw-split.md).
 
+## Deferred (post-pilot)
+
 ### Agent permissions — Notion page-level scope
 
-Per-page allowlist within a Notion database. Today scoping ends at
-the database level; adds an `allowed_pages` list per source so an
-agent can be restricted to specific Notion pages. UX mirrors
-`maia setup notion`.
+Per-page allowlist within a Notion database with per-page R/W
+matrix. Out of pilot scope — DB-level R/W via the unified picker is
+enough for now.
 
 See [`agent-permissions-notion-page-scope.md`](agent-permissions-notion-page-scope.md).
 

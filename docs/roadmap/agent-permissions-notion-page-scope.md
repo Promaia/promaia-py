@@ -1,8 +1,15 @@
 # Agent permissions — Notion page-level scope
 
+> ⏸ **DEFERRED — post-pilot.** Not in pilot scope. Database-level
+> R/W via the unified picker is enough for now. Pick this back up
+> when there's a concrete need to scope an agent to specific pages
+> within a Notion DB.
+
 **Goal:** Today an agent with `databases: ["stories"]` sees every page in
 the stories database. Add per-page allowlisting so agents can be scoped
-to a hand-picked set of pages within a Notion DB.
+to a hand-picked set of pages within a Notion DB. When that lands,
+this also wires the per-page R/W matrix into the unified picker
+(extending the database-level R/W to one more level of depth).
 
 **Pattern reference:** `maia setup notion` already calls `notion.com/v1/
 search` and `databases/{id}/query` to fetch real pages, then renders a
