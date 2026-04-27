@@ -125,7 +125,8 @@ def _summarize_tool_input(tool_name: str, tool_input: dict) -> str:
     elif tool_name == "web_fetch":
         return tool_input.get("url", "")[:80]
     elif tool_name.startswith("notion_"):
-        return tool_input.get("query", tool_input.get("filter", ""))[:60] if tool_input else ""
+        val = tool_input.get("query") or tool_input.get("filter") or ""
+        return str(val)[:60]
     elif tool_name.startswith("sheets_"):
         ss = tool_input.get("spreadsheet", tool_input.get("title", ""))
         return ss[:40] if ss else ""
