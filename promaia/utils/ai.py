@@ -232,12 +232,25 @@ def calculate_ai_cost(
     cache_creation_cost = (cache_creation_tokens / 1_000_000) * input_rate * 1.25
     total_cost = input_cost + output_cost + cache_read_cost + cache_creation_cost
 
+    # Counterfactual: what the same token volume would have cost if every
+    # cache_read had been billed as fresh input and no cache_creation
+    # premium had been paid. cache_savings = positive when caching is
+    # winning, negative when cache writes outweigh reads (e.g. a turn
+    # that wrote to cache but didn't read enough to amortize the 1.25x).
+    cost_without_cache = (
+        ((prompt_tokens + cache_read_tokens + cache_creation_tokens) / 1_000_000) * input_rate
+        + output_cost
+    )
+    cache_savings = cost_without_cache - total_cost
+
     return {
         "input_cost": input_cost,
         "output_cost": output_cost,
         "cache_read_cost": cache_read_cost,
         "cache_creation_cost": cache_creation_cost,
         "total_cost": total_cost,
+        "cost_without_cache": cost_without_cache,
+        "cache_savings": cache_savings,
         "model": model_name,
         "prompt_tokens": prompt_tokens,
         "response_tokens": response_tokens,

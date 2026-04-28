@@ -758,6 +758,8 @@ class TagToChatLoop:
                 response_tokens=int(last.get("response_tokens") or 0),
                 turn_cost=float(last.get("total_cost") or 0),
                 session_cost=float(ctx.get("session_cost") or 0),
+                turn_savings=float(last.get("cache_savings") or 0),
+                session_savings=float(ctx.get("session_savings") or 0),
             )
         except Exception:
             return None
