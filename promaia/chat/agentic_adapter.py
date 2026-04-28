@@ -237,11 +237,17 @@ def build_agentic_system_prompt(
     agent_calendars: Optional[Dict[str, str]] = None,
     has_platform: bool = False,
     mcp_tool_descriptions: Optional[List[Dict]] = None,
+    is_child_mode: bool = False,
 ) -> str:
     """Append conversation_mode.md tool guidance to the base terminal prompt.
 
     Strips the XML-format query tools section (used by the non-agentic path)
     since the agentic loop has its own tool guidance in conversation_mode.md.
+
+    When ``is_child_mode=True``, loads ``conversation_mode_child.md`` instead
+    of the default — the child (act subagent) prompt has no Think-mode
+    docs, no shelving, and exits via ``done(report)`` rather than squashing
+    inside a shared session.
     """
     from promaia.utils.env_writer import get_prompts_dir
 
@@ -249,11 +255,12 @@ def build_agentic_system_prompt(
     base_prompt = _strip_xml_query_tools(base_prompt)
 
     from promaia.ai.prompts import _resolve_prompt
-    conv_prompt_path = _resolve_prompt("conversation_mode.md")
+    prompt_filename = "conversation_mode_child.md" if is_child_mode else "conversation_mode.md"
+    conv_prompt_path = _resolve_prompt(prompt_filename)
     try:
         template = conv_prompt_path.read_text()
     except FileNotFoundError:
-        logger.warning(f"conversation_mode.md not found at {conv_prompt_path}")
+        logger.warning(f"{prompt_filename} not found at {conv_prompt_path}")
         return base_prompt
 
     # Build queryable sources list
@@ -887,6 +894,75 @@ async def run_agentic_turn(
     # Use external callback if provided (Slack/Discord), otherwise build terminal callback
     activity_cb = on_tool_activity or make_terminal_activity_callback(print_text_fn)
 
+    # Subagent mode (PROMAIA_SUBAGENT_MODE env var). When on, the parent
+    # agentic loop calls into _spawn_act_child instead of flipping into
+    # Act mode in place; the child runs as a self-contained agentic_turn
+    # with is_child_mode=True. Default off pending user testing.
+    import os as _os
+    subagent_mode = _os.environ.get("PROMAIA_SUBAGENT_MODE", "").lower() in (
+        "1", "true", "yes", "on"
+    )
+
+    spawn_child_cb = None
+    if subagent_mode:
+        # Build the parent's "child mode" system prompt once: it doesn't
+        # depend on which suites get loaded per child, so we can reuse it.
+        child_base_prompt = build_agentic_system_prompt(
+            system_prompt, workspace, mcp_tools, databases,
+            agent_calendars=agent_calendars,
+            mcp_tool_descriptions=mcp_tool_defs if mcp_tool_defs else None,
+            is_child_mode=True,
+        )
+        # Memory is read-only context that the child also benefits from.
+        try:
+            from promaia.agents.memory_store import load_memory_index
+            _mem = load_memory_index(workspace)
+            if _mem:
+                child_base_prompt += f"\n\n## Memory\n\n{_mem}"
+        except ImportError:
+            pass
+
+        async def _spawn_act_child(suites, instructions, parent_tool_use_id):
+            """Spawn one act subagent and return its AgenticTurnResult."""
+            child_executor = executor.clone_for_child()
+            # Notes from the parent's current state survive into the child.
+            child_system = child_base_prompt
+            if child_executor._notepad:
+                child_system += f"\n\n## Working Notes\n\n{child_executor._notepad}"
+
+            # The child's "user" message is the explicit task envelope.
+            instr_str = "\n".join(f"{i+1}. {s}" for i, s in enumerate(instructions or []))
+            child_user_msg = (
+                "You are acting on behalf of the parent Think agent. "
+                f"Loaded suites: {', '.join(suites)}.\n\n"
+                f"Instructions:\n{instr_str if instr_str else '(no explicit steps)'}"
+            )
+
+            logger.info(
+                f"[subagent.spawn] parent_tool_use_id={parent_tool_use_id} "
+                f"suites={suites} instructions={len(instructions or [])}"
+            )
+            child_kwargs = dict(
+                system_prompt=child_system,
+                messages=[{"role": "user", "content": child_user_msg}],
+                tools=tools,
+                tool_executor=child_executor,
+                max_iterations=40,
+                on_tool_activity=activity_cb,  # child tool steps merge
+                                               # into parent's breadcrumb
+                suite_registry=suite_registry,
+                mcp_suites=mcp_suites if mcp_suites else None,
+                is_child_mode=True,
+                child_act_suites=suites,
+                child_act_instructions=instructions,
+                # spawn_child=None — children don't spawn grandchildren.
+            )
+            if model:
+                child_kwargs["model"] = model
+            return await agentic_turn(**child_kwargs)
+
+        spawn_child_cb = _spawn_act_child
+
     # Run the agentic loop
     try:
         agentic_kwargs = dict(
@@ -899,6 +975,7 @@ async def run_agentic_turn(
             context_data_block=context_data_block,
             suite_registry=suite_registry,
             mcp_suites=mcp_suites if mcp_suites else None,
+            spawn_child=spawn_child_cb,
         )
         if model:
             agentic_kwargs["model"] = model
