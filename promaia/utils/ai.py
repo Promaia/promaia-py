@@ -159,6 +159,10 @@ def calculate_ai_cost(
             "input_cost_per_million": 3.00,
             "output_cost_per_million": 15.00
         },
+        "claude-opus-4.7": {
+            "input_cost_per_million": 5.00,
+            "output_cost_per_million": 25.00
+        },
         "claude-opus-4.6": {
             "input_cost_per_million": 5.00,
             "output_cost_per_million": 25.00
@@ -199,6 +203,7 @@ def calculate_ai_cost(
     
     # Map model names to pricing keys
     model_mapping = {
+        "claude-opus-4-7": "claude-opus-4.7",
         "claude-opus-4-6": "claude-opus-4.6",
         "claude-opus-4-6-1m": "claude-opus-4.6",
         "claude-opus-4-5-20251101": "claude-opus-4.5",

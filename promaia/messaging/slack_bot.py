@@ -1041,6 +1041,7 @@ def create_slack_bot():
 
     # Models exposed via the Slack /model picker
     MODEL_CHOICES = [
+        ("claude-opus-4-7", "Claude Opus 4.7 (200K)"),
         ("claude-opus-4-6-1m", "Claude Opus 4.6 (1M)"),
         ("claude-opus-4-6", "Claude Opus 4.6"),
         ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
