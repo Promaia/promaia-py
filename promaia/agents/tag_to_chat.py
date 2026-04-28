@@ -626,6 +626,12 @@ class TagToChatLoop:
             await self._cleanup_temp_message()
             return
 
+        # Optionally prefix the message with cost metadata (Slack only,
+        # toggled via the `/cost` slash command).
+        cost_prefix = await self._build_cost_prefix()
+        if cost_prefix:
+            response_text = f"{cost_prefix}\n\n{response_text}"
+
         # Post actual response as new message (triggers notifications)
         # Discord has a 2000 char limit — split long responses into chunks
         try:
@@ -693,6 +699,44 @@ class TagToChatLoop:
         interrupted = await self._countdown(COUNTDOWN_SECONDS)
         if not interrupted:
             await self._do_thinking_and_respond()
+
+    # ── Cost prefix (Slack only) ─────────────────────────────────────────
+
+    async def _build_cost_prefix(self) -> Optional[str]:
+        """Return a per-message cost prefix string for Slack, or None.
+
+        Reads cost metadata that ``conversation_manager._get_ai_response``
+        stamped on ``state.context`` after the agentic turn. Reloads state
+        from disk because the value was written by a different code path
+        and our in-memory ``self.state`` may be stale.
+        """
+        if self.state.platform != "slack":
+            return None
+        try:
+            from promaia.messaging.slack_settings import get_cost_display_enabled
+            if not get_cost_display_enabled():
+                return None
+            from promaia.messaging.slack_cost_ledger import format_cost_prefix
+        except Exception:
+            return None
+
+        try:
+            fresh = await self.conv_manager._load_state(self.state.conversation_id)
+        except Exception:
+            fresh = None
+        ctx = (fresh or self.state).context or {}
+        last = ctx.get("last_turn_cost")
+        if not last:
+            return None
+        try:
+            return format_cost_prefix(
+                prompt_tokens=int(last.get("prompt_tokens") or 0),
+                response_tokens=int(last.get("response_tokens") or 0),
+                turn_cost=float(last.get("total_cost") or 0),
+                session_cost=float(ctx.get("session_cost") or 0),
+            )
+        except Exception:
+            return None
 
     # ── Thread title ─────────────────────────────────────────────────────
 

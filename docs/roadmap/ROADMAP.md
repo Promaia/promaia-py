@@ -8,6 +8,26 @@ work with it.
 
 ## Active
 
+### Shelving postfix + Anthropic prompt caching
+
+Move the volatile per-iteration content (context shelf index, ON
+shelf bodies, budget note) out of the system prompt and into a
+postfix on the last user message, then add `cache_control`
+breakpoints on system, tools, and the most recent stable message.
+Today the cache is invalidated on every iteration; this restores it.
+
+See [`shelving-postfix-cache.md`](shelving-postfix-cache.md).
+
+### Subagent architecture — split Think and Act into parent/child sessions
+
+Replace the in-place Think↔Act mode flip with a parent (Think) loop
+that spawns fresh child (Act) agentic_turn invocations, optionally in
+parallel. Stable system prompts per agent type (cacheable) and
+genuine concurrency for multi-suite Act work. Builds on the
+shelving-postfix work.
+
+See [`subagent-architecture.md`](subagent-architecture.md).
+
 ### Agent permissions — unified external-tools picker
 
 Collapse the agent-edit menu's separate "MCP Tools" and "Channel

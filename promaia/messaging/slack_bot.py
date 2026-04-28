@@ -1032,6 +1032,13 @@ def create_slack_bot():
     # Track pending model-pick messages: {message_ts: {emoji_name: model_id}}
     _model_pick_messages: Dict[str, Dict[str, str]] = {}
 
+    # Track /cost toggle messages: {message_ts: True}
+    # The toggle emoji flips the cost-display setting; any other emoji is ignored.
+    _cost_toggle_messages: Dict[str, bool] = {}
+
+    # Single emoji used as the on/off toggle button on the /cost message.
+    COST_TOGGLE_EMOJI = "moneybag"
+
     # Models exposed via the Slack /model picker
     MODEL_CHOICES = [
         ("claude-opus-4-6-1m", "Claude Opus 4.6 (1M)"),
@@ -1091,6 +1098,64 @@ def create_slack_bot():
 
         except Exception as e:
             logger.error(f"Error handling /model command: {e}", exc_info=True)
+
+    @app.command("/cost")
+    async def handle_cost_command(ack, command, client):
+        """
+        Handle /cost slash command.
+
+        Posts daily / weekly / monthly cost totals. Reacting with the
+        toggle emoji flips the per-message cost prefix on or off.
+        """
+        await ack()
+
+        try:
+            channel_id = command["channel_id"]
+
+            from promaia.messaging.slack_cost_ledger import summary
+            from promaia.messaging.slack_settings import get_cost_display_enabled
+            totals = summary()
+            enabled = get_cost_display_enabled()
+
+            def fmt_block(label: str, t: Dict) -> str:
+                return (
+                    f"*{label}:* ${t['cost']:.4f}  "
+                    f"({t['turns']} turn{'s' if t['turns'] != 1 else ''}, "
+                    f"{t['prompt_tokens']:,} in / {t['response_tokens']:,} out, "
+                    f"{t['cache_read_tokens']:,} cache-read)"
+                )
+
+            state_label = "ON" if enabled else "OFF"
+            lines = [
+                "*Slack AI cost*",
+                fmt_block("Today", totals["day"]),
+                fmt_block("This week", totals["week"]),
+                fmt_block("This month", totals["month"]),
+                "",
+                f"_Per-message cost prefix: *{state_label}*. "
+                f"React with :{COST_TOGGLE_EMOJI}: to toggle._",
+            ]
+
+            response = await client.chat_postMessage(
+                channel=channel_id,
+                text="\n".join(lines),
+            )
+            msg_ts = response["ts"]
+
+            try:
+                await client.reactions_add(
+                    channel=channel_id,
+                    timestamp=msg_ts,
+                    name=COST_TOGGLE_EMOJI,
+                )
+            except Exception:
+                pass
+
+            _cost_toggle_messages[msg_ts] = True
+            logger.info(f"/cost posted in {channel_id}, tracking {msg_ts}")
+
+        except Exception as e:
+            logger.error(f"Error handling /cost command: {e}", exc_info=True)
 
     @app.command("/agent")
     async def handle_agent_command(ack, command, client):
@@ -1177,6 +1242,27 @@ def create_slack_bot():
             message_ts = item['ts']
             channel_id = item['channel']
             user_id = event['user']
+
+            # Check if this is a /cost toggle reaction
+            if message_ts in _cost_toggle_messages:
+                if emoji == COST_TOGGLE_EMOJI:
+                    from promaia.messaging.slack_settings import (
+                        get_cost_display_enabled,
+                        set_cost_display_enabled,
+                    )
+                    new_state = not get_cost_display_enabled()
+                    set_cost_display_enabled(new_state)
+                    state_label = "ON" if new_state else "OFF"
+                    try:
+                        await client.chat_postEphemeral(
+                            channel=channel_id,
+                            user=user_id,
+                            text=f"💰 Per-message cost prefix is now *{state_label}*.",
+                        )
+                    except Exception:
+                        pass
+                    logger.info(f"Cost prefix toggled to {state_label} by {user_id}")
+                return
 
             # Check if this is a model pick reaction
             if message_ts in _model_pick_messages:

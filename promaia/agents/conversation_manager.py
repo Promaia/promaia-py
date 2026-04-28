@@ -696,6 +696,49 @@ class ConversationManager:
             if result.source_states is not None:
                 state.context['source_states'] = result.source_states
 
+            # Cost accounting (cache-aware). Stored on conversation state so
+            # Slack-side rendering can pull it without re-plumbing the API.
+            try:
+                from promaia.utils.ai import calculate_ai_cost
+                cache_read = getattr(result, "cache_read_tokens", 0) or 0
+                cache_create = getattr(result, "cache_creation_tokens", 0) or 0
+                cost = calculate_ai_cost(
+                    prompt_tokens=result.input_tokens,
+                    response_tokens=result.output_tokens,
+                    model_name=model or "claude-sonnet-4",
+                    cache_read_tokens=cache_read,
+                    cache_creation_tokens=cache_create,
+                )
+                state.context['last_turn_cost'] = {
+                    "prompt_tokens": result.input_tokens,
+                    "response_tokens": result.output_tokens,
+                    "cache_read_tokens": cache_read,
+                    "cache_creation_tokens": cache_create,
+                    "total_cost": cost["total_cost"],
+                    "model": cost["model"],
+                }
+                state.context['session_cost'] = (
+                    float(state.context.get('session_cost') or 0) + cost["total_cost"]
+                )
+                # Persist to the Slack ledger so the /cost command can
+                # aggregate by day/week/month. Only Slack turns flow into
+                # the ledger — other platforms can opt in later.
+                if state.platform == "slack":
+                    from promaia.messaging.slack_cost_ledger import append_entry
+                    append_entry(
+                        channel_id=state.channel_id,
+                        thread_id=state.thread_id,
+                        agent_id=state.agent_id,
+                        model=cost["model"],
+                        prompt_tokens=result.input_tokens,
+                        response_tokens=result.output_tokens,
+                        cache_read_tokens=cache_read,
+                        cache_creation_tokens=cache_create,
+                        total_cost=cost["total_cost"],
+                    )
+            except Exception as e:
+                logger.debug(f"Cost accounting failed (non-fatal): {e}")
+
             # Store tool_use/tool_result blocks for conversation history
             if hasattr(result, 'history_messages') and result.history_messages:
                 state.messages.extend(result.history_messages)
