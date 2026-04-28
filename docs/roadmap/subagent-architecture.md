@@ -65,11 +65,13 @@ so concurrent children can't trample each other.
 - [x] Create `prompts/conversation_mode_child.md` — Act-only
   guidance (loaded suites, notepad, mark_step_done, done). No shelving
   language, no `keep_shelves` field on `done`.
-- [ ] DEFERRED: rewrite `prompts/conversation_mode.md` for
-  subagent-on parents. Current file works for flag-off (default) and
-  is functionally workable for flag-on parents (the model sees `act()`
-  as a tool that returns a report). Iterate after user testing
-  reveals concrete confusion points.
+- [x] Rewrite the parent prompt for subagent-on. Created
+  `prompts/conversation_mode_parent.md` — drops Think/Act-cycle
+  language, drops the `done` tool and `keep_shelves` references,
+  reframes `act()` as "delegate a batch and get a report back."
+  Notes-as-bridge framing made explicit so the model knows to lift
+  facts into notes before delegating. The legacy
+  `conversation_mode.md` is still loaded when the env flag is off.
 - [ ] DEFERRED: tests. No active test infra in this repo today;
   add when introducing one.
 
