@@ -466,8 +466,13 @@ class TagToChatLoop:
                     lines.append(f"\u00b7 {step}")
             return lines
 
-        async def on_tool_activity(tool_name, tool_input, completed, summary=None):
+        async def on_tool_activity(tool_name, tool_input, completed, summary=None, **kwargs):
             nonlocal current_tool, current_tool_input, plan_active_step
+            # Activity events from inside an act subagent are tagged
+            # child=True by _spawn_act_child's wrapper. Visually nest them
+            # under the parent's act() step so the breadcrumb makes the
+            # subagent boundary obvious.
+            is_child = bool(kwargs.get("child"))
 
             # Special event: plan was generated
             if tool_name == "__plan__":
@@ -503,12 +508,16 @@ class TagToChatLoop:
                 current_tool_input = tool_input or {}
             else:
                 # Format like Claude Code: `tool_name`(params) ⎿ result
+                # Child steps get an indent + ↳ to nest visually under the
+                # parent's act() call.
                 from promaia.agents.run_goal import _summarize_tool_input
                 params = _summarize_tool_input(tool_name, current_tool_input)
-                call_str = f"`{tool_name}` ({params})" if params else f"`{tool_name}`"
+                call_label = f"`{tool_name}` ({params})" if params else f"`{tool_name}`"
+                call_str = f"   ↳ {call_label}" if is_child else call_label
+                gutter = "        ⎿  " if is_child else "     ⎿  "
                 if summary:
                     result = summary[:120] + "..." if len(summary) > 120 else summary
-                    tool_steps.append(f"{call_str}\n     ⎿  {result}")
+                    tool_steps.append(f"{call_str}\n{gutter}{result}")
                 else:
                     tool_steps.append(call_str)
                 current_tool = None
@@ -526,15 +535,23 @@ class TagToChatLoop:
                     lines.append("")  # blank line separator
 
                 if tool_steps or current_tool:
-                    # Tool activity mode: numbered steps + current activity
-                    for i, s in enumerate(tool_steps):
-                        lines.append(f"{i+1}. {s}")
+                    # Tool activity mode: numbered steps + current activity.
+                    # Child steps (act-subagent calls, prefixed with ↳) don't
+                    # take their own number — they nest under the parent's
+                    # act step. Numbering counts only parent-level steps.
+                    parent_n = 0
+                    for s in tool_steps:
+                        if s.lstrip().startswith("↳"):
+                            lines.append(s)
+                        else:
+                            parent_n += 1
+                            lines.append(f"{parent_n}. {s}")
                     if current_tool:
                         from promaia.agents.run_goal import _summarize_tool_input
                         params = _summarize_tool_input(current_tool, current_tool_input)
                         tool_label = f"`{current_tool}` ({params})" if params else f"`{current_tool}`"
                         lines.append(
-                            f"{len(tool_steps)+1}. {tool_label}... "
+                            f"{parent_n + 1}. {tool_label}... "
                             f"{random.choice(THINKING_EMOJIS)}"
                         )
                     else:
@@ -600,8 +617,15 @@ class TagToChatLoop:
                 for step in plan_steps:
                     lines.append(f"\u2705 {_strikethrough(step)}")
                 lines.append("")  # blank separator
-            for i, s in enumerate(tool_steps):
-                lines.append(f"{i+1}. {s}")
+            # Same numbering rule as the live animator: child steps (↳)
+            # nest under the parent's act step and don't take a number.
+            parent_n = 0
+            for s in tool_steps:
+                if s.lstrip().startswith("↳"):
+                    lines.append(s)
+                else:
+                    parent_n += 1
+                    lines.append(f"{parent_n}. {s}")
             breadcrumb = "\n".join(lines)
             if self.state.temp_message_id:
                 try:

@@ -9553,7 +9553,8 @@ async def agentic_turn(
                 if 0 < step_num <= len(act_step_status):
                     act_step_status[step_num - 1] = "done"
                     result_text = f"Step {step_num} marked done."
-                    logger.info(f"[think/act] Marked step {step_num}/{len(act_instructions)} done")
+                    log_tag = "subagent.child" if is_child_mode else "think/act"
+                    logger.info(f"[{log_tag}] Marked step {step_num}/{len(act_instructions)} done")
                     # Fire UX callback
                     if on_tool_activity:
                         try:
@@ -10155,9 +10156,22 @@ def _summarize_tool_result(
 
     elif tool_name == "act":
         suites = tool_input.get("suites", [])
-        if isinstance(suites, list):
-            return _vs("Act mode", f"suites: {', '.join(suites)}")
-        return _vs("Act mode", str(suites))
+        suites_str = ", ".join(suites) if isinstance(suites, list) else str(suites)
+        # In subagent mode the parent's act() spawns a child and embeds
+        # the report as the tool_result — it never enters Act mode itself.
+        # Reflect that in the summary so the breadcrumb isn't misleading.
+        import os as _os_act
+        if _os_act.environ.get("PROMAIA_SUBAGENT_MODE", "").lower() in (
+            "1", "true", "yes", "on"
+        ):
+            # Surface a short excerpt of the report so the breadcrumb shows
+            # what the subagent actually did, not just "subagent ran".
+            report_excerpt = (result or "").strip().split("\n")[0][:80]
+            outcome = f"suites: {suites_str}"
+            if report_excerpt:
+                outcome += f" → {report_excerpt}"
+            return _vs("Spawned subagent", outcome)
+        return _vs("Act mode", f"suites: {suites_str}")
 
     else:
         return _vs(tool_name, "")
