@@ -569,13 +569,18 @@ def make_terminal_activity_callback(
         **kwargs,
     ):
         tool_input = tool_input or {}
+        # Activity events from inside an act subagent are tagged child=True
+        # by _spawn_act_child's wrapper. Indent them so the terminal output
+        # makes the parent/child boundary visible.
+        is_child = bool(kwargs.get("child"))
+        prefix = "    ↳ " if is_child else "  "
 
         # Plan announcement
         if tool_name == "__plan__":
             steps = tool_input.get("steps", [])
             print_text_fn("\n📋 Plan:", style="bold cyan")
             for i, step in enumerate(steps, 1):
-                print_text_fn(f"  {i}. {step}", style="dim cyan")
+                print_text_fn(f"{prefix}{i}. {step}", style="dim cyan")
             print_text_fn("")
             return
 
@@ -592,7 +597,7 @@ def make_terminal_activity_callback(
 
         # Context trim
         if tool_name == "__context_trim__":
-            print_text_fn("  ✂️  Context too large, trimming and retrying", style="dim yellow")
+            print_text_fn(f"{prefix}✂️  Context too large, trimming and retrying", style="dim yellow")
             return
 
         # Context toggle
@@ -602,22 +607,22 @@ def make_terminal_activity_callback(
             name = (tool_input or {}).get("name", "")
             target = ", ".join(sources) if sources else name
             if action in ("on", "all_on"):
-                print_text_fn(f"  📖 Context ON: {target or 'all'}", style="dim cyan")
+                print_text_fn(f"{prefix}📖 Context ON: {target or 'all'}", style="dim cyan")
             elif action in ("off", "all_off"):
-                print_text_fn(f"  📕 Context OFF: {target or 'all'}", style="dim cyan")
+                print_text_fn(f"{prefix}📕 Context OFF: {target or 'all'}", style="dim cyan")
             elif action == "add":
-                print_text_fn(f"  📚 Context added: {name}", style="dim cyan")
+                print_text_fn(f"{prefix}📚 Context added: {name}", style="dim cyan")
             elif action == "remove":
-                print_text_fn(f"  🗑️  Context removed: {target}", style="dim cyan")
+                print_text_fn(f"{prefix}🗑️  Context removed: {target}", style="dim cyan")
             return
 
         # Think/Act mode switching
         if tool_name == "act" and completed:
             suites = (tool_input or {}).get("suites", [])
-            print_text_fn(f"  🔧 Act mode ({', '.join(suites)})", style="dim yellow")
+            print_text_fn(f"{prefix}🔧 Act mode ({', '.join(suites)})", style="dim yellow")
             return
         if tool_name == "done" and completed:
-            print_text_fn("  📚 Think mode", style="dim cyan")
+            print_text_fn(f"{prefix}📚 Think mode", style="dim cyan")
             return
 
         # Notepad update
@@ -625,7 +630,7 @@ def make_terminal_activity_callback(
             action = (tool_input or {}).get("action", "")
             labels = {"write": "updated", "append": "appended", "clear": "cleared", "read": "read"}
             label = labels.get(action, action)
-            print_text_fn(f"  📝 Notes {label}", style="dim cyan")
+            print_text_fn(f"{prefix}📝 Notes {label}", style="dim cyan")
             return
 
         # Memory
@@ -633,20 +638,20 @@ def make_terminal_activity_callback(
             action = (tool_input or {}).get("action", "")
             name = (tool_input or {}).get("name", "")
             if action == "save":
-                print_text_fn(f"  💾 Memory saved: {name}", style="dim cyan")
+                print_text_fn(f"{prefix}💾 Memory saved: {name}", style="dim cyan")
             elif action == "recall":
-                print_text_fn(f"  🧠 Memory recalled: {name}", style="dim cyan")
+                print_text_fn(f"{prefix}🧠 Memory recalled: {name}", style="dim cyan")
             elif action == "delete":
-                print_text_fn(f"  🗑️  Memory deleted: {name}", style="dim cyan")
+                print_text_fn(f"{prefix}🗑️  Memory deleted: {name}", style="dim cyan")
             elif action == "list":
-                print_text_fn("  🧠 Memory listed", style="dim cyan")
+                print_text_fn(f"{prefix}🧠 Memory listed", style="dim cyan")
             return
 
         # Regular tool activity
         if not completed:
             # Tool starting
             input_summary = _summarize_tool_input(tool_name, tool_input)
-            print_text_fn(f"  🔧 {tool_name}{input_summary}", style="dim yellow")
+            print_text_fn(f"{prefix}🔧 {tool_name}{input_summary}", style="dim yellow")
         else:
             # Tool completed
             if summary:
@@ -655,9 +660,9 @@ def make_terminal_activity_callback(
                 # Detect errors in summary and use appropriate indicator
                 is_error = "(error)" in display.lower() or display.startswith("Error")
                 if is_error:
-                    print_text_fn(f"  ✗ {display}", style="dim red")
+                    print_text_fn(f"{prefix}✗ {display}", style="dim red")
                 else:
-                    print_text_fn(f"  ✓ {display}", style="dim green")
+                    print_text_fn(f"{prefix}✓ {display}", style="dim green")
 
     return on_tool_activity
 
@@ -957,14 +962,29 @@ async def run_agentic_turn(
                 f"[subagent.spawn] parent_tool_use_id={parent_tool_use_id} "
                 f"suites={suites} instructions={len(instructions or [])}"
             )
+
+            # Wrap the activity callback so child tool steps land in the
+            # parent's breadcrumb visually nested under the act() call. The
+            # consumer reads `child=True` and renders an indent prefix.
+            # Defensive: if the consumer doesn't accept `child`, retry
+            # without it so older callbacks don't break.
+            async def _child_activity_cb(*a, **kw):
+                if activity_cb is None:
+                    return
+                kw.setdefault("child", True)
+                try:
+                    await activity_cb(*a, **kw)
+                except TypeError:
+                    kw.pop("child", None)
+                    await activity_cb(*a, **kw)
+
             child_kwargs = dict(
                 system_prompt=child_system,
                 messages=[{"role": "user", "content": child_user_msg}],
                 tools=tools,
                 tool_executor=child_executor,
                 max_iterations=40,
-                on_tool_activity=activity_cb,  # child tool steps merge
-                                               # into parent's breadcrumb
+                on_tool_activity=_child_activity_cb,
                 suite_registry=suite_registry,
                 mcp_suites=mcp_suites if mcp_suites else None,
                 is_child_mode=True,
