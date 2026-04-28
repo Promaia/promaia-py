@@ -25,6 +25,11 @@ class AgenticTurnResult:
     iterations_used: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    # Anthropic prompt-cache token accounting. cache_read is fresh
+    # input that was served from cache (billed at 0.1x); cache_creation
+    # is fresh input written to cache this request (billed at 1.25x).
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
     plan: Optional[List[str]] = None
     signal: Optional[Dict[str, Any]] = None
     # Full tool_use/tool_result message blocks from the agentic loop.
@@ -8641,6 +8646,42 @@ def _sanitize_orphans_in_place(messages: list) -> None:
         )
 
 
+def _build_api_messages_with_postfix(
+    messages: List[Dict],
+    postfix: str,
+) -> List[Dict]:
+    """Return a copy of ``messages`` with ``postfix`` appended as a trailing
+    text block on the last message's content.
+
+    Does not mutate ``messages`` or any of its members. The original
+    ``internal_messages`` stays clean so the next iteration recomposes the
+    postfix from fresh shelf state.
+
+    The postfix is the volatile per-iteration content (context shelf
+    index, ON shelf bodies, budget note, mode-specific markers). Keeping
+    it OUT of the system prompt is what lets the system prompt stay
+    cacheable across iterations.
+
+    Anthropic accepts a trailing ``text`` block after ``tool_result``
+    blocks in a single user message, so this works whether the last
+    message is the original user query or a tool-results message between
+    assistant turns.
+    """
+    if not postfix or not messages:
+        return messages
+    out = list(messages)
+    last = dict(out[-1])
+    content = last.get("content", "")
+    if isinstance(content, str):
+        new_content = [{"type": "text", "text": content}] if content else []
+    else:
+        new_content = list(content)
+    new_content.append({"type": "text", "text": postfix})
+    last["content"] = new_content
+    out[-1] = last
+    return out
+
+
 def _render_web_search_results(result_list: list) -> str:
     """Flatten a list of web_search_tool_result entries into readable text."""
     parts: List[str] = []
@@ -8854,6 +8895,8 @@ async def agentic_turn(
     all_tool_calls = []
     total_input_tokens = 0
     total_output_tokens = 0
+    total_cache_read_tokens = 0
+    total_cache_creation_tokens = 0
     text_parts = []
     _initial_msg_count = len(internal_messages)  # Track where tool messages start
 
@@ -8878,26 +8921,28 @@ async def agentic_turn(
         if tool_executor is not None:
             tool_executor._current_iteration = iteration
 
-        budget_note = (
-            f"\n\n[Tool budget: {max_iterations - iteration}/{max_iterations} "
+        # Iteration-budget marker — volatile per-iteration. Kept out of the
+        # cached system prompt; emitted via the postfix instead (Think/Act
+        # paths). Legacy mode appends it directly to the system prompt for
+        # backwards compatibility.
+        budget_marker = (
+            f"[Tool budget: {max_iterations - iteration}/{max_iterations} "
             f"iterations remaining]"
         )
 
         # ── Build effective prompt and tool list per mode ──────────────
-        # base_prompt = everything EXCEPT the active-source content block.
-        # The active-source block is appended via _compose_prompt() so the
-        # context trimmer can rebuild after LRU-off'ing sources.
+        # In Think/Act paths: base_prompt is the STABLE system prompt
+        # (cacheable). Volatile content (shelves, budget, act state) goes
+        # into a postfix appended to the last user message at API-call time
+        # so the system prompt can stay byte-stable across iterations.
         base_prompt = system_prompt
+        # Mode-specific volatile additions for the postfix (Think/Act only).
+        postfix_extras: List[str] = []
 
         if use_think_act and not act_mode:
-            # THINK MODE: suite index first, then context index + active content
+            # THINK MODE — suite index in system (stable); shelves go to postfix.
             _ws = tool_executor.workspace if tool_executor else ""
             base_prompt += "\n\n" + _build_suite_index(suite_registry, mcp_suites, workspace=_ws)
-
-            if tool_executor and hasattr(tool_executor, 'build_context_index'):
-                ctx_index = tool_executor.build_context_index()
-                if ctx_index:
-                    base_prompt += "\n\n" + ctx_index
 
             # Think mode tools: query + notepad + memory + context + workflows (read) + act
             iteration_tools = list(QUERY_TOOL_DEFINITIONS)
@@ -8913,17 +8958,17 @@ async def agentic_turn(
             iteration_tools.append(ACT_TOOL_DEFINITION)
 
         elif use_think_act and act_mode:
-            # ACT MODE: no context, no suite index — just notes + memory + loaded suites + instructions
-            budget_note += f"\n\n[ACT MODE: {', '.join(act_suites)}. Call done() when finished.]"
-
-            # Inject instructions checklist into the prompt
+            # ACT MODE — act marker + instructions go to postfix (volatile).
+            postfix_extras.append(
+                f"[ACT MODE: {', '.join(act_suites)}. Call done() when finished.]"
+            )
             if act_instructions:
-                instr_lines = ["\n\n## Instructions\n"]
+                instr_lines = ["## Instructions\n"]
                 for i, step in enumerate(act_instructions):
                     status = act_step_status[i] if i < len(act_step_status) else "pending"
                     checkbox = "[x]" if status == "done" else "[ ]"
                     instr_lines.append(f"{i+1}. {checkbox} {step}")
-                budget_note += "\n".join(instr_lines)
+                postfix_extras.append("\n".join(instr_lines))
 
             # Act mode tools: loaded suites + notepad + memory + mark_step_done + done
             # Dedupe by tool name: suites can overlap (e.g. "google" aggregates
@@ -8948,38 +8993,69 @@ async def agentic_turn(
             _add_tool(DONE_TOOL_DEFINITION)
 
         else:
-            # Legacy mode (no suite registry): all tools, all context
+            # Legacy mode (no suite registry): all tools, all context.
+            # Postfix split is intentionally not applied here — keep the
+            # original shape for backwards compatibility.
             iteration_tools = tools
             if tool_executor and hasattr(tool_executor, 'build_context_index'):
                 ctx_index = tool_executor.build_context_index()
                 if ctx_index:
                     base_prompt += "\n\n" + ctx_index
 
-        # Compose final prompt = base + active-source block + budget_note.
-        # The active-source block is recomputed from current _sources state
-        # so it reflects post-LRU shelving when called from the trimmer.
+        # Compose system prompt for the trimmer.
+        # - Think/Act: just base_prompt (stable, cacheable). Shelves and
+        #   budget marker get injected via the postfix on the last message.
+        # - Legacy: base + active source content + budget marker (old shape).
         def _compose_prompt() -> str:
+            if use_think_act:
+                return base_prompt
             active = ""
-            # Note: in act mode, build_active_source_content returns "" because
-            # _sources_muted is True — preserved automatically.
             if tool_executor and hasattr(tool_executor, "build_active_source_content"):
                 active = tool_executor.build_active_source_content() or ""
             parts = [base_prompt]
             if active:
                 parts.append(active)
-            return "\n\n".join(parts) + budget_note
+            return "\n\n".join(parts) + "\n\n" + budget_marker
+
+        # Build the per-iteration postfix string (Think/Act only).
+        # Recomputed AFTER the trimmer returns so it reflects any LRU-off
+        # toggles the trimmer applied to _sources.
+        def _build_postfix() -> str:
+            if not use_think_act:
+                return ""
+            parts: List[str] = []
+            if tool_executor and hasattr(tool_executor, "build_context_index"):
+                idx = tool_executor.build_context_index()
+                if idx:
+                    parts.append(idx)
+            if tool_executor and hasattr(tool_executor, "build_active_source_content"):
+                active = tool_executor.build_active_source_content() or ""
+                if active:
+                    parts.append(active)
+            parts.extend(postfix_extras)
+            parts.append(budget_marker)
+            return "\n\n".join(parts)
 
         effective_prompt = _compose_prompt()
 
         from promaia.agents.context_trimmer import trim_context_to_fit
+        # In Think/Act paths the system has no shelf content, so a rebuild
+        # callback would be a no-op — pass None. Legacy mode still needs it
+        # because shelves remain in the system there.
+        rebuild_cb = None if use_think_act else _compose_prompt
         trimmed_system, internal_messages = await trim_context_to_fit(
             effective_prompt,
             internal_messages,
             tools=iteration_tools,
             tool_executor=tool_executor,
             current_iteration=iteration,
-            rebuild_system_prompt=_compose_prompt,
+            rebuild_system_prompt=rebuild_cb,
         )
+
+        # Build the postfix AFTER trimming so it reflects any sources the
+        # trimmer toggled off.
+        postfix_text = _build_postfix()
+        api_messages = _build_api_messages_with_postfix(internal_messages, postfix_text)
 
         # Log the effective prompt (first iteration and on mode switches)
         if iteration == 0:
@@ -8990,21 +9066,45 @@ async def agentic_turn(
                 log_dir.mkdir(parents=True, exist_ok=True)
                 ts = _dt_log.datetime.now().strftime("%Y%m%d-%H%M%S")
                 log_path = log_dir / f"{ts}_agentic_prompt.md"
-                log_path.write_text(trimmed_system)
+                # Log the system + a representation of the postfix so the
+                # full picture survives even with the new split.
+                log_body = trimmed_system
+                if postfix_text:
+                    log_body += "\n\n---\n# POSTFIX (injected on last message)\n\n" + postfix_text
+                log_path.write_text(log_body)
                 logger.info(f"Agentic prompt logged to {log_path}")
             except Exception as log_err:
                 logger.debug(f"Failed to log agentic prompt: {log_err}")
 
-        # Build API call kwargs
+        # Build API call kwargs.
+        # System is sent as a single content block with cache_control so
+        # Anthropic caches the (now-stable) system prompt across iterations.
+        # The last tool definition also gets cache_control so the tools
+        # array is cached too — second cache breakpoint, covers the whole
+        # tools list before it.
         from promaia.ai.models import resolve_anthropic_model_id
+        system_blocks = [
+            {
+                "type": "text",
+                "text": trimmed_system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
         api_kwargs = dict(
             model=f"{prefix}{resolve_anthropic_model_id(model)}",
-            system=trimmed_system,
-            messages=internal_messages,
+            system=system_blocks,
+            messages=api_messages,
             max_tokens=4096,
         )
         if iteration_tools:
-            api_kwargs["tools"] = iteration_tools
+            # Copy the list and tag the last tool with cache_control. The
+            # marker on the last block caches everything before it in the
+            # tools array.
+            cached_tools = list(iteration_tools)
+            last_tool = dict(cached_tools[-1])
+            last_tool["cache_control"] = {"type": "ephemeral"}
+            cached_tools[-1] = last_tool
+            api_kwargs["tools"] = cached_tools
 
         # Defensive guard: a tool_result in message history with no preceding
         # tool_use is a 400 ("unexpected tool_use_id") from Anthropic. The
@@ -9037,6 +9137,8 @@ async def agentic_turn(
                 iterations_used=iteration + 1,
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
+                cache_read_tokens=total_cache_read_tokens,
+                cache_creation_tokens=total_cache_creation_tokens,
                 plan=plan,
             )
         except Exception as api_err:
@@ -9101,6 +9203,8 @@ async def agentic_turn(
                         iterations_used=iteration + 1,
                         input_tokens=total_input_tokens,
                         output_tokens=total_output_tokens,
+                        cache_read_tokens=total_cache_read_tokens,
+                        cache_creation_tokens=total_cache_creation_tokens,
                         plan=plan,
                     )
             else:
@@ -9110,6 +9214,22 @@ async def agentic_turn(
         if hasattr(response, 'usage'):
             total_input_tokens += response.usage.input_tokens
             total_output_tokens += response.usage.output_tokens
+            # Cache telemetry — measure whether the postfix split is
+            # actually realizing prompt-cache wins. cache_read_input_tokens
+            # are billed at ~10% of normal input rate.
+            cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+            cache_create = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+            total_cache_read_tokens += cache_read
+            total_cache_creation_tokens += cache_create
+            if cache_read or cache_create:
+                total_in = response.usage.input_tokens + cache_read + cache_create
+                ratio = (cache_read / total_in * 100) if total_in else 0
+                logger.info(
+                    f"[agentic.cache] iter={iteration} "
+                    f"input={response.usage.input_tokens} "
+                    f"cache_read={cache_read} cache_create={cache_create} "
+                    f"hit_ratio={ratio:.0f}%"
+                )
 
         # Separate text and tool_use blocks
         text_parts = []
@@ -9222,6 +9342,8 @@ async def agentic_turn(
                 iterations_used=iteration + 1,
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
+                cache_read_tokens=total_cache_read_tokens,
+                cache_creation_tokens=total_cache_creation_tokens,
                 plan=plan,
                 history_messages=new_msgs,
             )
@@ -9553,6 +9675,8 @@ async def agentic_turn(
                     iterations_used=iteration + 1,
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
+                    cache_read_tokens=total_cache_read_tokens,
+                    cache_creation_tokens=total_cache_creation_tokens,
                     plan=plan,
                     signal={"type": "interview_start", "workflow": workflow_name},
                 )
@@ -9563,6 +9687,8 @@ async def agentic_turn(
                     iterations_used=iteration + 1,
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
+                    cache_read_tokens=total_cache_read_tokens,
+                    cache_creation_tokens=total_cache_creation_tokens,
                     plan=plan,
                     signal={"type": "interview_end"},
                 )
@@ -9575,6 +9701,8 @@ async def agentic_turn(
                     iterations_used=iteration + 1,
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
+                    cache_read_tokens=total_cache_read_tokens,
+                    cache_creation_tokens=total_cache_creation_tokens,
                     plan=plan,
                     signal={"type": "show_selection", "payload": payload},
                 )
@@ -9590,6 +9718,8 @@ async def agentic_turn(
                     iterations_used=iteration + 1,
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
+                    cache_read_tokens=total_cache_read_tokens,
+                    cache_creation_tokens=total_cache_creation_tokens,
                     plan=plan,
                     signal={"type": "end_conversation", "emoji": emoji or None, "summary": summary or None},
                 )
@@ -9602,6 +9732,8 @@ async def agentic_turn(
                     iterations_used=iteration + 1,
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
+                    cache_read_tokens=total_cache_read_tokens,
+                    cache_creation_tokens=total_cache_creation_tokens,
                     plan=plan,
                     signal={"type": "leave_conversation"},
                 )
@@ -9730,6 +9862,8 @@ async def agentic_turn(
         iterations_used=max_iterations,
         input_tokens=total_input_tokens,
         output_tokens=total_output_tokens,
+        cache_read_tokens=total_cache_read_tokens,
+        cache_creation_tokens=total_cache_creation_tokens,
         plan=plan,
         history_messages=new_msgs,
     )

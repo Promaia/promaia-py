@@ -131,15 +131,25 @@ def _improved_token_estimate(text: str) -> int:
     # Ensure we have a reasonable minimum
     return max(estimated_tokens, len(text) // 4)
 
-def calculate_ai_cost(prompt_tokens: int, response_tokens: int, model_name: str = "claude-sonnet-4") -> dict:
+def calculate_ai_cost(
+    prompt_tokens: int,
+    response_tokens: int,
+    model_name: str = "claude-sonnet-4",
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+) -> dict:
     """
     Calculate the cost of AI API usage for various models.
-    
+
     Args:
-        prompt_tokens: Number of input tokens
-        response_tokens: Number of output tokens  
+        prompt_tokens: Number of fresh (uncached) input tokens
+        response_tokens: Number of output tokens
         model_name: Name of the model used
-    
+        cache_read_tokens: Tokens served from Anthropic prompt cache.
+            Billed at 0.1x the normal input rate.
+        cache_creation_tokens: Tokens written to the prompt cache this
+            request. Billed at 1.25x the normal input rate (5-min TTL).
+
     Returns:
         Dictionary with cost breakdown
     """
@@ -210,18 +220,30 @@ def calculate_ai_cost(prompt_tokens: int, response_tokens: int, model_name: str 
         
     model_pricing = pricing[pricing_key]
     
-    input_cost = (prompt_tokens / 1_000_000) * model_pricing["input_cost_per_million"]
-    output_cost = (response_tokens / 1_000_000) * model_pricing["output_cost_per_million"]
-    total_cost = input_cost + output_cost
-    
+    input_rate = model_pricing["input_cost_per_million"]
+    output_rate = model_pricing["output_cost_per_million"]
+
+    input_cost = (prompt_tokens / 1_000_000) * input_rate
+    output_cost = (response_tokens / 1_000_000) * output_rate
+    # Anthropic prompt-cache pricing (per Anthropic docs):
+    # - cache reads:  0.1x the normal input rate
+    # - cache writes: 1.25x the normal input rate (5-min ephemeral TTL)
+    cache_read_cost = (cache_read_tokens / 1_000_000) * input_rate * 0.1
+    cache_creation_cost = (cache_creation_tokens / 1_000_000) * input_rate * 1.25
+    total_cost = input_cost + output_cost + cache_read_cost + cache_creation_cost
+
     return {
         "input_cost": input_cost,
-        "output_cost": output_cost, 
+        "output_cost": output_cost,
+        "cache_read_cost": cache_read_cost,
+        "cache_creation_cost": cache_creation_cost,
         "total_cost": total_cost,
         "model": model_name,
         "prompt_tokens": prompt_tokens,
         "response_tokens": response_tokens,
-        "total_tokens": prompt_tokens + response_tokens
+        "cache_read_tokens": cache_read_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        "total_tokens": prompt_tokens + response_tokens + cache_read_tokens + cache_creation_tokens,
     }
 
 def handle_rate_limit_basic():

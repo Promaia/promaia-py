@@ -27,7 +27,7 @@ You've left the desk with your notes. Pre-act context shelves are hidden, search
 
 - **Notes** persist — carried across modes
 - **Loaded tool suites** — full tools from the suites you requested
-- **Uniform shelving** — every tool result you produce (except `notepad`, `context`, `memory`, `show_selection`, `mark_step_done`, `done`) is automatically shelved. The inline tool_result becomes a one-line stub; the full body lives in your Context Shelf above.
+- **Uniform shelving** — every tool result you produce (except `notepad`, `context`, `memory`, `show_selection`, `mark_step_done`, `done`) is automatically shelved. The inline tool_result becomes a one-line stub; the full body lives in your Context Shelf, which is appended at the end of your context each turn.
 - **Your Context Shelf** (during Act mode) shows only shelves you created in this burst — pre-act shelves stay muted. Toggle liberally: `context(action="on"|"off"|"all_off", sources=["<name>"])`. Turn shelves OFF as soon as you've extracted what you need — this keeps your context window lean.
 
 When you're done acting, call `done(report="…", keep_shelves=[…])`:
