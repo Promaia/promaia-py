@@ -3264,6 +3264,27 @@ class ToolExecutor:
         self._current_msg_idx = 0
         # Per-tool counters for deterministic act-burst shelf naming.
         self._tool_counters: Dict[str, int] = {}
+
+    def clone_for_child(self) -> "ToolExecutor":
+        """Return a fresh ToolExecutor for a child (act subagent) session.
+
+        Carries the parent's notepad forward (notes are the only thing that
+        crosses the parent/child boundary, per conversation_mode_child.md).
+        Children start with EMPTY sources — per design they don't use
+        shelving; their context-trim logic handles size growth.
+
+        The child's connectors, sandbox, and counters are fresh so child
+        operations don't race with the parent.
+        """
+        child = ToolExecutor(
+            self.agent,
+            self.workspace,
+            platform=self.platform,
+            channel_context=self.channel_context,
+        )
+        # Notepad is the persistent thread between parent and children.
+        child._notepad = self._notepad
+        return child
         # External MCP server connections
         self._mcp_client = None        # McpClient instance
         self._mcp_tool_map = {}        # namespaced_name → (server_name, original_name)
@@ -8844,6 +8865,10 @@ async def agentic_turn(
     suite_registry: Optional[Dict] = None,
     mcp_suites: Optional[Dict] = None,
     model: str = "claude-sonnet-4-6",
+    is_child_mode: bool = False,
+    child_act_suites: Optional[List[str]] = None,
+    child_act_instructions: Optional[List[str]] = None,
+    spawn_child: Optional[Callable] = None,
 ) -> AgenticTurnResult:
     """
     Run a self-contained agentic turn with tool use.
@@ -8914,6 +8939,18 @@ async def agentic_turn(
     act_start_msg_idx: Optional[int] = None    # index into internal_messages at act entry; done() squashes from here
     use_think_act = suite_registry is not None  # Feature flag: only use Think/Act if registry provided
     _retried_for_empty_text = False  # One-shot: nudge model to produce text if end_turn had none
+
+    # Child (act subagent) startup: skip Think mode entirely, enter Act mode
+    # immediately with the suites + instructions the parent passed in. The
+    # done() handler exits via report instead of squashing because there's
+    # no parent session to squash into.
+    if is_child_mode:
+        act_mode = True
+        act_suites = list(child_act_suites or [])
+        act_instructions = list(child_act_instructions or [])
+        act_step_status = ["pending"] * len(act_instructions)
+        act_start_iteration = 0
+        act_start_msg_idx = 0  # nominal — no squash will happen for children
 
     for iteration in range(max_iterations):
         # Stamp the current iteration on the executor so source-management
@@ -8987,7 +9024,11 @@ async def agentic_turn(
                     _add_tool(td)
             _add_tool(NOTEPAD_TOOL_DEFINITION)
             _add_tool(MEMORY_TOOL_DEFINITION)
-            _add_tool(CONTEXT_TOOL_DEFINITION)
+            # Children don't use shelves (per subagent design — context
+            # trimming alone handles size growth) so they don't get the
+            # context tool either.
+            if not is_child_mode:
+                _add_tool(CONTEXT_TOOL_DEFINITION)
             if act_instructions:
                 _add_tool(MARK_STEP_DONE_TOOL_DEFINITION)
             _add_tool(DONE_TOOL_DEFINITION)
@@ -9394,6 +9435,7 @@ async def agentic_turn(
             # returned a stub — shelving the stub a second time is wasteful.
             if (
                 act_mode
+                and not is_child_mode  # children don't use shelves
                 and tool_use.name not in _CONTROL_TOOL_NAMES
                 and tool_use.name not in _SELF_SHELVING_TOOL_NAMES
                 and isinstance(result_text, str)
@@ -9429,45 +9471,83 @@ async def agentic_turn(
                     suite_names = [s.strip() for s in suites_part.split(",")]
                     try:
                         import json as _json_parse
-                        act_instructions = _json_parse.loads(instructions_json)
-                        act_step_status = ["pending"] * len(act_instructions)
+                        parsed_instructions = _json_parse.loads(instructions_json)
                     except Exception:
-                        act_instructions = []
-                        act_step_status = []
+                        parsed_instructions = []
                 else:
                     suite_names = [s.strip() for s in payload.split(",")]
-                    act_instructions = []
-                    act_step_status = []
-                act_mode = True
-                act_suites = suite_names
-                act_tool_use_ids = []  # fresh burst
-                act_start_iteration = iteration
-                # Point at the assistant message that contains this act()
-                # tool_use. Squashing from this index on done() removes the
-                # entering-act assistant + every subsequent burst message,
-                # so no act() tool_use is left orphaned without its paired
-                # tool_result.
-                act_start_msg_idx = len(internal_messages) - 1
-                # Mute pre-burst context (preserves individual on/off states).
-                # Shelves created from this iteration onward stay visible to
-                # the act agent via the _act_start_iteration filter.
-                if tool_executor:
-                    tool_executor._sources_muted = True
-                    tool_executor._act_start_iteration = iteration
-                    tool_executor._tool_counters = {}  # fresh burst namespace
-                instr_count = f" {len(act_instructions)} steps." if act_instructions else ""
-                result_text = f"Act mode. Suites loaded: {', '.join(suite_names)}.{instr_count} Context muted. Follow your instructions."
-                logger.info(f"[think/act] Entered Act mode with suites: {suite_names}, instructions: {len(act_instructions)} steps")
-                # Fire plan step callback for UX
-                if act_instructions and on_tool_activity:
+                    parsed_instructions = []
+
+                # Subagent mode: instead of flipping this session into Act
+                # mode in place, spawn a fresh child session and await its
+                # report. The act() call becomes a tool that takes (suites,
+                # instructions) and returns a report string. The parent
+                # never enters Act mode itself.
+                if spawn_child is not None:
                     try:
-                        await on_tool_activity(
-                            tool_name="__plan_step__",
-                            tool_input={"step": 1, "total": len(act_instructions), "steps": act_instructions},
-                            completed=False,
+                        child_result = await spawn_child(
+                            suites=suite_names,
+                            instructions=parsed_instructions,
+                            parent_tool_use_id=tool_use.id,
                         )
-                    except Exception:
-                        pass
+                        # Roll up child token usage into parent totals so
+                        # the parent's accounting reflects the full cost.
+                        total_input_tokens += getattr(child_result, "input_tokens", 0) or 0
+                        total_output_tokens += getattr(child_result, "output_tokens", 0) or 0
+                        total_cache_read_tokens += getattr(child_result, "cache_read_tokens", 0) or 0
+                        total_cache_creation_tokens += getattr(child_result, "cache_creation_tokens", 0) or 0
+                        result_text = child_result.response_text or "(child returned no report)"
+                        # Carry forward the child's notepad — notes are the
+                        # only thing that crosses the parent/child boundary.
+                        child_notepad = getattr(child_result, "notepad_content", None)
+                        if child_notepad is not None and tool_executor is not None:
+                            tool_executor._notepad = child_notepad
+                        logger.info(
+                            f"[subagent] child completed: suites={suite_names}, "
+                            f"report_chars={len(result_text)}, "
+                            f"iters={getattr(child_result, 'iterations_used', 0)}"
+                        )
+                    except Exception as child_err:
+                        logger.error(
+                            f"[subagent] child spawn failed: {child_err}",
+                            exc_info=True,
+                        )
+                        result_text = (
+                            f"Act subagent failed: {type(child_err).__name__}: "
+                            f"{str(child_err)[:200]}. Try a smaller scope or "
+                            f"different suites."
+                        )
+                else:
+                    # Legacy in-place mode flip.
+                    act_instructions = parsed_instructions
+                    act_step_status = ["pending"] * len(act_instructions)
+                    act_mode = True
+                    act_suites = suite_names
+                    act_tool_use_ids = []  # fresh burst
+                    act_start_iteration = iteration
+                    # Point at the assistant message that contains this
+                    # act() tool_use. Squashing from this index on done()
+                    # removes the entering-act assistant + every burst
+                    # message so no act() tool_use is orphaned.
+                    act_start_msg_idx = len(internal_messages) - 1
+                    # Mute pre-burst context (preserves on/off states).
+                    if tool_executor:
+                        tool_executor._sources_muted = True
+                        tool_executor._act_start_iteration = iteration
+                        tool_executor._tool_counters = {}  # fresh burst
+                    instr_count = f" {len(act_instructions)} steps." if act_instructions else ""
+                    result_text = f"Act mode. Suites loaded: {', '.join(suite_names)}.{instr_count} Context muted. Follow your instructions."
+                    logger.info(f"[think/act] Entered Act mode with suites: {suite_names}, instructions: {len(act_instructions)} steps")
+                    # Fire plan step callback for UX
+                    if act_instructions and on_tool_activity:
+                        try:
+                            await on_tool_activity(
+                                tool_name="__plan_step__",
+                                tool_input={"step": 1, "total": len(act_instructions), "steps": act_instructions},
+                                completed=False,
+                            )
+                        except Exception:
+                            pass
             elif result_text.startswith("__MARK_STEP__:"):
                 step_num = int(result_text.split(":")[1])
                 if 0 < step_num <= len(act_step_status):
@@ -9504,6 +9584,27 @@ async def agentic_turn(
                             f"[think/act] done payload parse failed: {parse_err}; "
                             "using defaults (discard all burst shelves)"
                         )
+
+                # Child path: this is a subagent. Return the report
+                # immediately to the parent — no squash, no message
+                # rewrite. The parent embeds the report as the tool_result
+                # for its act() tool_use.
+                if is_child_mode:
+                    logger.info(
+                        f"[subagent.child] done: report_chars={len(report)} "
+                        f"iters={iteration + 1}"
+                    )
+                    return AgenticTurnResult(
+                        response_text=report,
+                        tool_calls_made=all_tool_calls,
+                        iterations_used=iteration + 1,
+                        input_tokens=total_input_tokens,
+                        output_tokens=total_output_tokens,
+                        cache_read_tokens=total_cache_read_tokens,
+                        cache_creation_tokens=total_cache_creation_tokens,
+                        plan=plan,
+                        notepad_content=tool_executor._notepad if tool_executor else None,
+                    )
 
                 # Burst-scoped shelves are everything mounted at or after entry.
                 burst_start = act_start_iteration if act_start_iteration is not None else iteration
