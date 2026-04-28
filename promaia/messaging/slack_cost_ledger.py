@@ -49,6 +49,7 @@ def append_entry(
     cache_read_tokens: int,
     cache_creation_tokens: int,
     total_cost: float,
+    cache_savings: float = 0.0,
 ) -> None:
     """Append a single cost entry. Failures are logged, never raised — the
     ledger is observability, not a correctness boundary."""
@@ -63,6 +64,7 @@ def append_entry(
         "cache_read_tokens": cache_read_tokens,
         "cache_creation_tokens": cache_creation_tokens,
         "total_cost": total_cost,
+        "cache_savings": cache_savings,
     }
     try:
         path = _ledger_path()
@@ -94,9 +96,15 @@ def _iter_entries() -> List[Dict]:
 
 
 def aggregate_since(since: datetime) -> Dict[str, float]:
-    """Return totals for entries with ts >= since."""
+    """Return totals for entries with ts >= since.
+
+    `savings` is summed from each entry's `cache_savings` field. Old
+    entries written before that field existed contribute 0 — they're
+    counted in `cost` and `turns` but not in `savings`.
+    """
     totals = {
         "cost": 0.0,
+        "savings": 0.0,
         "prompt_tokens": 0,
         "response_tokens": 0,
         "cache_read_tokens": 0,
@@ -111,6 +119,7 @@ def aggregate_since(since: datetime) -> Dict[str, float]:
         if ts < since:
             continue
         totals["cost"] += float(entry.get("total_cost") or 0)
+        totals["savings"] += float(entry.get("cache_savings") or 0)
         totals["prompt_tokens"] += int(entry.get("prompt_tokens") or 0)
         totals["response_tokens"] += int(entry.get("response_tokens") or 0)
         totals["cache_read_tokens"] += int(entry.get("cache_read_tokens") or 0)
@@ -134,16 +143,31 @@ def format_cost_prefix(
     response_tokens: int,
     turn_cost: float,
     session_cost: float,
+    turn_savings: float = 0.0,
+    session_savings: float = 0.0,
 ) -> str:
     """Format the per-message cost prefix for Slack.
 
-    Mirrors the terminal footer:
+    Layout:
         prompt, response, total
-        $turn_cost  (session: $session_cost)
+        $turn_cost  [cache: ±$turn_savings]  (session: $session_cost [saved $session_savings])
 
-    Returns a string ready to prepend to the assistant message body.
+    The cache field is hidden when no caching activity happened on this
+    turn (turn_savings exactly 0 — typical for one-shot non-cached
+    legacy paths). The session-saved suffix is hidden when there's
+    been no cumulative caching activity.
     """
     total_tokens = prompt_tokens + response_tokens
     line1 = f"{prompt_tokens:,}, {response_tokens:,}, {total_tokens:,}"
-    line2 = f"${turn_cost:.6f}  (session: ${session_cost:.4f})"
+
+    cache_field = ""
+    if turn_savings:
+        sign = "+" if turn_savings >= 0 else "−"
+        cache_field = f"  cache: {sign}${abs(turn_savings):.6f}"
+
+    session_field = f"session: ${session_cost:.4f}"
+    if session_savings:
+        sign = "+" if session_savings >= 0 else "−"
+        session_field += f", saved {sign}${abs(session_savings):.4f}"
+    line2 = f"${turn_cost:.6f}{cache_field}  ({session_field})"
     return f"{line1}\n{line2}"

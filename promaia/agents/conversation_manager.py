@@ -715,10 +715,14 @@ class ConversationManager:
                     "cache_read_tokens": cache_read,
                     "cache_creation_tokens": cache_create,
                     "total_cost": cost["total_cost"],
+                    "cache_savings": cost["cache_savings"],
                     "model": cost["model"],
                 }
                 state.context['session_cost'] = (
                     float(state.context.get('session_cost') or 0) + cost["total_cost"]
+                )
+                state.context['session_savings'] = (
+                    float(state.context.get('session_savings') or 0) + cost["cache_savings"]
                 )
                 # Persist to the Slack ledger so the /cost command can
                 # aggregate by day/week/month. Only Slack turns flow into
@@ -735,6 +739,7 @@ class ConversationManager:
                         cache_read_tokens=cache_read,
                         cache_creation_tokens=cache_create,
                         total_cost=cost["total_cost"],
+                        cache_savings=cost["cache_savings"],
                     )
             except Exception as e:
                 logger.debug(f"Cost accounting failed (non-fatal): {e}")

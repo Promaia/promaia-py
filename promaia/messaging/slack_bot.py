@@ -1118,8 +1118,20 @@ def create_slack_bot():
             enabled = get_cost_display_enabled()
 
             def fmt_block(label: str, t: Dict) -> str:
+                # Show actual cost; if there's been any caching activity,
+                # also show the dollars saved (or extra spent if cache
+                # writes outweighed reads — sign indicates direction).
+                saved = float(t.get("savings") or 0)
+                if saved > 0:
+                    base_cost = t["cost"] + saved  # what we'd have paid without cache
+                    pct = (saved / base_cost * 100) if base_cost else 0
+                    cache_seg = f"  saved ${saved:.4f} ({pct:.0f}%)"
+                elif saved < 0:
+                    cache_seg = f"  cache cost extra ${abs(saved):.4f}"
+                else:
+                    cache_seg = ""
                 return (
-                    f"*{label}:* ${t['cost']:.4f}  "
+                    f"*{label}:* ${t['cost']:.4f}{cache_seg}  "
                     f"({t['turns']} turn{'s' if t['turns'] != 1 else ''}, "
                     f"{t['prompt_tokens']:,} in / {t['response_tokens']:,} out, "
                     f"{t['cache_read_tokens']:,} cache-read)"
