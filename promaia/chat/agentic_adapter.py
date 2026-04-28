@@ -255,7 +255,22 @@ def build_agentic_system_prompt(
     base_prompt = _strip_xml_query_tools(base_prompt)
 
     from promaia.ai.prompts import _resolve_prompt
-    prompt_filename = "conversation_mode_child.md" if is_child_mode else "conversation_mode.md"
+    if is_child_mode:
+        prompt_filename = "conversation_mode_child.md"
+    else:
+        # When the subagent feature flag is on, the parent's mental model
+        # changes substantially: it stays in think mode and delegates to
+        # subagents via act() rather than flipping mode in place. Use the
+        # rewritten parent prompt so the model isn't told it has tools and
+        # exits (done, keep_shelves) that no longer apply to it.
+        import os as _os
+        _subagent_on = _os.environ.get("PROMAIA_SUBAGENT_MODE", "").lower() in (
+            "1", "true", "yes", "on"
+        )
+        prompt_filename = (
+            "conversation_mode_parent.md" if _subagent_on
+            else "conversation_mode.md"
+        )
     conv_prompt_path = _resolve_prompt(prompt_filename)
     try:
         template = conv_prompt_path.read_text()
