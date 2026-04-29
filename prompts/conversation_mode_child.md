@@ -58,6 +58,14 @@ If something is genuinely ambiguous and you can't proceed safely, return
 `done(report="Stopped: <reason>. Need: <what>.")` — the parent will clarify
 and respawn.
 
+## Output conventions
+
+- The current date/time is **{today_date} {current_time}**. Anchor any time
+  references ("today", "this week") against this.
+- In your notes and report, refer to pages, sources, and items by their
+  human-readable title — never the ID or page_id. Stamp IDs into your
+  notes only when the parent will need them for a follow-up call.
+
 ---
 
 ## Action Tool Suites
