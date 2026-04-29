@@ -445,6 +445,13 @@ class TagToChatLoop:
         tool_steps = []           # Completed tool summaries
         current_tool = None       # Tool name while executing (None = thinking)
         current_tool_input = {}   # Tool input for current call (for display)
+        current_tool_is_child = False  # True when the running tool is from
+                                       # a subagent (renders with ↳ prefix)
+        pending_act_idx = None    # Index in tool_steps of an in-flight
+                                  # parent `act` call (subagent mode). The
+                                  # entry is inserted on dispatch so child
+                                  # steps render nested under it; replaced
+                                  # with the final summary on completion.
 
         def _strikethrough(text: str) -> str:
             if self.state.platform == "slack":
@@ -468,6 +475,7 @@ class TagToChatLoop:
 
         async def on_tool_activity(tool_name, tool_input, completed, summary=None, **kwargs):
             nonlocal current_tool, current_tool_input, plan_active_step
+            nonlocal current_tool_is_child, pending_act_idx
             # Activity events from inside an act subagent are tagged
             # child=True by _spawn_act_child's wrapper. Visually nest them
             # under the parent's act() step so the breadcrumb makes the
@@ -503,9 +511,50 @@ class TagToChatLoop:
                 plan_active_step = 0
                 return
 
+            # Parent's `act` call in subagent mode: the dispatch and the
+            # completion are separated by however long the child runs (can
+            # be tens of seconds). If we waited for completion to render
+            # the act line, the child's ↳ steps would visually appear
+            # BEFORE their parent. Instead, insert a placeholder on
+            # dispatch so the act line is in place when child steps land,
+            # then replace it on completion.
+            import os as _os_act
+            _subagent_on = _os_act.environ.get("PROMAIA_SUBAGENT_MODE", "").lower() in (
+                "1", "true", "yes", "on"
+            )
+            if tool_name == "act" and not is_child and _subagent_on:
+                from promaia.agents.run_goal import _summarize_tool_input
+                params = _summarize_tool_input(tool_name, tool_input or current_tool_input)
+                call_label = f"`act` ({params})" if params else "`act`"
+                if not completed:
+                    # Dispatch — drop a header in-place. Don't set
+                    # current_tool: the placeholder already shows it.
+                    tool_steps.append(
+                        f"{call_label}\n     ⎿  ⏳ subagent running…"
+                    )
+                    pending_act_idx = len(tool_steps) - 1
+                    return
+                else:
+                    # Completion — swap the placeholder for the final summary.
+                    if summary:
+                        result = summary[:120] + "..." if len(summary) > 120 else summary
+                        line = f"{call_label}\n     ⎿  {result}"
+                    else:
+                        line = call_label
+                    if pending_act_idx is not None and pending_act_idx < len(tool_steps):
+                        tool_steps[pending_act_idx] = line
+                    else:
+                        tool_steps.append(line)
+                    pending_act_idx = None
+                    current_tool = None
+                    current_tool_input = {}
+                    current_tool_is_child = False
+                    return
+
             if not completed:
                 current_tool = tool_name
                 current_tool_input = tool_input or {}
+                current_tool_is_child = is_child
             else:
                 # Format like Claude Code: `tool_name`(params) ⎿ result
                 # Child steps get an indent + ↳ to nest visually under the
@@ -522,6 +571,7 @@ class TagToChatLoop:
                     tool_steps.append(call_str)
                 current_tool = None
                 current_tool_input = {}
+                current_tool_is_child = False
 
         # Unified animation: renders thinking OR tool activity with cycling emoji
         async def animate():
@@ -550,10 +600,19 @@ class TagToChatLoop:
                         from promaia.agents.run_goal import _summarize_tool_input
                         params = _summarize_tool_input(current_tool, current_tool_input)
                         tool_label = f"`{current_tool}` ({params})" if params else f"`{current_tool}`"
-                        lines.append(
-                            f"{parent_n + 1}. {tool_label}... "
-                            f"{random.choice(THINKING_EMOJIS)}"
-                        )
+                        if current_tool_is_child:
+                            # Child tool spinner nests under the parent's
+                            # act line — same ↳ prefix as completed child
+                            # steps so it's clearly part of the subagent.
+                            lines.append(
+                                f"   ↳ {tool_label}... "
+                                f"{random.choice(THINKING_EMOJIS)}"
+                            )
+                        else:
+                            lines.append(
+                                f"{parent_n + 1}. {tool_label}... "
+                                f"{random.choice(THINKING_EMOJIS)}"
+                            )
                     else:
                         # Between tools — LLM is thinking
                         lines.append(
