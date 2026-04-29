@@ -539,9 +539,13 @@ def build_agentic_system_prompt(
     workflow_section = ""
 
     # Apply template substitutions
+    import datetime as _dt
+    _now = _dt.datetime.now()
     filled = template.replace("{agent_name}", "Maia")
     filled = filled.replace("{platform}", "terminal")
     filled = filled.replace("{sources}", sources_list)
+    filled = filled.replace("{today_date}", _now.strftime("%Y-%m-%d"))
+    filled = filled.replace("{current_time}", _now.strftime("%H:%M"))
     # Tool sections embedded in conversation_mode.md template — positioned before
     # context sources so the agent sees available tools early in the prompt.
     filled = filled.replace("{tool_sections}", tool_sections)
