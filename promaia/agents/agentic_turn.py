@@ -50,7 +50,9 @@ QUERY_TOOL_DEFINITIONS = [
         "description": (
             "Search your data sources using natural language (converted to SQL). "
             "Use for exact text/keyword searches when you know what you're looking for. "
-            "Examples: 'emails from Federico this week', 'tasks due today'"
+            "Examples: 'emails from Federico', 'tasks due today'. "
+            "You MUST specify days_back to scope the search to a time window — "
+            "this keeps results focused and the context window lean."
         ),
         "input_schema": {
             "type": "object",
@@ -62,9 +64,18 @@ QUERY_TOOL_DEFINITIONS = [
                 "reasoning": {
                     "type": "string",
                     "description": "Brief explanation of why you need this data"
+                },
+                "days_back": {
+                    "type": "integer",
+                    "description": (
+                        "Time window: only return results created within this many days. "
+                        "Be conservative — 7 to 30 days covers most queries. "
+                        "Use larger values only when the user explicitly asks for older history."
+                    ),
+                    "minimum": 1,
                 }
             },
-            "required": ["query", "reasoning"]
+            "required": ["query", "reasoning", "days_back"]
         }
     },
     {
@@ -73,7 +84,8 @@ QUERY_TOOL_DEFINITIONS = [
             "Semantic search across all data sources using embeddings. "
             "Use for conceptual/fuzzy searches when exact keywords won't work. "
             "Examples: 'discussions about team morale', "
-            "'content about project deadlines and pressure'"
+            "'content about project deadlines and pressure'. "
+            "You MUST specify days_back to scope the search to a time window."
         ),
         "input_schema": {
             "type": "object",
@@ -86,6 +98,15 @@ QUERY_TOOL_DEFINITIONS = [
                     "type": "string",
                     "description": "Brief explanation of why you need this data"
                 },
+                "days_back": {
+                    "type": "integer",
+                    "description": (
+                        "Time window: only return results created within this many days. "
+                        "Be conservative — 7 to 30 days covers most queries. "
+                        "Use larger values only when the user explicitly asks for older history."
+                    ),
+                    "minimum": 1,
+                },
                 "top_k": {
                     "type": "integer",
                     "description": "Max results to return (default: 50)",
@@ -97,7 +118,7 @@ QUERY_TOOL_DEFINITIONS = [
                     "default": 0.2
                 }
             },
-            "required": ["query", "reasoning"]
+            "required": ["query", "reasoning", "days_back"]
         }
     },
     {
@@ -3512,10 +3533,23 @@ class ToolExecutor:
         query = tool_input.get("query", "")
         if not query:
             return "Error: missing 'query' parameter"
+        days_back = tool_input.get("days_back")
+        if not isinstance(days_back, int) or days_back < 1:
+            return (
+                "Error: missing or invalid 'days_back' parameter. "
+                "Specify how many days back to search (e.g. 7, 30, 365). "
+                "This is required so queries stay scoped and the context "
+                "window stays lean."
+            )
+
+        # Augment the NL query with the date scope so the SQL generator
+        # produces a date-filtered query. The generator is NL-driven so a
+        # natural-sounding constraint here lands as a WHERE clause.
+        scoped_query = f"{query} (within the last {days_back} days)"
 
         result = await asyncio.to_thread(
             process_natural_language_to_content,
-            nl_prompt=query,
+            nl_prompt=scoped_query,
             workspace=self.workspace,
             verbose=False,
             skip_confirmation=True,
@@ -3564,19 +3598,57 @@ class ToolExecutor:
         query = tool_input.get("query", "")
         if not query:
             return "Error: missing 'query' parameter"
+        days_back = tool_input.get("days_back")
+        if not isinstance(days_back, int) or days_back < 1:
+            return (
+                "Error: missing or invalid 'days_back' parameter. "
+                "Specify how many days back to search (e.g. 7, 30, 365). "
+                "This is required so queries stay scoped and the context "
+                "window stays lean."
+            )
 
         top_k = tool_input.get("top_k", 50)
         min_similarity = tool_input.get("min_similarity", 0.2)
 
+        # Augment the embedded query with the date scope. Embedding match
+        # is fuzzy on dates, so we ALSO post-filter results below.
+        scoped_query = f"{query} (within the last {days_back} days)"
+
         loaded_content = await asyncio.to_thread(
             process_vector_search_to_content,
-            vs_prompt=query,
+            vs_prompt=scoped_query,
             workspace=self.workspace,
             n_results=top_k,
             min_similarity=min_similarity,
             verbose=False,
             skip_confirmation=True,
         )
+
+        # Post-filter by created_time (best-effort — entries without a
+        # parseable date pass through unfiltered so we don't drop legit
+        # results that happen to lack timestamps).
+        if loaded_content:
+            from datetime import datetime, timedelta, timezone
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+            filtered: Dict[str, list] = {}
+            for db_name, pages in loaded_content.items():
+                kept = []
+                for p in pages or []:
+                    created = p.get("created_time") or p.get("created") or ""
+                    if not created:
+                        kept.append(p)
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        if ts >= cutoff:
+                            kept.append(p)
+                    except Exception:
+                        kept.append(p)
+                if kept:
+                    filtered[db_name] = kept
+            loaded_content = filtered
 
         if not loaded_content:
             return "Semantic search returned no results."
