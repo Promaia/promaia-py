@@ -6444,12 +6444,26 @@ class ToolExecutor:
             text = text[:MAX_CONTENT_CHARS] + "\n\n[Content truncated at 50,000 characters]"
             truncated = True
 
-        # Mount the body as a named context source. ON by default so the
-        # agent can read it right now; the trimmer will LRU it off when
-        # budget tightens. Name scheme mirrors `sql_…`, `search_…`, etc.
+        truncation_note = " (truncated)" if truncated else ""
+        header = f"# Web fetch: {url}\n\n"
+
+        # Parent / Sub re-arch: act children get the fetched body inline
+        # as the tool_result so they can actually read what they just
+        # fetched. Without this, the act child got back only a stub like
+        # "Fetched URL → source 'web_fetch_1' [ON]" and the body was
+        # shelved into _sources, which the postfix doesn't render in
+        # parent_sub_mode — so the data was effectively invisible.
+        if self._role_unified_tools is not None:
+            return (
+                f"Fetched {url} → {len(text):,} chars{truncation_note}.\n\n"
+                f"{header}{text}"
+            )
+
+        # Legacy: shelf the body as a named context source. ON by default
+        # so the agent can read it right now; the trimmer will LRU it off
+        # when budget tightens. Name scheme mirrors `sql_…`, `search_…`.
         self._web_fetch_counter += 1
         source_name = f"web_fetch_{self._web_fetch_counter}"
-        header = f"# Web fetch: {url}\n\n"
         self._sources[source_name] = {
             "content": header + text,
             "on": True,
@@ -6460,7 +6474,6 @@ class ToolExecutor:
             "shelved_from_msg": self._current_msg_idx,
         }
 
-        truncation_note = " (truncated)" if truncated else ""
         return (
             f"Fetched {url} → {len(text):,} chars{truncation_note} → "
             f"source '{source_name}' [ON] @msg#{self._current_msg_idx}. "
