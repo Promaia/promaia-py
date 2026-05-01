@@ -133,6 +133,18 @@ def _summarize_tool_input(tool_name: str, tool_input: dict) -> str:
     elif tool_name == "start_conversation":
         user = tool_input.get("user", "")
         return f"with {user}"
+    elif tool_name == "search":
+        instr = tool_input.get("instructions", []) or []
+        n = len(instr)
+        head = instr[0] if instr else ""
+        return f"{n} step{'s' if n != 1 else ''}" + (f": {head[:60]}" if head else "")
+    elif tool_name == "act":
+        suites = tool_input.get("suites", []) or []
+        instr = tool_input.get("instructions", []) or []
+        return f"{','.join(suites)} ({len(instr)} step{'s' if len(instr) != 1 else ''})"
+    elif tool_name == "compress_last_result":
+        s = tool_input.get("summary", "") or ""
+        return s[:60]
     # Generic fallback
     for k, v in tool_input.items():
         return f"{str(v)[:60]}"

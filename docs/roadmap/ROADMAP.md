@@ -8,6 +8,16 @@ work with it.
 
 ## Active
 
+### Parent / Sub re-architecture — unified prefix, delegating parent
+
+Make the parent a pure delegator (search + act sub-agents only); ditch
+shelves entirely; share one system prompt and one tool union across all
+three agents so children inherit the parent's cached prefix; switch all
+calls to 1-hour cache TTL. Supersedes the shelving-postfix work and
+extends the subagent architecture to read tools.
+
+See [`parent_sub_re-arch.md`](parent_sub_re-arch.md).
+
 ### Shelving postfix + Anthropic prompt caching
 
 Move the volatile per-iteration content (context shelf index, ON

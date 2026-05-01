@@ -125,9 +125,11 @@ QUERY_TOOL_DEFINITIONS = [
         "name": "query_source",
         "description": (
             "Load pages from a specific database with time filtering. "
-            "Use to expand context or load different time ranges. "
-            "Available databases include: agent_journal, gmail, stories, tasks, "
-            "and any Discord/Slack channel sources."
+            "You MUST specify days_back. Use the smallest window that "
+            "covers what you need; large values (>30) load thousands of "
+            "pages and bloat your context. Available databases include "
+            "agent_journal, gmail, stories, tasks, and any Discord/Slack "
+            "channel sources."
         ),
         "input_schema": {
             "type": "object",
@@ -139,12 +141,18 @@ QUERY_TOOL_DEFINITIONS = [
                         "'tasks')"
                     )
                 },
-                "days": {
+                "days_back": {
                     "type": "integer",
-                    "description": "Days to look back (0 or omit for all)"
+                    "description": (
+                        "Time window: only return pages whose created_at is "
+                        "within this many days. Required. Use 1-7 for recent "
+                        "scan, 7-30 for short history; >30 only when the user "
+                        "explicitly asks for older content."
+                    ),
+                    "minimum": 1,
                 }
             },
-            "required": ["database"]
+            "required": ["database", "days_back"]
         }
     },
     {
@@ -1683,9 +1691,10 @@ CONTEXT_TOOL_DEFINITION = {
 ACT_TOOL_DEFINITION = {
     "name": "act",
     "description": (
-        "Enter Act mode to execute actions. You MUST provide step-by-step instructions "
-        "for what to do. Instructions stay visible and you mark each step done as you go. "
-        "Your notes come with you but context sources are hidden. Call done() when finished."
+        "Spawn an act sub-agent to execute write operations. The sub-agent is loaded "
+        "with the named tool suites and runs through your instructions; its prose "
+        "report comes back as this tool's result. You never see its intermediate "
+        "tool calls — anything you'll need afterwards must appear in the report."
     ),
     "input_schema": {
         "type": "object",
@@ -1698,11 +1707,64 @@ ACT_TOOL_DEFINITION = {
             "instructions": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Step-by-step instructions for what to do in Act mode. Each string is one step."
+                "description": "Ordered checklist for the act sub-agent. Each string is one concrete step."
             }
         },
         "required": ["suites", "instructions"]
     }
+}
+
+SEARCH_TOOL_DEFINITION = {
+    "name": "search",
+    "description": (
+        "Spawn a read-only search sub-agent. The sub-agent runs queries against "
+        "local synced data (query_sql, query_vector, query_source), synthesizes "
+        "what it finds, and returns a prose report. Use this for any context "
+        "gathering — you do not call query tools directly. Returns the sub-agent's "
+        "report as a string."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "instructions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Ordered checklist describing what the search sub-agent should "
+                    "find. Describe outcomes, not query mechanics — the sub-agent "
+                    "picks the right query tools."
+                ),
+            },
+        },
+        "required": ["instructions"],
+    },
+}
+
+COMPRESS_LAST_RESULT_TOOL_DEFINITION = {
+    "name": "compress_last_result",
+    "description": (
+        "Replace the most recent tool_result in your message history with your "
+        "own prose summary. Use this immediately after a tool call returns more "
+        "data than you need to keep around — extract the relevant facts, then "
+        "compress so the original body doesn't bloat your remaining iterations. "
+        "ONE-SHOT: only callable on the iteration immediately following the tool "
+        "result. Once you've taken any other action after the tool result, the "
+        "result is locked at full size for the rest of your burst."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": (
+                    "Your prose synthesis of the previous tool result. Replaces "
+                    "the tool_result body in your history. Be specific: extract "
+                    "IDs, names, dates, counts — anything you'll cite later."
+                ),
+            },
+        },
+        "required": ["summary"],
+    },
 }
 
 MARK_STEP_DONE_TOOL_DEFINITION = {
@@ -3077,6 +3139,171 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     return tools
 
 
+# ── Parent / Sub re-arch — unified tool union + role allowlist ──────────
+#
+# When PROMAIA_PARENT_SUB_MODE is on, every API call (parent, search child,
+# act child) sends the *same* tool list — the union of every tool any role
+# might need. Role discipline is enforced at the executor: a tool called
+# outside its role's allowlist returns an error tool_result and the burst
+# continues. Sharing one tool list across all three roles is what lets the
+# system + tools cache prefix hit on every agent in the family.
+#
+# Allowlist-by-name keeps the data simple. If new tools land later, add
+# their names to the appropriate set; the tool definitions themselves can
+# live anywhere in the union.
+
+_PARENT_ROLE_TOOLS = frozenset({
+    "search",
+    "act",
+    "notepad",
+    "memory",
+})
+
+_SEARCH_ROLE_TOOLS = frozenset({
+    "query_sql",
+    "query_vector",
+    "query_source",
+    "compress_last_result",
+    "mark_step_done",
+    "done",
+})
+
+
+def _act_role_tools_for(unified_tools: List[Dict[str, Any]]) -> frozenset:
+    """Compute the act role's allowlist as: every tool in the union that
+    is neither parent-exclusive nor search-exclusive.
+
+    The act role gets all suite tools (gmail, calendar, notion, sheets,
+    drive, web, messaging, admin, MCP servers) plus the shared scaffolding
+    (compress_last_result, mark_step_done, done). It does NOT get
+    notepad/memory (parent-only writes) or query_* (search-only reads).
+    Computing it from the union means we never need to enumerate every
+    suite tool by name here.
+    """
+    names = {t.get("name") for t in unified_tools if t.get("name")}
+    parent_exclusive = _PARENT_ROLE_TOOLS  # search, act, notepad, memory
+    search_exclusive = {"query_sql", "query_vector", "query_source"}
+    return frozenset(names - parent_exclusive - search_exclusive)
+
+
+def role_tool_allowlist(role: str, unified_tools: List[Dict[str, Any]]) -> frozenset:
+    """Return the set of tool names allowed for `role`.
+
+    `role` is one of "parent", "search", "act". Pass the current unified
+    tool list so the act role can be computed dynamically.
+    """
+    if role == "parent":
+        return _PARENT_ROLE_TOOLS
+    if role == "search":
+        return _SEARCH_ROLE_TOOLS
+    if role == "act":
+        return _act_role_tools_for(unified_tools)
+    return frozenset()
+
+
+# Search role's read tools — pulled out of QUERY_TOOL_DEFINITIONS so we
+# can omit the legacy `write_agent_journal` (which sits inside that
+# constant for historical reasons but isn't a search read tool).
+QUERY_TOOL_DEFINITIONS_FOR_SEARCH_ROLE = [
+    t for t in QUERY_TOOL_DEFINITIONS if t.get("name") in {
+        "query_sql", "query_vector", "query_source",
+    }
+]
+
+
+def build_parent_tool_definitions(agent) -> List[Dict[str, Any]]:
+    """Tools the parent role sees in parent_sub_mode.
+
+    The parent is a pure delegator. Its tools array is intentionally
+    tiny:
+
+      - search(instructions)        — spawn a search sub-agent
+      - act(suites, instructions)   — spawn an act sub-agent
+      - notepad(action, content)    — its own working brief
+      - memory(action, …)           — long-lived facts about the user
+
+    The 78 suite-specific tools (notion, gmail, calendar, sheets, drive,
+    web, messaging, admin, MCP) are NOT here. The parent doesn't need
+    to know their schemas — only their names and what each suite does
+    at a high level. That summary lives in the parent's system prompt
+    as a brief suite index (one line per suite), so the parent can pick
+    the right `suites=[…]` argument when calling `act`.
+
+    Cache implication: tiny + stable. Cached once per cache window;
+    every parent turn pays only ~150 cache-read tokens for tools.
+    """
+    return [
+        SEARCH_TOOL_DEFINITION,
+        ACT_TOOL_DEFINITION,
+        NOTEPAD_TOOL_DEFINITION,
+        MEMORY_TOOL_DEFINITION,
+    ]
+
+
+def build_search_child_tool_definitions() -> List[Dict[str, Any]]:
+    """Tools a search sub-agent receives at spawn.
+
+    All three query tools, plus the per-burst scaffolding (compression
+    one-shot, step-done, exit). No suite tools, no notepad write
+    access (notepad is parent-only-write; the child reads a snapshot
+    via its kickoff). No memory.
+    """
+    return list(QUERY_TOOL_DEFINITIONS_FOR_SEARCH_ROLE) + [
+        COMPRESS_LAST_RESULT_TOOL_DEFINITION,
+        MARK_STEP_DONE_TOOL_DEFINITION,
+        DONE_TOOL_DEFINITION,
+    ]
+
+
+def build_act_child_tool_definitions(
+    agent,
+    suites: List[str],
+    has_platform: bool = False,
+    mcp_suites: Optional[Dict[str, Dict]] = None,
+) -> List[Dict[str, Any]]:
+    """Tools an act sub-agent receives at spawn.
+
+    Filtered to the named suites only. Plus per-burst scaffolding.
+    Suite resolution mirrors `_get_suite_tools` / `_build_tool_suite_registry`.
+    """
+    registry = _build_tool_suite_registry(agent, has_platform=has_platform)
+    seen: set = set()
+    tools: List[Dict[str, Any]] = []
+    for suite_name in suites or []:
+        suite_tools = _get_suite_tools(suite_name, registry, mcp_suites)
+        for td in suite_tools:
+            name = td.get("name")
+            if name and name not in seen:
+                seen.add(name)
+                tools.append(td)
+    # Scaffolding shared by every child burst.
+    for td in (
+        COMPRESS_LAST_RESULT_TOOL_DEFINITION,
+        MARK_STEP_DONE_TOOL_DEFINITION,
+        DONE_TOOL_DEFINITION,
+    ):
+        if td.get("name") not in seen:
+            seen.add(td.get("name"))
+            tools.append(td)
+    return tools
+
+
+# Backward-compat shim. Older callers import build_unified_tool_definitions;
+# routes them to the per-role builders. Returns the parent's tool list for
+# the parent's request and lets sub-agents fetch their own at spawn.
+def build_unified_tool_definitions(
+    agent,
+    has_platform: bool = False,
+) -> List[Dict[str, Any]]:
+    """Deprecated. Returns parent's tool definitions only.
+
+    Kept so existing import sites don't break. Sub-agents should call
+    `build_search_child_tool_definitions()` /
+    `build_act_child_tool_definitions(agent, suites)` at spawn time.
+    """
+    return build_parent_tool_definitions(agent)
+
+
 # ── Tool suites (Think/Act mode) ─────────────────────────────────────────
 
 def _build_tool_suite_registry(agent, has_platform: bool = False) -> Dict[str, Dict]:
@@ -3285,6 +3512,50 @@ class ToolExecutor:
         self._current_msg_idx = 0
         # Per-tool counters for deterministic act-burst shelf naming.
         self._tool_counters: Dict[str, int] = {}
+        # Parent / Sub re-arch — current role of this executor. One of
+        # "parent", "search", "act". Defaults to "parent" so legacy code
+        # paths (which never set this) behave unchanged. The role is used
+        # by `_role_check_or_error` to gate tool dispatch when the parent-
+        # sub feature flag is on.
+        self.current_role: str = "parent"
+        # Snapshot of the unified tool list this executor is dispatching
+        # against. Set by the agentic loop on entry so the role allowlist
+        # for the "act" role can be computed without re-importing the tool
+        # registry. None when not in parent-sub mode.
+        self._role_unified_tools: Optional[List[Dict[str, Any]]] = None
+        # Phase 2 — index of the most-recent tool_result block that is
+        # still eligible for `compress_last_result`. Set by the agentic
+        # loop after a tool_result is appended; cleared after the next
+        # assistant turn unless that turn invoked compress_last_result.
+        # Format: (message_index, content_block_index) or None.
+        self._pending_compressible: Optional[tuple] = None
+
+    def _role_check_or_error(self, tool_name: str) -> Optional[str]:
+        """If `tool_name` is not in `self.current_role`'s allowlist, return
+        an error tool_result string. Returns None when the call is allowed.
+
+        Permissive when `_role_unified_tools` is None (legacy mode): every
+        tool is allowed. Only enforces the role contract when the agentic
+        loop has stamped the unified tool list.
+        """
+        if self._role_unified_tools is None:
+            return None
+        allowed = role_tool_allowlist(self.current_role, self._role_unified_tools)
+        if tool_name in allowed:
+            return None
+        # Sentinel sub-strings carry through the agentic loop; treat as
+        # control flow even when the role wouldn't normally permit them.
+        if tool_name in {"act", "search", "done", "mark_step_done"}:
+            # Still gated — but the error message tells the model how to
+            # escalate. For the disallowed ones above, the standard
+            # message is already informative enough.
+            pass
+        allowed_list = ", ".join(sorted(allowed)) or "(none)"
+        return (
+            f"ERROR: `{tool_name}` is not available in `{self.current_role}` role. "
+            f"Allowed: {allowed_list}. "
+            f"If you need to escalate to the parent, call `done(report=\"…\")`."
+        )
 
     def clone_for_child(self) -> "ToolExecutor":
         """Return a fresh ToolExecutor for a child (act subagent) session.
@@ -3313,6 +3584,14 @@ class ToolExecutor:
     async def execute(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         """Execute a tool and return a plain text result."""
         try:
+            # Parent / Sub re-arch — role gate. When the agentic loop has
+            # stamped the unified tool list on this executor, refuse calls
+            # outside the current role's allowlist by returning an
+            # informative error tool_result. The model can self-correct on
+            # the next iteration.
+            role_err = self._role_check_or_error(tool_name)
+            if role_err is not None:
+                return role_err
             # Query tools
             if tool_name == "query_sql":
                 return await self._query_sql(tool_input)
@@ -3432,6 +3711,22 @@ class ToolExecutor:
                 instructions = tool_input.get("instructions", [])
                 import json as _json_act
                 return f"__ACT__:{','.join(suites)}|{_json_act.dumps(instructions)}"
+            elif tool_name == "search":
+                # Parent / Sub re-arch — sentinel. The agentic loop in the
+                # parent intercepts this prefix and dispatches to the
+                # search-child spawn callback. Children ought never reach
+                # here because the role gate above blocks `search` for
+                # non-parent roles.
+                instructions = tool_input.get("instructions", [])
+                import json as _json_search
+                return f"__SEARCH__:{_json_search.dumps(instructions)}"
+            elif tool_name == "compress_last_result":
+                # Parent / Sub re-arch — sentinel. The agentic loop
+                # intercepts this and rewrites the previous tool_result
+                # body in-place (one-shot, see _pending_compressible).
+                summary = tool_input.get("summary", "") or ""
+                import json as _json_compress
+                return f"__COMPRESS__:{_json_compress.dumps({'summary': summary})}"
             elif tool_name == "mark_step_done":
                 step = tool_input.get("step", 0)
                 return f"__MARK_STEP__:{step}"
@@ -3687,9 +3982,19 @@ class ToolExecutor:
             if agent_id and agent_id != "terminal-user":
                 database = f"{agent_id.replace('-', '_')}_journal"
 
-        days = tool_input.get("days")
-        if days == 0:
-            days = None
+        # Phase 5 — days_back is required (matches query_sql / query_vector).
+        # Accept legacy `days` alias for stored conversations.
+        days = tool_input.get("days_back")
+        if days is None:
+            days = tool_input.get("days")
+        if not isinstance(days, int) or days < 1:
+            return (
+                "Error: missing or invalid 'days_back' parameter. "
+                "query_source requires a positive integer days_back to "
+                "scope the load. Use 1-7 for recent context, 7-30 for "
+                "short history; >30 only when the user explicitly asks "
+                "for older content."
+            )
 
         db_config = get_database_config(database, self.workspace)
         if not db_config:
@@ -8941,6 +9246,7 @@ async def agentic_turn(
     child_act_suites: Optional[List[str]] = None,
     child_act_instructions: Optional[List[str]] = None,
     spawn_child: Optional[Callable] = None,
+    parent_sub_mode: bool = False,
 ) -> AgenticTurnResult:
     """
     Run a self-contained agentic turn with tool use.
@@ -9009,20 +9315,32 @@ async def agentic_turn(
     act_tool_use_ids: List[str] = []  # tool_use ids produced in the current act burst (retained for future diagnostics)
     act_start_iteration: Optional[int] = None  # iteration at which act mode began
     act_start_msg_idx: Optional[int] = None    # index into internal_messages at act entry; done() squashes from here
-    use_think_act = suite_registry is not None  # Feature flag: only use Think/Act if registry provided
+    # Parent / Sub re-arch — skip the legacy Think/Act tool-list rebuild
+    # when parent_sub_mode is on. Tools come in pre-shaped per role
+    # (parent: 4, search child: 6, act child: per-suite); the loop must
+    # not override them.
+    use_think_act = (suite_registry is not None) and not parent_sub_mode
     _retried_for_empty_text = False  # One-shot: nudge model to produce text if end_turn had none
 
     # Child (act subagent) startup: skip Think mode entirely, enter Act mode
     # immediately with the suites + instructions the parent passed in. The
     # done() handler exits via report instead of squashing because there's
     # no parent session to squash into.
-    if is_child_mode:
+    #
+    # In parent_sub_mode children stay role-marked at the executor level
+    # (current_role="search"/"act") and don't enter the legacy act_mode
+    # state machine. Their `tools=` is what the spawn closure passed.
+    if is_child_mode and not parent_sub_mode:
         act_mode = True
         act_suites = list(child_act_suites or [])
         act_instructions = list(child_act_instructions or [])
         act_step_status = ["pending"] * len(act_instructions)
         act_start_iteration = 0
         act_start_msg_idx = 0  # nominal — no squash will happen for children
+    elif is_child_mode and parent_sub_mode:
+        # Track instructions for `mark_step_done` UX; don't flip act_mode.
+        act_instructions = list(child_act_instructions or [])
+        act_step_status = ["pending"] * len(act_instructions)
 
     for iteration in range(max_iterations):
         # Stamp the current iteration on the executor so source-management
@@ -9048,7 +9366,12 @@ async def agentic_turn(
         # Mode-specific volatile additions for the postfix (Think/Act only).
         postfix_extras: List[str] = []
 
-        if use_think_act and not act_mode:
+        if parent_sub_mode:
+            # Parent / Sub re-arch — tools came in pre-shaped per role.
+            # No suite-index append: the prompt template already has its
+            # own brief `{suite_index}` substitution.
+            iteration_tools = tools
+        elif use_think_act and not act_mode:
             # THINK MODE — suite index in system (stable); shelves go to postfix.
             _ws = tool_executor.workspace if tool_executor else ""
             base_prompt += "\n\n" + _build_suite_index(suite_registry, mcp_suites, workspace=_ws)
@@ -9134,6 +9457,10 @@ async def agentic_turn(
         # Recomputed AFTER the trimmer returns so it reflects any LRU-off
         # toggles the trimmer applied to _sources.
         def _build_postfix() -> str:
+            # Parent / Sub re-arch — no shelves, no act-mode markers.
+            # Only the budget marker so the model can pace itself.
+            if parent_sub_mode:
+                return budget_marker
             if not use_think_act:
                 return ""
             parts: List[str] = []
@@ -9195,12 +9522,26 @@ async def agentic_turn(
         # The last tool definition also gets cache_control so the tools
         # array is cached too — second cache breakpoint, covers the whole
         # tools list before it.
+        #
+        # Parent / Sub re-arch — when PROMAIA_PARENT_SUB_MODE is on we
+        # use the 1-hour cache TTL beta. Cache writes cost 2× input
+        # (vs 1.25× default) but reads stay 0.1×; net win for long
+        # bursts where parent waits >5 minutes while a sub-agent runs.
+        # Rolling bp3 is added on the last completed assistant message
+        # so [system+tools+history] is fully cached across iterations.
         from promaia.ai.models import resolve_anthropic_model_id
+        import os as _os_cache
+        _ps_cache_on = _os_cache.environ.get("PROMAIA_PARENT_SUB_MODE", "").lower() in (
+            "1", "true", "yes", "on"
+        )
+        _cache_marker: Dict[str, Any] = {"type": "ephemeral"}
+        if _ps_cache_on:
+            _cache_marker["ttl"] = "1h"
         system_blocks = [
             {
                 "type": "text",
                 "text": trimmed_system,
-                "cache_control": {"type": "ephemeral"},
+                "cache_control": dict(_cache_marker),
             }
         ]
         api_kwargs = dict(
@@ -9215,9 +9556,43 @@ async def agentic_turn(
             # tools array.
             cached_tools = list(iteration_tools)
             last_tool = dict(cached_tools[-1])
-            last_tool["cache_control"] = {"type": "ephemeral"}
+            last_tool["cache_control"] = dict(_cache_marker)
             cached_tools[-1] = last_tool
             api_kwargs["tools"] = cached_tools
+
+        # Rolling bp3 — tag the last block of the most-recent completed
+        # assistant message so [system+tools+history] is cached up to
+        # that point. Only in parent_sub_mode (legacy paths use shelves
+        # postfix and don't benefit from a third stable breakpoint).
+        # cache_control is request-scoped metadata, not part of the
+        # message — so we copy api_messages before mutating to make
+        # sure internal_messages stays clean (when postfix is empty,
+        # _build_api_messages_with_postfix returns its input directly).
+        if _ps_cache_on and api_messages:
+            api_messages = list(api_messages)
+            for _idx in range(len(api_messages) - 1, -1, -1):
+                _msg = api_messages[_idx]
+                if _msg.get("role") != "assistant":
+                    continue
+                _content = _msg.get("content")
+                if not isinstance(_content, list) or not _content:
+                    break
+                last_block = dict(_content[-1])
+                if "cache_control" not in last_block:
+                    last_block["cache_control"] = dict(_cache_marker)
+                _content_copy = list(_content[:-1]) + [last_block]
+                _msg_copy = dict(_msg)
+                _msg_copy["content"] = _content_copy
+                api_messages[_idx] = _msg_copy
+                break
+            api_kwargs["messages"] = api_messages
+
+        # 1-hour TTL beta header. Anthropic's SDK accepts extra_headers
+        # as a kwarg on messages.create.
+        if _ps_cache_on:
+            api_kwargs["extra_headers"] = {
+                "anthropic-beta": "extended-cache-ttl-2025-04-11",
+            }
 
         # Defensive guard: a tool_result in message history with no preceding
         # tool_use is a 400 ("unexpected tool_use_id") from Anthropic. The
@@ -9555,12 +9930,20 @@ async def agentic_turn(
                 # report. The act() call becomes a tool that takes (suites,
                 # instructions) and returns a report string. The parent
                 # never enters Act mode itself.
+                #
+                # Phase 3 — pass parent's history (excluding the in-flight
+                # assistant message that contains this tool_use) so the
+                # child inherits the conversational prefix. Cache impact:
+                # child's first iteration hits the parent's prefix cache.
                 if spawn_child is not None:
+                    parent_history_snapshot = internal_messages[:-1]
                     try:
                         child_result = await spawn_child(
+                            role="act",
                             suites=suite_names,
                             instructions=parsed_instructions,
                             parent_tool_use_id=tool_use.id,
+                            parent_messages=parent_history_snapshot,
                         )
                         # Roll up child token usage into parent totals so
                         # the parent's accounting reflects the full cost.
@@ -9569,11 +9952,21 @@ async def agentic_turn(
                         total_cache_read_tokens += getattr(child_result, "cache_read_tokens", 0) or 0
                         total_cache_creation_tokens += getattr(child_result, "cache_creation_tokens", 0) or 0
                         result_text = child_result.response_text or "(child returned no report)"
-                        # Carry forward the child's notepad — notes are the
-                        # only thing that crosses the parent/child boundary.
-                        child_notepad = getattr(child_result, "notepad_content", None)
-                        if child_notepad is not None and tool_executor is not None:
-                            tool_executor._notepad = child_notepad
+                        # Carry forward the child's notepad — legacy
+                        # subagent mode treats notepad as a bidirectional
+                        # bridge so the act child can stamp facts. In
+                        # parent_sub_mode, notepad is parent-only-write
+                        # (children have no notepad tool); the carry-back
+                        # is a no-op there but we gate it on the env flag
+                        # for clarity. Read the flag once per spawn.
+                        import os as _os_carry
+                        _ps_on = _os_carry.environ.get(
+                            "PROMAIA_PARENT_SUB_MODE", ""
+                        ).lower() in ("1", "true", "yes", "on")
+                        if not _ps_on:
+                            child_notepad = getattr(child_result, "notepad_content", None)
+                            if child_notepad is not None and tool_executor is not None:
+                                tool_executor._notepad = child_notepad
                         logger.info(
                             f"[subagent] child completed: suites={suite_names}, "
                             f"report_chars={len(result_text)}, "
@@ -9620,6 +10013,111 @@ async def agentic_turn(
                             )
                         except Exception:
                             pass
+            elif result_text.startswith("__SEARCH__:"):
+                # Parent / Sub re-arch — search sub-agent spawn. Mirrors
+                # the act path above but always role="search" with no
+                # suites (the search child gets the search role's tool
+                # allowlist via the unified union, not a per-suite load).
+                payload = result_text[len("__SEARCH__:"):]
+                try:
+                    import json as _json_search_parse
+                    parsed_instructions = _json_search_parse.loads(payload)
+                except Exception:
+                    parsed_instructions = []
+
+                if spawn_child is not None:
+                    parent_history_snapshot = internal_messages[:-1]
+                    try:
+                        child_result = await spawn_child(
+                            role="search",
+                            suites=[],
+                            instructions=parsed_instructions,
+                            parent_tool_use_id=tool_use.id,
+                            parent_messages=parent_history_snapshot,
+                        )
+                        total_input_tokens += getattr(child_result, "input_tokens", 0) or 0
+                        total_output_tokens += getattr(child_result, "output_tokens", 0) or 0
+                        total_cache_read_tokens += getattr(child_result, "cache_read_tokens", 0) or 0
+                        total_cache_creation_tokens += getattr(child_result, "cache_creation_tokens", 0) or 0
+                        result_text = child_result.response_text or "(child returned no report)"
+                        logger.info(
+                            f"[subagent] search child completed: "
+                            f"report_chars={len(result_text)}, "
+                            f"iters={getattr(child_result, 'iterations_used', 0)}"
+                        )
+                    except Exception as child_err:
+                        logger.error(
+                            f"[subagent] search child spawn failed: {child_err}",
+                            exc_info=True,
+                        )
+                        result_text = (
+                            f"Search subagent failed: {type(child_err).__name__}: "
+                            f"{str(child_err)[:200]}. Try a smaller scope or "
+                            f"different instructions."
+                        )
+                else:
+                    result_text = (
+                        "Search sub-agent is not available in this mode. "
+                        "Set PROMAIA_PARENT_SUB_MODE=1 to enable parent/sub "
+                        "delegation."
+                    )
+            elif result_text.startswith("__COMPRESS__:"):
+                # Parent / Sub re-arch — replace the most recent eligible
+                # tool_result body with the agent's prose summary. One-shot
+                # rule: the executor's `_pending_compressible` tracks the
+                # eligible result; it's set at the end of each iteration
+                # and cleared on consume. Calling compress without a
+                # pending eligible result returns an error to the model.
+                payload_str = result_text[len("__COMPRESS__:"):]
+                try:
+                    import json as _json_compress_parse
+                    cpayload = _json_compress_parse.loads(payload_str)
+                    compress_summary = cpayload.get("summary", "") or ""
+                except Exception:
+                    compress_summary = ""
+
+                pending = getattr(tool_executor, "_pending_compressible", None) if tool_executor else None
+                if pending is None:
+                    result_text = (
+                        "ERROR: no compressible tool result available. "
+                        "compress_last_result must be called on the iteration "
+                        "immediately following a tool result, before any "
+                        "other tool use."
+                    )
+                else:
+                    msg_idx, block_idx = pending
+                    try:
+                        msg = internal_messages[msg_idx]
+                        content = msg.get("content")
+                        if isinstance(content, list) and 0 <= block_idx < len(content):
+                            block = content[block_idx]
+                            if isinstance(block, dict) and block.get("type") == "tool_result":
+                                block["content"] = (
+                                    f"[compressed by agent] {compress_summary}"
+                                )
+                                tool_executor._pending_compressible = None
+                                result_text = (
+                                    "Compressed previous tool result. "
+                                    f"Replaced with: {compress_summary[:120]}"
+                                    f"{'…' if len(compress_summary) > 120 else ''}"
+                                )
+                                logger.info(
+                                    f"[compress] msg={msg_idx} block={block_idx} "
+                                    f"summary_chars={len(compress_summary)}"
+                                )
+                            else:
+                                result_text = (
+                                    "ERROR: pending tool result is not a tool_result block."
+                                )
+                        else:
+                            result_text = (
+                                "ERROR: pending tool result reference is out of range."
+                            )
+                    except Exception as compress_err:
+                        result_text = (
+                            f"ERROR: compress failed: {type(compress_err).__name__}: "
+                            f"{str(compress_err)[:100]}"
+                        )
             elif result_text.startswith("__MARK_STEP__:"):
                 step_num = int(result_text.split(":")[1])
                 if 0 < step_num <= len(act_step_status):
@@ -9970,6 +10468,35 @@ async def agentic_turn(
         # here would corrupt the pairing.
         if not squashed_this_iter and tool_results:
             internal_messages.append({"role": "user", "content": tool_results})
+            # Parent / Sub re-arch — re-stamp _pending_compressible for the
+            # next iteration's potential `compress_last_result` call. Point
+            # at the LAST tool_result whose tool was NOT itself a
+            # compress_last_result; if the iteration's last tool was
+            # compress, leave pending as-is (already None, since compress
+            # consumed it). Permissive: don't gate on flag here — the
+            # tool itself only exists in the unified tool list, which the
+            # model only receives when the flag is on.
+            if tool_executor is not None:
+                # tool_uses preserves tool order; tool_results aligns with it
+                # for non-error cases. Walk backwards.
+                last_eligible_block_idx: Optional[int] = None
+                for back_idx in range(len(tool_results) - 1, -1, -1):
+                    # Find the tool_use whose id matches this result block.
+                    block = tool_results[back_idx]
+                    block_use_id = block.get("tool_use_id") if isinstance(block, dict) else None
+                    src_name: Optional[str] = None
+                    for _tu in tool_uses:
+                        if _tu.id == block_use_id:
+                            src_name = _tu.name
+                            break
+                    if src_name and src_name != "compress_last_result":
+                        last_eligible_block_idx = back_idx
+                        break
+                if last_eligible_block_idx is not None:
+                    tool_executor._pending_compressible = (
+                        len(internal_messages) - 1,
+                        last_eligible_block_idx,
+                    )
 
     # Exhausted iteration budget — return whatever text we have
     last_text = "\n".join(text_parts) if text_parts else ""

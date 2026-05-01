@@ -511,31 +511,35 @@ class TagToChatLoop:
                 plan_active_step = 0
                 return
 
-            # Parent's `act` call in subagent mode: the dispatch and the
-            # completion are separated by however long the child runs (can
-            # be tens of seconds). If we waited for completion to render
-            # the act line, the child's ↳ steps would visually appear
-            # BEFORE their parent. Instead, insert a placeholder on
-            # dispatch so the act line is in place when child steps land,
-            # then replace it on completion.
+            # Parent's `act` / `search` call in subagent mode: the dispatch
+            # and the completion are separated by however long the child
+            # runs (tens of seconds). If we waited for completion to render
+            # the spawn line, the child's ↳ steps would visually appear
+            # BEFORE their parent. Insert a placeholder on dispatch so the
+            # spawn line is in place when child steps land; replace it on
+            # completion.
             import os as _os_act
             _subagent_on = _os_act.environ.get("PROMAIA_SUBAGENT_MODE", "").lower() in (
                 "1", "true", "yes", "on"
             )
-            if tool_name == "act" and not is_child and _subagent_on:
+            _parent_sub_on = _os_act.environ.get("PROMAIA_PARENT_SUB_MODE", "").lower() in (
+                "1", "true", "yes", "on"
+            )
+            _is_spawn_tool = (
+                (tool_name == "act" and (_subagent_on or _parent_sub_on))
+                or (tool_name == "search" and _parent_sub_on)
+            )
+            if _is_spawn_tool and not is_child:
                 from promaia.agents.run_goal import _summarize_tool_input
                 params = _summarize_tool_input(tool_name, tool_input or current_tool_input)
-                call_label = f"`act` ({params})" if params else "`act`"
+                call_label = f"`{tool_name}` ({params})" if params else f"`{tool_name}`"
                 if not completed:
-                    # Dispatch — drop a header in-place. Don't set
-                    # current_tool: the placeholder already shows it.
                     tool_steps.append(
                         f"{call_label}\n     ⎿  ⏳ subagent running…"
                     )
                     pending_act_idx = len(tool_steps) - 1
                     return
                 else:
-                    # Completion — swap the placeholder for the final summary.
                     if summary:
                         result = summary[:120] + "..." if len(summary) > 120 else summary
                         line = f"{call_label}\n     ⎿  {result}"
