@@ -592,9 +592,29 @@ def build_agentic_system_prompt(
             suite_index_text = "(suite index unavailable)"
         filled = filled.replace("{suite_index}", suite_index_text)
 
-    # Workflow/interview descriptions, MCP tool descriptions, and saved workflows
-    # are NOT injected into the prompt. They appear in the suite index (Think mode)
-    # and as loaded tool schemas (Act mode).
+    # parent_sub.md also has {workflows_index} — saved-workflow names with
+    # truncated descriptions, so the parent knows what user-defined
+    # workflows exist and can call get_workflow_details(name="…") to load
+    # the steps. Without this the parent would conflate workflows with
+    # memory and hunt the memory store for them.
+    if "{workflows_index}" in filled:
+        try:
+            from promaia.tools.workflow_store import list_workflows_for_prompt
+            wf_summaries = list_workflows_for_prompt(workspace) if workspace else []
+            if wf_summaries:
+                _wf_lines = []
+                for wf in wf_summaries:
+                    desc = wf.get("description", "") or ""
+                    if len(desc) > 100:
+                        desc = desc[:97] + "..."
+                    _wf_lines.append(f"- **{wf['name']}** — {desc}")
+                workflows_index_text = "\n".join(_wf_lines)
+            else:
+                workflows_index_text = "(no saved workflows)"
+        except Exception as _wf_err:
+            logger.debug(f"workflows index build failed: {_wf_err}")
+            workflows_index_text = "(workflows index unavailable)"
+        filled = filled.replace("{workflows_index}", workflows_index_text)
 
     return base_prompt + "\n\n" + filled
 

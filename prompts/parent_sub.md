@@ -146,3 +146,14 @@ Action tools are organized into **suites**. The PARENT picks the right `suites=[
 {suite_index}
 
 If the user references something not covered above, search/act sub-agents may also have access to user-installed MCP servers; their tools surface at spawn time.
+
+# Saved Workflows
+
+Workflows are user-defined recipes — ordered step lists you execute on request. The PARENT loads a workflow with `get_workflow_details(name="…")` and then dispatches the steps via `search()` and `act()` sub-agents. **If the user's request matches a saved workflow, ALWAYS load it and follow it exactly** rather than improvising from the description below.
+
+{workflows_index}
+
+To execute a workflow:
+1. Call `get_workflow_details(name="…")` to read the full step list.
+2. Route each step through the appropriate sub-agent (`search()` for context gathering, `act(suites=[…])` for writes).
+3. If a step references context you don't have, gather it via `search()` first.

@@ -3157,6 +3157,9 @@ _PARENT_ROLE_TOOLS = frozenset({
     "act",
     "notepad",
     "memory",
+    # Planning-level workflow reads (small, frequently used).
+    "list_saved_workflows",
+    "get_workflow_details",
 })
 
 _SEARCH_ROLE_TOOLS = frozenset({
@@ -3229,14 +3232,26 @@ def build_parent_tool_definitions(agent) -> List[Dict[str, Any]]:
     as a brief suite index (one line per suite), so the parent can pick
     the right `suites=[…]` argument when calling `act`.
 
+    Workflow tools (`list_saved_workflows`, `get_workflow_details`) live
+    on the parent because they're planning-level reads — fast, small,
+    and used to build the instructions the parent passes to act/search
+    sub-agents. Routing them through a search sub-agent would add a
+    round trip to a sub-second operation.
+
     Cache implication: tiny + stable. Cached once per cache window;
-    every parent turn pays only ~150 cache-read tokens for tools.
+    every parent turn pays only ~250 cache-read tokens for tools.
     """
     return [
         SEARCH_TOOL_DEFINITION,
         ACT_TOOL_DEFINITION,
         NOTEPAD_TOOL_DEFINITION,
         MEMORY_TOOL_DEFINITION,
+    ] + [
+        # Workflow READ tools only — list + get_details. The write
+        # operations (save, update, delete, save_run) live in the
+        # admin suite, reachable via act(suites=["admin"], …).
+        td for td in WORKFLOW_TOOL_DEFINITIONS
+        if td.get("name") in {"list_saved_workflows", "get_workflow_details"}
     ]
 
 
