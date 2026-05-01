@@ -3481,6 +3481,41 @@ def _get_suite_tools(suite_name: str, suite_registry: Dict, mcp_suites: Dict = N
 
 # ── Tool executor ────────────────────────────────────────────────────────
 
+_PARENT_SUB_INLINE_TOOL_RESULT_CAP_CHARS = 20_000
+
+
+def _cap_inline_tool_result(body: str, fallback_hint: str = "") -> str:
+    """Cap large tool_result bodies in parent_sub_mode so a single call
+    can't blow the search child's context budget.
+
+    Without this, a query for 300 pages returned ~150k tokens inline.
+    Four such queries in one assistant turn (the model emits parallel
+    tool_use blocks) overflowed the 145k available context, the trimmer
+    dropped the whole assistant/tool_result pair to recover, and the
+    model re-ran the queries on the next turn — infinite loop.
+
+    Cap at 20k chars (~5k tokens) per call. With 4 parallel tool calls
+    that's ~80k chars / 20k tokens — fits comfortably. The note tells
+    the model how to recover (narrower window, compress_last_result, or
+    a more specific query).
+    """
+    if len(body) <= _PARENT_SUB_INLINE_TOOL_RESULT_CAP_CHARS:
+        return body
+    truncated_at = _PARENT_SUB_INLINE_TOOL_RESULT_CAP_CHARS
+    note_lines = [
+        "",
+        f"--- TRUNCATED at {truncated_at:,} chars (full body was "
+        f"{len(body):,} chars) ---",
+        "Options to get the missing data:",
+        "  • Narrow the query (smaller days_back, more specific keywords).",
+        "  • Call `compress_last_result` to summarize what you have, "
+        "then run the next query.",
+    ]
+    if fallback_hint:
+        note_lines.append(f"  • {fallback_hint}")
+    return body[:truncated_at] + "\n".join(note_lines)
+
+
 class ToolExecutor:
     """Routes tool calls to Promaia backends."""
 
@@ -3892,7 +3927,7 @@ class ToolExecutor:
                 inline_parts.append(f"SQL: {metadata['generated_query']}")
             inline_parts.append("")
             inline_parts.append(formatted)
-            return "\n".join(inline_parts)
+            return _cap_inline_tool_result("\n".join(inline_parts))
 
         # Legacy: store as context source so results persist across turns
         source_name = f"sql_{query[:30].strip().replace(' ', '_').lower()}"
@@ -3982,7 +4017,9 @@ class ToolExecutor:
         # Parent / Sub re-arch: return inline for search children. See
         # _query_sql for rationale.
         if self._role_unified_tools is not None:
-            return f"Found {total_pages} semantically similar results.\n\n{formatted}"
+            return _cap_inline_tool_result(
+                f"Found {total_pages} semantically similar results.\n\n{formatted}"
+            )
 
         # Legacy: store as context source so results persist across turns
         source_name = f"search_{query[:30].strip().replace(' ', '_').lower()}"
@@ -4045,9 +4082,13 @@ class ToolExecutor:
         # Parent / Sub re-arch: return inline for search children. See
         # _query_sql for rationale.
         if self._role_unified_tools is not None:
-            return (
+            return _cap_inline_tool_result(
                 f"Loaded {len(pages)} pages from '{database}' ({time_range}).\n\n"
-                f"{formatted}"
+                f"{formatted}",
+                fallback_hint=(
+                    f"This is the entire {database} database for this window — "
+                    f"narrow days_back if the cap is hit."
+                ),
             )
 
         # Legacy: store as context source instead of returning full content
@@ -6454,7 +6495,7 @@ class ToolExecutor:
         # shelved into _sources, which the postfix doesn't render in
         # parent_sub_mode — so the data was effectively invisible.
         if self._role_unified_tools is not None:
-            return (
+            return _cap_inline_tool_result(
                 f"Fetched {url} → {len(text):,} chars{truncation_note}.\n\n"
                 f"{header}{text}"
             )
