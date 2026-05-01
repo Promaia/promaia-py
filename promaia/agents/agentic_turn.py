@@ -3881,7 +3881,20 @@ class ToolExecutor:
         total_pages = sum(len(pages) for pages in loaded_content.values() if pages)
         formatted = format_context_data(loaded_content)
 
-        # Store as context source so results persist across turns
+        # Parent / Sub re-arch: search children get raw data inline as
+        # the tool_result so it lives in the message history (which is
+        # cacheable). Auto-shelving rendered into the legacy postfix /
+        # system-prompt path which broke cache every iteration. Children
+        # use `compress_last_result` if a result is too big to keep.
+        if self._role_unified_tools is not None:
+            inline_parts = [f"Found {total_pages} results."]
+            if metadata and metadata.get('generated_query'):
+                inline_parts.append(f"SQL: {metadata['generated_query']}")
+            inline_parts.append("")
+            inline_parts.append(formatted)
+            return "\n".join(inline_parts)
+
+        # Legacy: store as context source so results persist across turns
         source_name = f"sql_{query[:30].strip().replace(' ', '_').lower()}"
         self._sources[source_name] = {
             "content": formatted,
@@ -3966,7 +3979,12 @@ class ToolExecutor:
         total_pages = sum(len(pages) for pages in loaded_content.values() if pages)
         formatted = format_context_data(loaded_content)
 
-        # Store as context source so results persist across turns
+        # Parent / Sub re-arch: return inline for search children. See
+        # _query_sql for rationale.
+        if self._role_unified_tools is not None:
+            return f"Found {total_pages} semantically similar results.\n\n{formatted}"
+
+        # Legacy: store as context source so results persist across turns
         source_name = f"search_{query[:30].strip().replace(' ', '_').lower()}"
         self._sources[source_name] = {
             "content": formatted,
@@ -4024,7 +4042,15 @@ class ToolExecutor:
         time_range = f"last {days} days" if days else "all time"
         formatted = format_context_data({database: pages})
 
-        # Store as context source instead of returning full content
+        # Parent / Sub re-arch: return inline for search children. See
+        # _query_sql for rationale.
+        if self._role_unified_tools is not None:
+            return (
+                f"Loaded {len(pages)} pages from '{database}' ({time_range}).\n\n"
+                f"{formatted}"
+            )
+
+        # Legacy: store as context source instead of returning full content
         source_name = database.split(".")[-1] if "." in database else database
         self._sources[source_name] = {
             "content": formatted,
@@ -9458,7 +9484,11 @@ async def agentic_turn(
         #   budget marker get injected via the postfix on the last message.
         # - Legacy: base + active source content + budget marker (old shape).
         def _compose_prompt() -> str:
-            if use_think_act:
+            # parent_sub_mode keeps the system stable across iterations.
+            # Budget marker and any volatile content go into the postfix
+            # on the last message (see _build_postfix). Without this,
+            # the budget marker changes every iteration and breaks cache.
+            if use_think_act or parent_sub_mode:
                 return base_prompt
             active = ""
             if tool_executor and hasattr(tool_executor, "build_active_source_content"):
@@ -9497,7 +9527,7 @@ async def agentic_turn(
         # In Think/Act paths the system has no shelf content, so a rebuild
         # callback would be a no-op — pass None. Legacy mode still needs it
         # because shelves remain in the system there.
-        rebuild_cb = None if use_think_act else _compose_prompt
+        rebuild_cb = None if (use_think_act or parent_sub_mode) else _compose_prompt
         trimmed_system, internal_messages = await trim_context_to_fit(
             effective_prompt,
             internal_messages,
