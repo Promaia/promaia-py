@@ -110,7 +110,8 @@ def _summarize_tool_input(tool_name: str, tool_input: dict) -> str:
         return tool_input.get("query", "")[:80]
     elif tool_name == "query_source":
         db = tool_input.get("database", "")
-        days = tool_input.get("days", "")
+        # days_back is the canonical field; fall back to legacy days alias.
+        days = tool_input.get("days_back") or tool_input.get("days", "")
         return f"{db}" + (f" ({days}d)" if days else "")
     elif tool_name == "send_email":
         to = tool_input.get("to", "")

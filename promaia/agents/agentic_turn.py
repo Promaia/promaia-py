@@ -3573,12 +3573,14 @@ class ToolExecutor:
         # for the "act" role can be computed without re-importing the tool
         # registry. None when not in parent-sub mode.
         self._role_unified_tools: Optional[List[Dict[str, Any]]] = None
-        # Phase 2 — index of the most-recent tool_result block that is
-        # still eligible for `compress_last_result`. Set by the agentic
-        # loop after a tool_result is appended; cleared after the next
-        # assistant turn unless that turn invoked compress_last_result.
-        # Format: (message_index, content_block_index) or None.
-        self._pending_compressible: Optional[tuple] = None
+        # Phase 2 — stack of tool_result block locations from the
+        # previous assistant turn that are still eligible for
+        # `compress_last_result`. Each entry is (message_index, content
+        # _block_index). The agent can call compress_last_result N times
+        # in a single turn to compress N parallel tool_results from the
+        # prior turn — needed because the model often emits 4 parallel
+        # query tool_use blocks at once. Each compress pops one entry.
+        self._pending_compressible_stack: List[tuple] = []
 
     def _role_check_or_error(self, tool_name: str) -> Optional[str]:
         """If `tool_name` is not in `self.current_role`'s allowlist, return
@@ -10161,12 +10163,14 @@ async def agentic_turn(
                         "delegation."
                     )
             elif result_text.startswith("__COMPRESS__:"):
-                # Parent / Sub re-arch — replace the most recent eligible
-                # tool_result body with the agent's prose summary. One-shot
-                # rule: the executor's `_pending_compressible` tracks the
-                # eligible result; it's set at the end of each iteration
-                # and cleared on consume. Calling compress without a
-                # pending eligible result returns an error to the model.
+                # Parent / Sub re-arch — replace one of the previous turn's
+                # eligible tool_results with the agent's prose summary. The
+                # executor maintains a STACK of pending compressible
+                # results (multiple parallel tool_uses from the prior
+                # turn); each compress_last_result pops one entry off the
+                # top (most recent first). The agent can emit N parallel
+                # compress_last_result tool_use blocks to compress N
+                # parallel results from the prior turn.
                 payload_str = result_text[len("__COMPRESS__:"):]
                 try:
                     import json as _json_compress_parse
@@ -10175,16 +10179,16 @@ async def agentic_turn(
                 except Exception:
                     compress_summary = ""
 
-                pending = getattr(tool_executor, "_pending_compressible", None) if tool_executor else None
-                if pending is None:
+                stack = getattr(tool_executor, "_pending_compressible_stack", None) if tool_executor else None
+                if not stack:
                     result_text = (
                         "ERROR: no compressible tool result available. "
                         "compress_last_result must be called on the iteration "
                         "immediately following a tool result, before any "
-                        "other tool use."
+                        "other non-compress tool use."
                     )
                 else:
-                    msg_idx, block_idx = pending
+                    msg_idx, block_idx = stack.pop()
                     try:
                         msg = internal_messages[msg_idx]
                         content = msg.get("content")
@@ -10194,7 +10198,6 @@ async def agentic_turn(
                                 block["content"] = (
                                     f"[compressed by agent] {compress_summary}"
                                 )
-                                tool_executor._pending_compressible = None
                                 result_text = (
                                     "Compressed previous tool result. "
                                     f"Replaced with: {compress_summary[:120]}"
@@ -10202,7 +10205,8 @@ async def agentic_turn(
                                 )
                                 logger.info(
                                     f"[compress] msg={msg_idx} block={block_idx} "
-                                    f"summary_chars={len(compress_summary)}"
+                                    f"summary_chars={len(compress_summary)} "
+                                    f"remaining_in_stack={len(stack)}"
                                 )
                             else:
                                 result_text = (
@@ -10567,21 +10571,15 @@ async def agentic_turn(
         # here would corrupt the pairing.
         if not squashed_this_iter and tool_results:
             internal_messages.append({"role": "user", "content": tool_results})
-            # Parent / Sub re-arch — re-stamp _pending_compressible for the
-            # next iteration's potential `compress_last_result` call. Point
-            # at the LAST tool_result whose tool was NOT itself a
-            # compress_last_result; if the iteration's last tool was
-            # compress, leave pending as-is (already None, since compress
-            # consumed it). Permissive: don't gate on flag here — the
-            # tool itself only exists in the unified tool list, which the
-            # model only receives when the flag is on.
+            # Parent / Sub re-arch — rebuild the compressible stack for
+            # the next iteration. Collect ALL non-compress tool_results
+            # from this turn so the agent can compress each one with a
+            # separate compress_last_result call (typically emitted as
+            # parallel tool_uses on the next assistant turn).
             if tool_executor is not None:
-                # tool_uses preserves tool order; tool_results aligns with it
-                # for non-error cases. Walk backwards.
-                last_eligible_block_idx: Optional[int] = None
-                for back_idx in range(len(tool_results) - 1, -1, -1):
-                    # Find the tool_use whose id matches this result block.
-                    block = tool_results[back_idx]
+                msg_idx_for_stack = len(internal_messages) - 1
+                eligible: List[tuple] = []
+                for blk_idx, block in enumerate(tool_results):
                     block_use_id = block.get("tool_use_id") if isinstance(block, dict) else None
                     src_name: Optional[str] = None
                     for _tu in tool_uses:
@@ -10589,13 +10587,11 @@ async def agentic_turn(
                             src_name = _tu.name
                             break
                     if src_name and src_name != "compress_last_result":
-                        last_eligible_block_idx = back_idx
-                        break
-                if last_eligible_block_idx is not None:
-                    tool_executor._pending_compressible = (
-                        len(internal_messages) - 1,
-                        last_eligible_block_idx,
-                    )
+                        eligible.append((msg_idx_for_stack, blk_idx))
+                # Replace stack with this iteration's eligible results.
+                # Compress calls during the next iteration pop entries off
+                # this list (most recent first).
+                tool_executor._pending_compressible_stack = eligible
 
     # Exhausted iteration budget — return whatever text we have
     last_text = "\n".join(text_parts) if text_parts else ""
@@ -10757,9 +10753,10 @@ def _summarize_tool_result(
 
     elif tool_name == "query_source":
         db = tool_input.get("database", "?")
-        days = tool_input.get("days", "all")
+        # days_back is the canonical field; fall back to legacy days alias.
+        days = tool_input.get("days_back") or tool_input.get("days") or "?"
         phrase = _extract_count_phrase(result)
-        return _vs(f"Load {db}:{days}", phrase or "ok")
+        return _vs(f"Load {db} ({days}d)", phrase or "ok")
 
     elif tool_name == "write_agent_journal":
         return _vs("Agent journal", "noted")

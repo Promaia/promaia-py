@@ -570,7 +570,22 @@ class TagToChatLoop:
                 gutter = "        ⎿  " if is_child else "     ⎿  "
                 if summary:
                     result = summary[:120] + "..." if len(summary) > 120 else summary
-                    tool_steps.append(f"{call_str}\n{gutter}{result}")
+                    # Collapse trivial result lines (just the tool name +
+                    # optional ✓) onto the call line so the breadcrumb
+                    # doesn't waste vertical space on redundant info.
+                    import re as _re_trivial
+                    _trivial = bool(_re_trivial.match(
+                        rf"^\s*{_re_trivial.escape(tool_name)}\s*[✓✗]?\s*$",
+                        result,
+                    ))
+                    if _trivial:
+                        # Use the actual mark from the result if present.
+                        mark = "✓"
+                        if "✗" in result:
+                            mark = "✗"
+                        tool_steps.append(f"{call_str} {mark}")
+                    else:
+                        tool_steps.append(f"{call_str}\n{gutter}{result}")
                 else:
                     tool_steps.append(call_str)
                 current_tool = None

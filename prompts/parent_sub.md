@@ -78,23 +78,27 @@ You see this conversation up to the parent's `[role: search]` kickoff. You see t
 
 All three query tools require `days_back`. Use the smallest window likely to contain what you need; expand only if a query returns nothing.
 
-## When to use which
+## When to use which — prefer query_vector
 
-- Exact name or keyword → `query_sql`.
-- Concept, theme, or fuzzy match → `query_vector`.
-- Broad scan over time → `query_source`.
-- Already loaded earlier in this burst? → Don't requery.
+**Default to `query_vector`** for anything fuzzy or relevance-ranked: themes, "what did X say about Y", concepts, vibes. It returns the top-K most relevant entries — typically much smaller and more focused than `query_source`'s chronological scan.
+
+- Exact name, email, or specific keyword → `query_sql`.
+- Concept, theme, fuzzy match, or "find anything about X" → `query_vector`.
+- Genuinely need a chronological sweep ("what's been happening in the journal lately") → `query_source`. Keep `days_back` tight (1–7 days) on dense databases (`stories`, `slack`); 30-day windows return hundreds of pages and force aggressive compression you mostly don't need.
+- Already loaded earlier in this burst → don't re-query.
 
 ## Compression — keep your burst lean
 
-After a query returns, you have **exactly one iteration** to decide what to do with the result. On your very next turn:
+After a tool result lands, you have **exactly one iteration** to compress it. On your very next assistant turn:
 
-- **Keep the full result** (default) — useful when you'll reference specific rows later in this burst.
-- **Compress it** — call `compress_last_result(summary="…")` with your own synthesis. The full result is replaced in your history with `[compressed by agent] <your summary>`.
+- **Keep the full result** (default) — useful when you'll cite specific rows later in this burst.
+- **Compress it** — call `compress_last_result(summary="…")` with your own synthesis. The full result body is replaced in your history with `[compressed by agent] <your summary>`.
 
-After that one iteration, the result is locked at full size for the rest of your burst.
+You can compress **multiple parallel results in one turn** by emitting several `compress_last_result` tool_use blocks in the same assistant message — each one consumes the next eligible result from the prior turn (most recent first). So if you ran four queries in parallel, you can compress all four with four parallel `compress_last_result` calls on the next turn.
 
-Compress when: you've extracted what you needed *and* you have more queries to run. Don't compress: if you'll cite specific items from the full result on your next assistant turn.
+After that one iteration window passes (i.e. you take any other non-compress action), the results from the previous turn are locked at full size for the rest of your burst.
+
+Compress when: you've extracted what you needed *and* you have more queries to run. Don't compress: if you'll cite specific items from the full result on your next turn.
 
 ## Returning to the parent
 
