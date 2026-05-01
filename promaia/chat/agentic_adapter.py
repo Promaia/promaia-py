@@ -582,10 +582,24 @@ def build_agentic_system_prompt(
             _suite_registry_for_index = _build_tool_suite_registry(
                 _IndexShim(), has_platform=has_platform
             )
-            _index_lines = [
-                f"- **{name}** ({info['count']} tools) — {info['description']}"
-                for name, info in _suite_registry_for_index.items()
-            ]
+            # Include actual tool names per suite so the parent picks the
+            # right suites=[…] argument and writes correct tool names in
+            # its instructions. Without these names the model hallucinates
+            # (e.g. wrote `send_slack_message` for the messaging suite,
+            # whose actual write tool is `start_conversation`).
+            _index_lines = []
+            for _name, _info in _suite_registry_for_index.items():
+                _tool_names = [t.get("name") for t in _info.get("tools") or [] if t.get("name")]
+                if _tool_names:
+                    _names_str = ", ".join(_tool_names)
+                    _index_lines.append(
+                        f"- **{_name}** ({_info['count']} tools) — {_info['description']}\n"
+                        f"  tools: {_names_str}"
+                    )
+                else:
+                    _index_lines.append(
+                        f"- **{_name}** ({_info['count']} tools) — {_info['description']}"
+                    )
             suite_index_text = "\n".join(_index_lines) if _index_lines else "(no suites configured)"
         except Exception as _idx_err:
             logger.debug(f"suite index build failed: {_idx_err}")
