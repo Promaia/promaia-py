@@ -13,7 +13,7 @@ import random
 import signal
 import time
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from pathlib import Path
 
 from promaia.agents import (
@@ -419,6 +419,8 @@ async def handle_agent_add(args):
         if builtin not in available_tools:
             available_tools.append(builtin)
 
+    mcp_tool_allowlist: Optional[Dict[str, Optional[List[str]]]] = None
+
     if available_tools:
         console.print(f"   Available: {', '.join(available_tools)}", style="dim")
         configure_mcp = input("\nConfigure MCP tools? (y/N): ").strip().lower()
@@ -426,6 +428,31 @@ async def handle_agent_add(args):
             mcp_tools = await select_mcp_tools(available_tools)
             if mcp_tools:
                 console.print(f"✓ MCP Tools: {', '.join(mcp_tools)}", style="dim")
+                # Q9 — non-default agents start with deny-by-default for
+                # any actual MCP server they selected. Built-in integrations
+                # (gmail, calendar) are gated elsewhere and skip this picker.
+                from promaia.cli.agent_creation_selector import (
+                    select_mcp_tool_allowlist, McpServerUnreachableError,
+                )
+                try:
+                    mcp_tool_allowlist = await select_mcp_tool_allowlist(mcp_tools)
+                except McpServerUnreachableError as e:
+                    # Q5b — refuse to save.
+                    console.print(f"[red]Refusing to save:[/red]\n{e}")
+                    console.print(
+                        "[red]Aborting agent creation.[/red]"
+                    )
+                    return
+                if mcp_tool_allowlist is None:
+                    # All built-ins or no MCP servers — no allowlist needed.
+                    pass
+                else:
+                    n_tools = sum(len(v or []) for v in mcp_tool_allowlist.values())
+                    console.print(
+                        f"✓ Allow list: {n_tools} tool(s) across "
+                        f"{len(mcp_tool_allowlist)} MCP server(s)",
+                        style="dim",
+                    )
             else:
                 console.print("✓ No MCP tools selected", style="dim")
         else:
@@ -492,6 +519,7 @@ async def handle_agent_add(args):
         schedule=None,  # No schedule grid - use calendar events or interval
         interval_minutes=interval_minutes,  # Optional interval
         mcp_tools=mcp_tools,
+        mcp_tool_allowlist=mcp_tool_allowlist,  # Q9: deny-by-default for new agents
         max_iterations=40,
         journal_memory_days=journal_memory_days,
         messaging_enabled=messaging_enabled,
@@ -1886,7 +1914,7 @@ async def handle_agent_edit(args):
     console.print("  1. Name")
     console.print("  2. Databases")
     console.print("  3. Schedule")
-    console.print("  4. MCP Tools")
+    console.print("  4. External tools and MCP")
     console.print("  5. Max Iterations")
     console.print("  6. Description")
     console.print("  7. All fields (full edit)")
@@ -1973,9 +2001,9 @@ async def handle_agent_edit(args):
             console.print(f"✓ Updated schedule: [cyan]{schedule_to_string(new_schedule)}[/cyan]", style="dim")
 
     if choice in ["4", "7"]:
-        console.print("\nSelect MCP tools...")
-        # Load available MCP servers from mcp_servers.json + built-in integrations
-        available_tools = []
+        console.print("\n🛠 External tools and MCP", style="bold cyan")
+        # Discover available MCP servers from mcp_servers.json
+        mcp_server_names: List[str] = []
         try:
             import json
             from promaia.agents.mcp_loader import _find_mcp_servers_json
@@ -1984,23 +2012,30 @@ async def handle_agent_edit(args):
                 with open(mcp_config_file, "r") as f:
                     mcp_config = json.load(f)
                     servers = mcp_config.get("servers", {})
-                    available_tools = [
+                    mcp_server_names = [
                         name for name, config in servers.items()
                         if config.get("enabled", True)
                     ]
         except Exception as e:
             logger.warning(f"Could not load MCP servers: {e}")
 
-        # Add built-in integrations that have tool support
-        for builtin in ("gmail", "calendar"):
-            if builtin not in available_tools:
-                available_tools.append(builtin)
+        try:
+            from promaia.cli.external_tools_picker import select_external_tools
+            from promaia.cli.external_tools_picker_router import apply_picker_result
 
-        selected_tools = await select_mcp_tools(available_tools, preselected=agent.mcp_tools)
-        if selected_tools is not None:  # Allow empty list
-            agent.mcp_tools = selected_tools
-            tools_display = ', '.join(selected_tools) if selected_tools else "None"
-            console.print(f"✓ Updated MCP tools: [cyan]{tools_display}[/cyan]", style="dim")
+            result = await select_external_tools(
+                agent=agent,
+                workspace=agent.workspace,
+                mcp_server_names=mcp_server_names,
+            )
+            if result is not None:
+                changes = apply_picker_result(agent, result)
+                for c in changes:
+                    console.print(f"  ✓ {c}", style="dim")
+            else:
+                console.print("  ❌ Cancelled external tools edit", style="red")
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n❌ Cancelled external tools edit", style="red")
 
     if choice in ["5", "7"]:
         console.print(f"\nCurrent max iterations: [cyan]{agent.max_iterations}[/cyan]")

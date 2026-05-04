@@ -40,6 +40,18 @@ class SourceAccess:
     permissions: List[SourcePermission]  # What agent can do
     max_query_days: Optional[int] = None  # Max days for query_source (safety limit)
 
+    # Per-table scoping for SQL/structured sources. None = all tables in this
+    # source are accessible. When set, query tools will reject queries
+    # touching tables not in this list and the database loader will skip
+    # those tables when materialising rows for the agent.
+    allowed_tables: Optional[List[str]] = None
+
+    # Per-column scoping. Map of table_name -> list of allowed column names.
+    # None or missing key = all columns. Use this to redact sensitive fields
+    # like email body / private notes / admin-only flags from an otherwise
+    # accessible table.
+    allowed_columns: Optional[Dict[str, List[str]]] = None
+
 
 @dataclass
 class AgentConfig:
@@ -100,6 +112,39 @@ class AgentConfig:
     # Channel-level permissions: restrict which Slack/Discord channels this agent
     # can respond in and query messages from.  None = all channels (backwards compat).
     allowed_channel_ids: Optional[List[str]] = None
+
+    # OUTPUT-side channel gate: restrict which channels the agent can POST to.
+    # None = inherit from allowed_channel_ids (the input gate). When the agent
+    # is called from a channel it has read access to but is not allowed to post
+    # back to, messaging tools refuse the publish step.
+    allowed_output_channel_ids: Optional[List[str]] = None
+
+    # Group-typed channel allowlists. Lets an agent express "any DM" vs
+    # "a specific public channel" without listing every DM ID. Keys are
+    # channel-type buckets ("dm" or "channel"), values are lists of
+    # channel IDs OR ["*"] for "any channel of this type".
+    #
+    # Resolution order in can_access_channel():
+    #   1. allowed_channel_ids (legacy flat list) — checked first if set,
+    #      so existing agents keep working unchanged.
+    #   2. allowed_channel_groups — checked if flat list is None.
+    #   3. Both None → allow (legacy default).
+    #
+    # The same applies on the output side via allowed_output_channel_groups.
+    allowed_channel_groups: Optional[Dict[str, List[str]]] = None
+    allowed_output_channel_groups: Optional[Dict[str, List[str]]] = None
+
+    # Per-tool MCP allow list. Keys are MCP server names (must also appear in
+    # `mcp_tools`); values are the specific tool names the agent may call on
+    # that server. None for a server entry = all tools allowed (backwards
+    # compat for agents that haven't been migrated yet). Empty list = the
+    # agent gets the server's resources but cannot call any tools (rarely
+    # useful — usually you'd just remove the server).
+    #
+    # NOTE: this field is enforced as a deny-by-default gate for ALL agents
+    # except the one with `is_default_agent=True` (currently maia), which
+    # keeps legacy allow-all behavior.
+    mcp_tool_allowlist: Optional[Dict[str, Optional[List[str]]]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -184,15 +229,82 @@ class AgentConfig:
         else:
             return []  # Legacy mode: no write permissions
 
+    @staticmethod
+    def _classify_channel(channel_id: str) -> str:
+        """Classify a channel ID into a coarse type bucket.
+
+        Slack convention used today: 'D' prefix = DM, anything else =
+        channel. Discord IDs are numeric strings — treat as 'channel'
+        unless we get richer metadata from the platform later.
+
+        Returns 'dm' or 'channel'.
+        """
+        if not channel_id:
+            return "channel"
+        if channel_id.startswith("D"):
+            return "dm"
+        return "channel"
+
+    @staticmethod
+    def _channel_in_groups(
+        channel_id: str,
+        groups: Optional[Dict[str, List[str]]],
+    ) -> Optional[bool]:
+        """Resolve a channel_id against a group allowlist.
+
+        Returns True/False if the groups dict is set and we can decide,
+        or None if groups is unset (caller should fall through to other
+        gates).
+        """
+        if groups is None:
+            return None
+        bucket = AgentConfig._classify_channel(channel_id)
+        entry = groups.get(bucket)
+        if entry is None:
+            # Bucket not granted at all → deny
+            return False
+        if "*" in entry:
+            return True
+        return channel_id in entry
+
     def can_access_channel(self, channel_id: str) -> bool:
         """Check if agent is allowed to operate in a given channel.
 
-        Returns True when the allowlist is None (legacy/unrestricted) or
-        when *channel_id* is explicitly listed.
+        Resolution order:
+          1. allowed_channel_ids (legacy flat list) — if set, that's
+             authoritative. Keeps existing agents working.
+          2. allowed_channel_groups — if set, classify the channel and
+             check the matching bucket. Wildcard "*" = any of that type.
+          3. Both None → allow (legacy default).
         """
-        if self.allowed_channel_ids is None:
-            return True
-        return channel_id in self.allowed_channel_ids
+        if self.allowed_channel_ids is not None:
+            return channel_id in self.allowed_channel_ids
+        group_decision = self._channel_in_groups(
+            channel_id, self.allowed_channel_groups
+        )
+        if group_decision is not None:
+            return group_decision
+        return True
+
+    def can_post_to_channel(self, channel_id: str) -> bool:
+        """Output-side check used by messaging tools before publishing.
+
+        Layered the same way as can_access_channel:
+          1. allowed_output_channel_ids (flat list) wins if set.
+          2. allowed_output_channel_groups checked if 1 is None.
+          3. Falls back to read-side gate (can_access_channel) so
+             agents that haven't separately configured output keep
+             the legacy "if you can read it you can write to it"
+             semantic.
+        """
+        if self.allowed_output_channel_ids is not None:
+            return channel_id in self.allowed_output_channel_ids
+        group_decision = self._channel_in_groups(
+            channel_id, self.allowed_output_channel_groups
+        )
+        if group_decision is not None:
+            return group_decision
+        return self.can_access_channel(channel_id)
 
     def can_query_source(self, source_name: str, days: int) -> bool:
         """Check if agent can query this source with given time range"""
@@ -207,6 +319,127 @@ class AgentConfig:
                     return False
                 return True
         return False
+
+    def can_write_source(self, source_name: str) -> bool:
+        """Check if agent can WRITE to this source (modify pages, append blocks, etc).
+
+        Distinct from can_query_source — read access does NOT imply write
+        access. Default is **deny**: an agent must have an explicit
+        SourceAccess entry whose permissions include
+        SourcePermission.WRITE before any agent-elective write call site
+        will go through.
+
+        Bypass: is_default_agent=True (currently maia) skips this gate
+        the same way it skips MCP/channel gates. Caller should check
+        that BEFORE calling this method if it wants the bypass to apply.
+
+        Today the gate is consulted by the three notion_* write tools
+        in agentic_turn (notion_create_page, notion_update_page,
+        notion_append_blocks). MCP-mediated writes are gated separately
+        by mcp_tool_allowlist.
+        """
+        if not self.source_access:
+            return False  # Deny-by-default: no source_access → no writes
+        for access in self.source_access:
+            if access.source_name == source_name:
+                return SourcePermission.WRITE in access.permissions
+        return False
+
+    def get_source_access(self, source_name: str) -> Optional['SourceAccess']:
+        """Return the SourceAccess record for *source_name*, or None."""
+        if not self.source_access:
+            return None
+        for access in self.source_access:
+            if access.source_name == source_name:
+                return access
+        return None
+
+    def get_allowed_tables(self, source_name: str) -> Optional[List[str]]:
+        """Return the agent's allowed_tables list for *source_name*.
+
+        Returns None when no SourceAccess entry exists, or when the
+        entry leaves allowed_tables unset (= no per-table restriction).
+        Callers should treat None as "all tables allowed".
+        """
+        access = self.get_source_access(source_name)
+        if access is None:
+            return None
+        return access.allowed_tables
+
+    def filter_pages_by_table(
+        self,
+        source_name: str,
+        pages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Drop pages whose ``table`` field isn't in allowed_tables.
+
+        Pages without a ``table`` field are passed through unchanged
+        (single-table sources like Notion don't need this gate). When
+        allowed_tables is None for the source, returns pages unchanged.
+        """
+        allowed = self.get_allowed_tables(source_name)
+        if allowed is None:
+            return pages
+        allowed_set = set(allowed)
+        out = []
+        for p in pages:
+            if not isinstance(p, dict):
+                out.append(p)
+                continue
+            table = p.get("table")
+            if table is None or table in allowed_set:
+                out.append(p)
+        return out
+
+    def filter_page_columns(
+        self,
+        source_name: str,
+        pages: List[Dict[str, Any]],
+        table_name: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Strip page properties not in this agent's allowed_columns list.
+
+        v1 column-redaction pass for source_access. Each page is expected
+        to be a dict with a top-level ``properties`` mapping (Notion-style)
+        and/or a ``content`` string. Anything outside ``allowed_columns``
+        for the matching ``(source, table)`` is removed in-place from a
+        copy of the page.
+
+        - When the agent has no source_access entry for ``source_name``,
+          or the entry has no ``allowed_columns``, returns pages unchanged.
+        - When ``table_name`` is None, looks up the dict under any key
+          (single-table sources). When set, looks up the specific table.
+
+        Tables that map cleanly to source name (Notion: each source IS
+        the table) can pass ``table_name=None`` and put the column list
+        under the source name in ``allowed_columns``.
+        """
+        access = self.get_source_access(source_name)
+        if access is None or access.allowed_columns is None:
+            return pages
+        cols_map = access.allowed_columns
+        if table_name and table_name in cols_map:
+            allowed = set(cols_map[table_name])
+        elif None in cols_map:
+            allowed = set(cols_map[None])
+        elif source_name in cols_map:
+            allowed = set(cols_map[source_name])
+        else:
+            return pages
+
+        out = []
+        for p in pages:
+            if not isinstance(p, dict):
+                out.append(p)
+                continue
+            new_page = dict(p)
+            props = new_page.get("properties")
+            if isinstance(props, dict):
+                new_page["properties"] = {
+                    k: v for k, v in props.items() if k in allowed
+                }
+            out.append(new_page)
+        return out
 
 
 def get_config_file_path() -> Path:
@@ -374,6 +607,27 @@ def save_agent(agent: AgentConfig, *, force: bool = False) -> None:
         (a for a in existing_agents if a.get('name') == agent.name),
         None,
     )
+
+    # Q7: is_default_agent uniqueness — exactly one agent per workspace
+    # may carry the bypass flag. Reject saves that would create a second
+    # default agent in the same workspace. Allow zero (workspaces with
+    # no bypass agent are valid; their agents are all explicitly
+    # permissioned).
+    if agent.is_default_agent:
+        ws = agent.workspace
+        for other in existing_agents:
+            if (
+                other.get('name') != agent.name
+                and other.get('workspace') == ws
+                and other.get('is_default_agent')
+            ):
+                raise ValueError(
+                    f"Cannot save: agent {other['name']!r} in workspace {ws!r} "
+                    f"already has is_default_agent=True. Only one default "
+                    f"agent per workspace is allowed. Either unset the flag "
+                    f"on {other['name']!r} first, or save {agent.name!r} "
+                    f"without is_default_agent."
+                )
 
     # Apply wipe protection BEFORE upsert.
     safe_dict = _apply_wipe_protection(agent_dict, existing_for_this_name, force=force)

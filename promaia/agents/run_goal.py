@@ -110,7 +110,8 @@ def _summarize_tool_input(tool_name: str, tool_input: dict) -> str:
         return tool_input.get("query", "")[:80]
     elif tool_name == "query_source":
         db = tool_input.get("database", "")
-        days = tool_input.get("days", "")
+        # days_back is the canonical field; fall back to legacy days alias.
+        days = tool_input.get("days_back") or tool_input.get("days", "")
         return f"{db}" + (f" ({days}d)" if days else "")
     elif tool_name == "send_email":
         to = tool_input.get("to", "")
@@ -125,13 +126,26 @@ def _summarize_tool_input(tool_name: str, tool_input: dict) -> str:
     elif tool_name == "web_fetch":
         return tool_input.get("url", "")[:80]
     elif tool_name.startswith("notion_"):
-        return tool_input.get("query", tool_input.get("filter", ""))[:60] if tool_input else ""
+        val = tool_input.get("query") or tool_input.get("filter") or ""
+        return str(val)[:60]
     elif tool_name.startswith("sheets_"):
         ss = tool_input.get("spreadsheet", tool_input.get("title", ""))
         return ss[:40] if ss else ""
     elif tool_name == "start_conversation":
         user = tool_input.get("user", "")
         return f"with {user}"
+    elif tool_name == "search":
+        instr = tool_input.get("instructions", []) or []
+        n = len(instr)
+        head = instr[0] if instr else ""
+        return f"{n} step{'s' if n != 1 else ''}" + (f": {head[:60]}" if head else "")
+    elif tool_name == "act":
+        suites = tool_input.get("suites", []) or []
+        instr = tool_input.get("instructions", []) or []
+        return f"{','.join(suites)} ({len(instr)} step{'s' if len(instr) != 1 else ''})"
+    elif tool_name == "compress_last_result":
+        s = tool_input.get("summary", "") or ""
+        return s[:60]
     # Generic fallback
     for k, v in tool_input.items():
         return f"{str(v)[:60]}"

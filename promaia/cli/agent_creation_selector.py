@@ -1176,3 +1176,487 @@ async def select_mcp_tools(available_tools: List[str], preselected: Optional[Lis
         return result_tools
     else:
         return []
+
+
+# ============================================================================
+# Per-tool MCP allow list selector (Q5 / Q5b / Q9)
+# ============================================================================
+
+
+class McpServerUnreachableError(RuntimeError):
+    """Raised by select_mcp_tool_allowlist when one or more required
+    MCP servers cannot be reached for live tool discovery.
+
+    Per Q5b, callers should treat this as a refuse-to-save signal
+    and abort whatever flow they were in (create / edit). The
+    exception message lists every unreachable server with its
+    failure reason, suitable for surfacing to the user verbatim.
+    """
+
+
+async def select_mcp_tool_allowlist(
+    selected_servers: List[str],
+    preselected: Optional[Dict[str, Optional[List[str]]]] = None,
+) -> Optional[Dict[str, Optional[List[str]]]]:
+    """Interactive picker that builds an `mcp_tool_allowlist` dict.
+
+    For each server the agent has access to (already chosen via
+    ``select_mcp_tools``), live-discovers what tools the server
+    currently exposes and presents them as a single flat checkbox
+    list with ``server.tool`` rows. The user ticks the tools the
+    agent should be allowed to call.
+
+    Built-in integrations (entries in *selected_servers* that don't
+    appear in ``mcp_servers.json`` — e.g. "gmail", "calendar") are
+    silently skipped because they have their own runtime gates
+    (messaging_enabled, source_access, etc.) and don't need per-MCP-
+    tool allowlisting.
+
+    Returns:
+        Dict[server, List[tool]] on confirm with at least one MCP
+            server picked.
+        ``None`` when no MCP-server allowlist is needed (every
+            selection was a built-in integration, or *selected_servers*
+            was empty). Caller should leave AgentConfig.mcp_tool_allowlist
+            unset.
+        ``{}`` on user cancel (escape) — caller can keep any
+            previous allowlist intact.
+
+    Raises:
+        McpServerUnreachableError: per Q5b — at least one selected
+            MCP server could not be reached for live tool discovery.
+            Caller should NOT save the agent.
+    """
+    console = Console()
+
+    if not selected_servers:
+        return None
+
+    preselected = preselected or {}
+
+    # Live discovery — refresh cache for each server.
+    from promaia.agents import mcp_tool_cache
+    from promaia.config.mcp_servers import McpServerManager
+    from promaia.agents.mcp_loader import _find_mcp_servers_json
+
+    config_path = _find_mcp_servers_json()
+    if config_path is None:
+        # No config file at all → there can't be any MCP servers, so the
+        # selection must be all built-ins. Nothing to allowlist.
+        return None
+    manager = McpServerManager(str(config_path))
+
+    rows: List[Tuple[str, str, str]] = []  # (server, tool, description)
+    unreachable: List[str] = []
+    skipped_builtins: List[str] = []
+    for srv in selected_servers:
+        cfg = manager.servers.get(srv)
+        if cfg is None:
+            # Not an MCP server — likely a built-in integration like
+            # "gmail" or "calendar" that has its own runtime gates
+            # (messaging_enabled, source_access, etc) and doesn't need
+            # per-tool MCP allowlisting. Skip silently; don't trigger
+            # the Q5b refuse-to-save path.
+            skipped_builtins.append(srv)
+            continue
+        try:
+            cache = await mcp_tool_cache.refresh_from_server(srv, cfg)
+        except Exception as e:
+            unreachable.append(f"{srv} ({e})")
+            continue
+        for tool in cache.tools:
+            rows.append((srv, tool.name, tool.description or ""))
+
+    if unreachable:
+        # Q5b — refuse to save. Raise so the caller's exception handler
+        # surfaces this without ambiguity vs. the "no allowlist needed"
+        # None return.
+        msg_lines = ["Cannot reach the following MCP servers to discover their tools:"]
+        for u in unreachable:
+            msg_lines.append(f"  • {u}")
+        msg_lines.append(
+            "Either bring the servers online, remove them from this agent's "
+            "mcp_tools, or wait until they recover."
+        )
+        raise McpServerUnreachableError("\n".join(msg_lines))
+
+    non_builtin = [s for s in selected_servers if s not in skipped_builtins]
+
+    if not non_builtin:
+        # Every selection was a built-in integration — no MCP allowlist
+        # needed. Caller should leave AgentConfig.mcp_tool_allowlist unset.
+        if skipped_builtins:
+            console.print(
+                f"[dim]Built-in integrations ({', '.join(skipped_builtins)}) "
+                f"don't need per-MCP-tool allowlisting; skipping picker.[/dim]"
+            )
+        return None
+
+    if not rows:
+        # MCP server(s) connected but advertised no tools. Save an empty
+        # allow list per server so the deny-by-default semantic is explicit.
+        console.print(
+            f"[yellow]MCP server(s) {', '.join(non_builtin)} connected but "
+            f"advertised no tools. Allow list will be empty for now.[/yellow]"
+        )
+        return {srv: [] for srv in non_builtin}
+
+    # Pre-fill enabled state from preselected dict.
+    def _is_preselected(server: str, tool: str) -> bool:
+        entry = preselected.get(server)
+        if entry is None:
+            # Wholesale-grant marker: all tools allowed
+            return server in preselected
+        return tool in entry
+
+    enabled_states = [_is_preselected(s, t) for s, t, _ in rows]
+    current_focus = 0
+    confirmed = False
+
+    def get_status_display():
+        n_on = sum(enabled_states)
+        n_total = len(rows)
+        return (
+            f"MCP Tool allow list | "
+            f"Selected: {n_on}/{n_total} | "
+            f"↑↓:Navigate SPACE:Toggle ENTER:Confirm ESC:Cancel"
+        )
+
+    def get_entry_display(idx: int) -> str:
+        srv, tool, desc = rows[idx]
+        check = "☑" if enabled_states[idx] else "☐"
+        line = f"{check}  {srv}.{tool}"
+        if desc:
+            short = desc.strip().splitlines()[0]
+            if len(short) > 60:
+                short = short[:57] + "..."
+            line = f"{line}  — {short}"
+        return line
+
+    def create_layout():
+        status = Window(FormattedTextControl(text=get_status_display), height=1)
+        title = Window(
+            FormattedTextControl(text=_styled_header("Per-tool MCP Permissions")),
+            height=1, style="class:title",
+        )
+        entries = []
+        for i in range(len(rows)):
+            entries.append(Window(
+                FormattedTextControl(text=lambda i=i: get_entry_display(i)),
+                height=1,
+                style=f"class:{'selected' if i == current_focus else 'unselected'}",
+            ))
+        return Layout(HSplit([status, title, Window(height=1), *entries]))
+
+    layout = create_layout()
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.Up)
+    def _up(event):
+        nonlocal current_focus
+        if current_focus > 0:
+            current_focus -= 1
+            event.app.layout = create_layout()
+
+    @bindings.add(Keys.Down)
+    def _down(event):
+        nonlocal current_focus
+        if current_focus < len(rows) - 1:
+            current_focus += 1
+            event.app.layout = create_layout()
+
+    @bindings.add(' ')
+    def _toggle(event):
+        enabled_states[current_focus] = not enabled_states[current_focus]
+        event.app.layout = create_layout()
+
+    @bindings.add(Keys.Enter)
+    def _confirm(event):
+        nonlocal confirmed
+        confirmed = True
+        event.app.exit()
+
+    @bindings.add(Keys.Escape)
+    def _cancel(event):
+        event.app.exit()
+
+    app = Application(layout=layout, key_bindings=bindings,
+                      full_screen=False, mouse_support=False)
+    await app.run_async()
+
+    if not confirmed:
+        return {}
+
+    # Group results by server. Always include every NON-BUILTIN selected
+    # server (with an empty list if the user ticked nothing) so the agent's
+    # mcp_tool_allowlist explicitly covers each MCP server they picked.
+    # Built-ins are excluded — the picker doesn't manage their gates.
+    out: Dict[str, Optional[List[str]]] = {srv: [] for srv in non_builtin}
+    for (srv, tool, _), enabled in zip(rows, enabled_states):
+        if enabled:
+            out.setdefault(srv, []).append(tool)
+    return out
+
+
+# ============================================================================
+# Channel groups picker (Gap C — DM/channel + wildcards)
+# ============================================================================
+
+
+async def _fetch_slack_channels(workspace: str) -> Optional[List[Tuple[str, str, bool]]]:
+    """Fetch real channels from Slack via the workspace's bot token.
+
+    Returns a list of ``(id, name, is_member)`` tuples sorted by name,
+    or ``None`` if the token isn't configured / the API call fails.
+    Mirrors the pattern in ``cli/setup_commands._browse_slack_channels``
+    so the agent-edit UI matches ``maia setup slack``.
+    """
+    import httpx
+    try:
+        from promaia.auth import get_integration
+        slack = get_integration("slack")
+        cred = slack.get_slack_credentials(workspace)
+    except Exception:
+        return None
+    if not cred or not cred.get("bot_token"):
+        return None
+    bot_token = cred["bot_token"]
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                "https://slack.com/api/conversations.list",
+                headers={"Authorization": f"Bearer {bot_token}"},
+                json={"types": "public_channel,private_channel", "limit": 200},
+            )
+        data = resp.json()
+        if not data.get("ok"):
+            return None
+    except Exception:
+        return None
+    channels = [
+        (ch.get("id", ""), ch.get("name", "unknown"), bool(ch.get("is_member")))
+        for ch in data.get("channels", [])
+    ]
+    channels.sort(key=lambda x: x[1].lower())
+    return channels
+
+
+async def _select_channels_with_wildcards(
+    side_label: str,
+    available_channels: List[Tuple[str, str, bool]],
+    preselected_ids: Optional[List[str]] = None,
+    preselected_dm_wildcard: bool = False,
+    preselected_channel_wildcard: bool = False,
+) -> Tuple[bool, bool, List[str]]:
+    """Render one checkbox list with two virtual rows on top:
+
+        [ ] ✱ Any DM (wildcard)
+        [ ] ✱ Any non-DM channel (wildcard)
+        ────────────────────────────────────
+        [ ] #engineering        (real channels)
+        [ ] #announcements
+        ...
+
+    Returns ``(dm_wildcard, channel_wildcard, [specific_channel_ids])``.
+    If ``channel_wildcard`` is True, the specific list is ignored on the
+    caller side — the wildcard supersedes individual picks.
+    """
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.layout import Layout
+
+    preselected_ids = set(preselected_ids or [])
+
+    # Row 0 = any-DM wildcard, row 1 = any-channel wildcard, then real channels.
+    rows = [
+        ("__dm_wildcard__", "✱ Any DM"),
+        ("__channel_wildcard__", "✱ Any non-DM channel"),
+    ] + [(cid, f"#{name}") for cid, name, _is_member in available_channels]
+    selected = [preselected_dm_wildcard, preselected_channel_wildcard] + [
+        cid in preselected_ids for cid, _, _ in available_channels
+    ]
+    current = [0]
+    confirmed = False
+    max_visible = 22
+
+    def viewport():
+        total = len(rows)
+        cur = current[0]
+        half = max_visible // 2
+        if total <= max_visible:
+            start = 0
+        elif cur < half:
+            start = 0
+        elif cur >= total - half:
+            start = max(0, total - max_visible)
+        else:
+            start = cur - half
+        end = min(start + max_visible, total)
+
+        lines = []
+        if start > 0:
+            lines.append("  ... more above")
+        for i in range(start, end):
+            check = "[x]" if selected[i] else "[ ]"
+            arrow = " >" if i == cur else "  "
+            label = rows[i][1]
+            if i == 1:
+                # Add a separator line under the second wildcard row
+                lines.append(f" {arrow} {check} {label}")
+                lines.append("    ────────────────────────────────────")
+            else:
+                lines.append(f" {arrow} {check} {label}")
+        if end < total:
+            lines.append("  ... more below")
+        return "\n".join(lines)
+
+    def status():
+        n = sum(selected)
+        return f" {side_label}: SPACE toggle  ENTER confirm ({n} picked)  ESC cancel"
+
+    def make_layout():
+        visible = min(len(rows), max_visible) + 4  # +1 for separator
+        return Layout(HSplit([
+            Window(FormattedTextControl(text=lambda: f"\n  Pick what the agent can {side_label.lower()}:\n"), height=2),
+            Window(FormattedTextControl(text=viewport), height=visible),
+            Window(FormattedTextControl(text=status), height=1, style="fg:gray"),
+        ]))
+
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.Up)
+    def _up(event):
+        if current[0] > 0:
+            current[0] -= 1
+            event.app.layout = make_layout()
+
+    @bindings.add(Keys.Down)
+    def _down(event):
+        if current[0] < len(rows) - 1:
+            current[0] += 1
+            event.app.layout = make_layout()
+
+    @bindings.add(" ")
+    def _toggle(event):
+        selected[current[0]] = not selected[current[0]]
+        event.app.layout = make_layout()
+
+    @bindings.add(Keys.Enter)
+    def _confirm(event):
+        nonlocal confirmed
+        confirmed = True
+        event.app.exit()
+
+    @bindings.add(Keys.Escape)
+    def _cancel(event):
+        event.app.exit()
+
+    app = Application(
+        layout=make_layout(), key_bindings=bindings,
+        full_screen=False, mouse_support=False,
+    )
+    await app.run_async()
+
+    if not confirmed:
+        return (False, False, [])
+
+    dm_wc = selected[0]
+    ch_wc = selected[1]
+    specific_ids = [
+        rows[i][0]
+        for i in range(2, len(rows))
+        if selected[i]
+    ]
+    return dm_wc, ch_wc, specific_ids
+
+
+async def select_channel_groups(
+    workspace: str,
+    current_input: Optional[Dict[str, List[str]]] = None,
+    current_output: Optional[Dict[str, List[str]]] = None,
+) -> Tuple[Optional[Dict[str, List[str]]], Optional[Dict[str, List[str]]]]:
+    """Picker for ``allowed_channel_groups`` (read) and
+    ``allowed_output_channel_groups`` (write).
+
+    Live-fetches Slack channels for the *workspace* via the bot token
+    and shows them in a checkbox UI alongside two wildcard rows
+    (any-DM, any-channel). Discord support TBD; falls back to channel-
+    free wildcard-only if no Slack creds are available.
+
+    Returns ``(input_groups, output_groups)``. Either may be ``None``
+    (= no restriction; legacy-allow / inherit-from-input).
+    """
+    console = Console()
+
+    console.print(
+        "\n[bold cyan]Configure channel permissions[/bold cyan]\n"
+        "[dim]Channels split into two buckets: DMs and non-DM channels. "
+        "Use ✱ wildcard rows for \"any of that type\", or pick specific "
+        "channels from the live list.[/dim]"
+    )
+
+    console.print("[dim]  Fetching channel list from Slack...[/dim]")
+    available = await _fetch_slack_channels(workspace) or []
+    if not available:
+        console.print(
+            "[yellow]  No Slack channels found (bot token missing or API "
+            "call failed). Wildcard-only configuration available.[/yellow]"
+        )
+
+    cur_in = current_input or {}
+    cur_out = current_output or {}
+
+    def _wildcard(bucket: Dict[str, List[str]], key: str) -> bool:
+        return bucket.get(key) == ["*"]
+
+    def _specific(bucket: Dict[str, List[str]], key: str) -> List[str]:
+        v = bucket.get(key, [])
+        return [] if v == ["*"] else list(v)
+
+    # READ side
+    console.print("\n[bold]READ — channels the agent can read from[/bold]")
+    dm_wc_r, ch_wc_r, ids_r = await _select_channels_with_wildcards(
+        "READ",
+        available,
+        preselected_ids=_specific(cur_in, "channel"),
+        preselected_dm_wildcard=_wildcard(cur_in, "dm"),
+        preselected_channel_wildcard=_wildcard(cur_in, "channel"),
+    )
+
+    def _build_groups(dm_wc: bool, ch_wc: bool, ids: List[str]) -> Optional[Dict[str, List[str]]]:
+        dm_bucket = ["*"] if dm_wc else []
+        if ch_wc:
+            ch_bucket = ["*"]
+        else:
+            ch_bucket = ids
+        if not dm_bucket and not ch_bucket:
+            return None  # treat empty-everywhere as "no restriction"
+        return {"dm": dm_bucket, "channel": ch_bucket}
+
+    new_input = _build_groups(dm_wc_r, ch_wc_r, ids_r)
+
+    # WRITE side
+    console.print("\n[bold]WRITE — channels the agent can post to[/bold]")
+    console.print("  1. Same as read (recommended)")
+    console.print("  2. Configure separately")
+    console.print("  3. No write restrictions (fall back to read gate)")
+    write_choice = input("Select (1-3): ").strip() or "1"
+
+    if write_choice == "1":
+        new_output = new_input
+    elif write_choice == "3":
+        new_output = None
+    else:
+        dm_wc_w, ch_wc_w, ids_w = await _select_channels_with_wildcards(
+            "WRITE",
+            available,
+            preselected_ids=_specific(cur_out, "channel"),
+            preselected_dm_wildcard=_wildcard(cur_out, "dm"),
+            preselected_channel_wildcard=_wildcard(cur_out, "channel"),
+        )
+        new_output = _build_groups(dm_wc_w, ch_wc_w, ids_w)
+
+    return new_input, new_output

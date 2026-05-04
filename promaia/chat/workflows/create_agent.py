@@ -58,10 +58,24 @@ If they're not sure, skip — this can be configured later.
 
 8b. **Channel permissions** (optional): If the agent has Slack or \
 Discord data sources, ask whether it should be restricted to specific \
-channels. Use `list_channels` to show available channels and let the \
-user pick. If they want the agent to access all channels, skip this \
-step. Pass the selected channel IDs as `allowed_channel_ids` when \
-creating the agent.
+channels for reading and posting. Two ways to configure:
+   - **Group form (preferred)**: pass `allowed_channel_groups` as an \
+object like `{"dm": ["*"], "channel": ["C_eng"]}` for "any DM, only \
+#engineering." Pass `allowed_output_channel_groups` separately if write \
+should be more restrictive than read.
+   - **Flat IDs (legacy)**: use `list_channels` to find IDs, pass them \
+as `allowed_channel_ids` (and optionally `allowed_output_channel_ids`).
+   - Skip entirely for unrestricted access.
+
+8c. **MCP tool allow list** (recommended for non-built-in MCP servers): \
+If the agent has MCP servers in `mcp_tools` other than `gmail`/`calendar`, \
+ask which specific tools on each server it should be allowed to call. \
+Pass `mcp_tool_allowlist` as an object keyed by server name with lists \
+of tool names: `{"po-manager": ["list_vendors", "list_parts"]}`. New \
+agents that omit this start deny-by-default — the runtime will reject \
+any tool call not in the allow list. If the user isn't sure which tools \
+they need, suggest looking up tool names with the CLI picker (`maia \
+agent edit` → option 4) instead, and skip this step for now.
 
 9. **Confirm and create**: Summarize the full configuration:
    - Name

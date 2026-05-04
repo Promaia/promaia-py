@@ -48,3 +48,15 @@ def set_slack_model(model_id: Optional[str]) -> None:
     else:
         data["model"] = model_id
     _save(data)
+
+
+def get_cost_display_enabled() -> bool:
+    """Return whether to prefix each assistant message with cost metadata."""
+    return bool(_load().get("cost_display_enabled", False))
+
+
+def set_cost_display_enabled(enabled: bool) -> None:
+    """Persist the Slack-wide cost-display toggle."""
+    data = _load()
+    data["cost_display_enabled"] = bool(enabled)
+    _save(data)

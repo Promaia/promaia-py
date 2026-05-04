@@ -25,6 +25,11 @@ class AgenticTurnResult:
     iterations_used: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    # Anthropic prompt-cache token accounting. cache_read is fresh
+    # input that was served from cache (billed at 0.1x); cache_creation
+    # is fresh input written to cache this request (billed at 1.25x).
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
     plan: Optional[List[str]] = None
     signal: Optional[Dict[str, Any]] = None
     # Full tool_use/tool_result message blocks from the agentic loop.
@@ -45,7 +50,9 @@ QUERY_TOOL_DEFINITIONS = [
         "description": (
             "Search your data sources using natural language (converted to SQL). "
             "Use for exact text/keyword searches when you know what you're looking for. "
-            "Examples: 'emails from Federico this week', 'tasks due today'"
+            "Examples: 'emails from Federico', 'tasks due today'. "
+            "You MUST specify days_back to scope the search to a time window — "
+            "this keeps results focused and the context window lean."
         ),
         "input_schema": {
             "type": "object",
@@ -57,9 +64,18 @@ QUERY_TOOL_DEFINITIONS = [
                 "reasoning": {
                     "type": "string",
                     "description": "Brief explanation of why you need this data"
+                },
+                "days_back": {
+                    "type": "integer",
+                    "description": (
+                        "Time window: only return results created within this many days. "
+                        "Be conservative — 7 to 30 days covers most queries. "
+                        "Use larger values only when the user explicitly asks for older history."
+                    ),
+                    "minimum": 1,
                 }
             },
-            "required": ["query", "reasoning"]
+            "required": ["query", "reasoning", "days_back"]
         }
     },
     {
@@ -68,7 +84,8 @@ QUERY_TOOL_DEFINITIONS = [
             "Semantic search across all data sources using embeddings. "
             "Use for conceptual/fuzzy searches when exact keywords won't work. "
             "Examples: 'discussions about team morale', "
-            "'content about project deadlines and pressure'"
+            "'content about project deadlines and pressure'. "
+            "You MUST specify days_back to scope the search to a time window."
         ),
         "input_schema": {
             "type": "object",
@@ -81,6 +98,15 @@ QUERY_TOOL_DEFINITIONS = [
                     "type": "string",
                     "description": "Brief explanation of why you need this data"
                 },
+                "days_back": {
+                    "type": "integer",
+                    "description": (
+                        "Time window: only return results created within this many days. "
+                        "Be conservative — 7 to 30 days covers most queries. "
+                        "Use larger values only when the user explicitly asks for older history."
+                    ),
+                    "minimum": 1,
+                },
                 "top_k": {
                     "type": "integer",
                     "description": "Max results to return (default: 50)",
@@ -92,16 +118,18 @@ QUERY_TOOL_DEFINITIONS = [
                     "default": 0.2
                 }
             },
-            "required": ["query", "reasoning"]
+            "required": ["query", "reasoning", "days_back"]
         }
     },
     {
         "name": "query_source",
         "description": (
             "Load pages from a specific database with time filtering. "
-            "Use to expand context or load different time ranges. "
-            "Available databases include: agent_journal, gmail, stories, tasks, "
-            "and any Discord/Slack channel sources."
+            "You MUST specify days_back. Use the smallest window that "
+            "covers what you need; large values (>30) load thousands of "
+            "pages and bloat your context. Available databases include "
+            "agent_journal, gmail, stories, tasks, and any Discord/Slack "
+            "channel sources."
         ),
         "input_schema": {
             "type": "object",
@@ -113,12 +141,18 @@ QUERY_TOOL_DEFINITIONS = [
                         "'tasks')"
                     )
                 },
-                "days": {
+                "days_back": {
                     "type": "integer",
-                    "description": "Days to look back (0 or omit for all)"
+                    "description": (
+                        "Time window: only return pages whose created_at is "
+                        "within this many days. Required. Use 1-7 for recent "
+                        "scan, 7-30 for short history; >30 only when the user "
+                        "explicitly asks for older content."
+                    ),
+                    "minimum": 1,
                 }
             },
-            "required": ["database"]
+            "required": ["database", "days_back"]
         }
     },
     {
@@ -1657,9 +1691,10 @@ CONTEXT_TOOL_DEFINITION = {
 ACT_TOOL_DEFINITION = {
     "name": "act",
     "description": (
-        "Enter Act mode to execute actions. You MUST provide step-by-step instructions "
-        "for what to do. Instructions stay visible and you mark each step done as you go. "
-        "Your notes come with you but context sources are hidden. Call done() when finished."
+        "Spawn an act sub-agent to execute write operations. The sub-agent is loaded "
+        "with the named tool suites and runs through your instructions; its prose "
+        "report comes back as this tool's result. You never see its intermediate "
+        "tool calls — anything you'll need afterwards must appear in the report."
     ),
     "input_schema": {
         "type": "object",
@@ -1672,11 +1707,64 @@ ACT_TOOL_DEFINITION = {
             "instructions": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Step-by-step instructions for what to do in Act mode. Each string is one step."
+                "description": "Ordered checklist for the act sub-agent. Each string is one concrete step."
             }
         },
         "required": ["suites", "instructions"]
     }
+}
+
+SEARCH_TOOL_DEFINITION = {
+    "name": "search",
+    "description": (
+        "Spawn a read-only search sub-agent. The sub-agent runs queries against "
+        "local synced data (query_sql, query_vector, query_source), synthesizes "
+        "what it finds, and returns a prose report. Use this for any context "
+        "gathering — you do not call query tools directly. Returns the sub-agent's "
+        "report as a string."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "instructions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Ordered checklist describing what the search sub-agent should "
+                    "find. Describe outcomes, not query mechanics — the sub-agent "
+                    "picks the right query tools."
+                ),
+            },
+        },
+        "required": ["instructions"],
+    },
+}
+
+COMPRESS_LAST_RESULT_TOOL_DEFINITION = {
+    "name": "compress_last_result",
+    "description": (
+        "Replace the most recent tool_result in your message history with your "
+        "own prose summary. Use this immediately after a tool call returns more "
+        "data than you need to keep around — extract the relevant facts, then "
+        "compress so the original body doesn't bloat your remaining iterations. "
+        "ONE-SHOT: only callable on the iteration immediately following the tool "
+        "result. Once you've taken any other action after the tool result, the "
+        "result is locked at full size for the rest of your burst."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": (
+                    "Your prose synthesis of the previous tool result. Replaces "
+                    "the tool_result body in your history. Be specific: extract "
+                    "IDs, names, dates, counts — anything you'll cite later."
+                ),
+            },
+        },
+        "required": ["summary"],
+    },
 }
 
 MARK_STEP_DONE_TOOL_DEFINITION = {
@@ -2534,9 +2622,64 @@ AGENT_TOOL_DEFINITIONS = [
                     "items": {"type": "string"},
                     "description": (
                         "Slack/Discord channel IDs this agent can respond in "
-                        "and query messages from. Pass empty array to remove "
-                        "restrictions (allow all channels). Omit to leave unchanged."
+                        "and query messages from (LEGACY flat list — prefer "
+                        "allowed_channel_groups for new edits). Pass empty "
+                        "array to remove restrictions. Omit to leave unchanged."
                     )
+                },
+                "allowed_output_channel_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Channel IDs the agent may POST to. Separate from the "
+                        "input gate (allowed_channel_ids). When omitted, the "
+                        "input gate also governs output (\"if you can read "
+                        "it, you can write to it\")."
+                    )
+                },
+                "allowed_channel_groups": {
+                    "type": "object",
+                    "description": (
+                        "Group-typed input gate. Keys: \"dm\" (Slack DMs / "
+                        "Discord direct messages), \"channel\" (everything "
+                        "else). Values: list of channel IDs OR [\"*\"] for "
+                        "any channel of that type. e.g. "
+                        "{\"dm\": [\"*\"], \"channel\": [\"C_engineering\"]}. "
+                        "Takes precedence over allowed_channel_ids only when "
+                        "the flat list is null."
+                    ),
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                },
+                "allowed_output_channel_groups": {
+                    "type": "object",
+                    "description": (
+                        "Group-typed output gate, same shape as "
+                        "allowed_channel_groups. When omitted, output falls "
+                        "back to the input gate."
+                    ),
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                },
+                "mcp_tool_allowlist": {
+                    "type": "object",
+                    "description": (
+                        "Per-tool MCP allow list — deny-by-default for any "
+                        "MCP tool not listed here. Keys are MCP server names "
+                        "from mcp_tools (e.g. \"po-manager\"); values are "
+                        "lists of tool names the agent is allowed to call on "
+                        "that server. e.g. "
+                        "{\"po-manager\": [\"list_vendors\", \"list_parts\"]}. "
+                        "Use null as the value to grant the entire server "
+                        "wholesale (rare). Built-in integrations like "
+                        "\"gmail\" and \"calendar\" don't need entries here "
+                        "— they have their own runtime gates."
+                    ),
+                    "additionalProperties": True
                 },
             },
             "required": ["name"]
@@ -2617,9 +2760,55 @@ AGENT_TOOL_DEFINITIONS = [
                     "items": {"type": "string"},
                     "description": (
                         "Slack/Discord channel IDs (e.g. ['C0ABC123']) this agent "
-                        "can respond in and query messages from. Get IDs from "
+                        "can respond in and query messages from (LEGACY flat list "
+                        "— prefer allowed_channel_groups). Get IDs from "
                         "list_channels. Omit for unrestricted access."
                     )
+                },
+                "allowed_output_channel_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Channel IDs the agent may POST to. Separate from input "
+                        "gate (allowed_channel_ids). Omit to inherit from input."
+                    )
+                },
+                "allowed_channel_groups": {
+                    "type": "object",
+                    "description": (
+                        "Group-typed channel allow list. Keys: \"dm\" / "
+                        "\"channel\". Values: list of IDs OR [\"*\"] for any "
+                        "of that type. e.g. {\"dm\": [\"*\"], \"channel\": "
+                        "[\"C_engineering\"]} = any DM + only #engineering. "
+                        "Preferred over allowed_channel_ids for new agents."
+                    ),
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                },
+                "allowed_output_channel_groups": {
+                    "type": "object",
+                    "description": (
+                        "Group-typed output gate, same shape. Omit to inherit "
+                        "from allowed_channel_groups."
+                    ),
+                    "additionalProperties": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                },
+                "mcp_tool_allowlist": {
+                    "type": "object",
+                    "description": (
+                        "Per-tool MCP allow list — deny-by-default. Keys: "
+                        "MCP server names from mcp_tools. Values: lists of "
+                        "tool names allowed on that server. e.g. "
+                        "{\"po-manager\": [\"list_vendors\", \"list_parts\"]}. "
+                        "Built-ins like \"gmail\" / \"calendar\" don't need "
+                        "entries here."
+                    ),
+                    "additionalProperties": True
                 },
             },
             "required": ["name"]
@@ -2950,6 +3139,186 @@ def build_tool_definitions(agent, has_platform: bool = False) -> List[Dict[str, 
     return tools
 
 
+# ── Parent / Sub re-arch — unified tool union + role allowlist ──────────
+#
+# When PROMAIA_PARENT_SUB_MODE is on, every API call (parent, search child,
+# act child) sends the *same* tool list — the union of every tool any role
+# might need. Role discipline is enforced at the executor: a tool called
+# outside its role's allowlist returns an error tool_result and the burst
+# continues. Sharing one tool list across all three roles is what lets the
+# system + tools cache prefix hit on every agent in the family.
+#
+# Allowlist-by-name keeps the data simple. If new tools land later, add
+# their names to the appropriate set; the tool definitions themselves can
+# live anywhere in the union.
+
+_PARENT_ROLE_TOOLS = frozenset({
+    "search",
+    "act",
+    "notepad",
+    "memory",
+    # Planning-level workflow reads (small, frequently used).
+    "list_saved_workflows",
+    "get_workflow_details",
+})
+
+_SEARCH_ROLE_TOOLS = frozenset({
+    "query_sql",
+    "query_vector",
+    "query_source",
+    "compress_last_result",
+    "mark_step_done",
+    "done",
+})
+
+
+def _act_role_tools_for(unified_tools: List[Dict[str, Any]]) -> frozenset:
+    """Compute the act role's allowlist as: every tool in the union that
+    is neither parent-exclusive nor search-exclusive.
+
+    The act role gets all suite tools (gmail, calendar, notion, sheets,
+    drive, web, messaging, admin, MCP servers) plus the shared scaffolding
+    (compress_last_result, mark_step_done, done). It does NOT get
+    notepad/memory (parent-only writes) or query_* (search-only reads).
+    Computing it from the union means we never need to enumerate every
+    suite tool by name here.
+    """
+    names = {t.get("name") for t in unified_tools if t.get("name")}
+    parent_exclusive = _PARENT_ROLE_TOOLS  # search, act, notepad, memory
+    search_exclusive = {"query_sql", "query_vector", "query_source"}
+    return frozenset(names - parent_exclusive - search_exclusive)
+
+
+def role_tool_allowlist(role: str, unified_tools: List[Dict[str, Any]]) -> frozenset:
+    """Return the set of tool names allowed for `role`.
+
+    `role` is one of "parent", "search", "act". Pass the current unified
+    tool list so the act role can be computed dynamically.
+    """
+    if role == "parent":
+        return _PARENT_ROLE_TOOLS
+    if role == "search":
+        return _SEARCH_ROLE_TOOLS
+    if role == "act":
+        return _act_role_tools_for(unified_tools)
+    return frozenset()
+
+
+# Search role's read tools — pulled out of QUERY_TOOL_DEFINITIONS so we
+# can omit the legacy `write_agent_journal` (which sits inside that
+# constant for historical reasons but isn't a search read tool).
+QUERY_TOOL_DEFINITIONS_FOR_SEARCH_ROLE = [
+    t for t in QUERY_TOOL_DEFINITIONS if t.get("name") in {
+        "query_sql", "query_vector", "query_source",
+    }
+]
+
+
+def build_parent_tool_definitions(agent) -> List[Dict[str, Any]]:
+    """Tools the parent role sees in parent_sub_mode.
+
+    The parent is a pure delegator. Its tools array is intentionally
+    tiny:
+
+      - search(instructions)        — spawn a search sub-agent
+      - act(suites, instructions)   — spawn an act sub-agent
+      - notepad(action, content)    — its own working brief
+      - memory(action, …)           — long-lived facts about the user
+
+    The 78 suite-specific tools (notion, gmail, calendar, sheets, drive,
+    web, messaging, admin, MCP) are NOT here. The parent doesn't need
+    to know their schemas — only their names and what each suite does
+    at a high level. That summary lives in the parent's system prompt
+    as a brief suite index (one line per suite), so the parent can pick
+    the right `suites=[…]` argument when calling `act`.
+
+    Workflow tools (`list_saved_workflows`, `get_workflow_details`) live
+    on the parent because they're planning-level reads — fast, small,
+    and used to build the instructions the parent passes to act/search
+    sub-agents. Routing them through a search sub-agent would add a
+    round trip to a sub-second operation.
+
+    Cache implication: tiny + stable. Cached once per cache window;
+    every parent turn pays only ~250 cache-read tokens for tools.
+    """
+    return [
+        SEARCH_TOOL_DEFINITION,
+        ACT_TOOL_DEFINITION,
+        NOTEPAD_TOOL_DEFINITION,
+        MEMORY_TOOL_DEFINITION,
+    ] + [
+        # Workflow READ tools only — list + get_details. The write
+        # operations (save, update, delete, save_run) live in the
+        # admin suite, reachable via act(suites=["admin"], …).
+        td for td in WORKFLOW_TOOL_DEFINITIONS
+        if td.get("name") in {"list_saved_workflows", "get_workflow_details"}
+    ]
+
+
+def build_search_child_tool_definitions() -> List[Dict[str, Any]]:
+    """Tools a search sub-agent receives at spawn.
+
+    All three query tools, plus the per-burst scaffolding (compression
+    one-shot, step-done, exit). No suite tools, no notepad write
+    access (notepad is parent-only-write; the child reads a snapshot
+    via its kickoff). No memory.
+    """
+    return list(QUERY_TOOL_DEFINITIONS_FOR_SEARCH_ROLE) + [
+        COMPRESS_LAST_RESULT_TOOL_DEFINITION,
+        MARK_STEP_DONE_TOOL_DEFINITION,
+        DONE_TOOL_DEFINITION,
+    ]
+
+
+def build_act_child_tool_definitions(
+    agent,
+    suites: List[str],
+    has_platform: bool = False,
+    mcp_suites: Optional[Dict[str, Dict]] = None,
+) -> List[Dict[str, Any]]:
+    """Tools an act sub-agent receives at spawn.
+
+    Filtered to the named suites only. Plus per-burst scaffolding.
+    Suite resolution mirrors `_get_suite_tools` / `_build_tool_suite_registry`.
+    """
+    registry = _build_tool_suite_registry(agent, has_platform=has_platform)
+    seen: set = set()
+    tools: List[Dict[str, Any]] = []
+    for suite_name in suites or []:
+        suite_tools = _get_suite_tools(suite_name, registry, mcp_suites)
+        for td in suite_tools:
+            name = td.get("name")
+            if name and name not in seen:
+                seen.add(name)
+                tools.append(td)
+    # Scaffolding shared by every child burst.
+    for td in (
+        COMPRESS_LAST_RESULT_TOOL_DEFINITION,
+        MARK_STEP_DONE_TOOL_DEFINITION,
+        DONE_TOOL_DEFINITION,
+    ):
+        if td.get("name") not in seen:
+            seen.add(td.get("name"))
+            tools.append(td)
+    return tools
+
+
+# Backward-compat shim. Older callers import build_unified_tool_definitions;
+# routes them to the per-role builders. Returns the parent's tool list for
+# the parent's request and lets sub-agents fetch their own at spawn.
+def build_unified_tool_definitions(
+    agent,
+    has_platform: bool = False,
+) -> List[Dict[str, Any]]:
+    """Deprecated. Returns parent's tool definitions only.
+
+    Kept so existing import sites don't break. Sub-agents should call
+    `build_search_child_tool_definitions()` /
+    `build_act_child_tool_definitions(agent, suites)` at spawn time.
+    """
+    return build_parent_tool_definitions(agent)
+
+
 # ── Tool suites (Think/Act mode) ─────────────────────────────────────────
 
 def _build_tool_suite_registry(agent, has_platform: bool = False) -> Dict[str, Dict]:
@@ -3112,6 +3481,41 @@ def _get_suite_tools(suite_name: str, suite_registry: Dict, mcp_suites: Dict = N
 
 # ── Tool executor ────────────────────────────────────────────────────────
 
+_PARENT_SUB_INLINE_TOOL_RESULT_CAP_CHARS = 20_000
+
+
+def _cap_inline_tool_result(body: str, fallback_hint: str = "") -> str:
+    """Cap large tool_result bodies in parent_sub_mode so a single call
+    can't blow the search child's context budget.
+
+    Without this, a query for 300 pages returned ~150k tokens inline.
+    Four such queries in one assistant turn (the model emits parallel
+    tool_use blocks) overflowed the 145k available context, the trimmer
+    dropped the whole assistant/tool_result pair to recover, and the
+    model re-ran the queries on the next turn — infinite loop.
+
+    Cap at 20k chars (~5k tokens) per call. With 4 parallel tool calls
+    that's ~80k chars / 20k tokens — fits comfortably. The note tells
+    the model how to recover (narrower window, compress_last_result, or
+    a more specific query).
+    """
+    if len(body) <= _PARENT_SUB_INLINE_TOOL_RESULT_CAP_CHARS:
+        return body
+    truncated_at = _PARENT_SUB_INLINE_TOOL_RESULT_CAP_CHARS
+    note_lines = [
+        "",
+        f"--- TRUNCATED at {truncated_at:,} chars (full body was "
+        f"{len(body):,} chars) ---",
+        "Options to get the missing data:",
+        "  • Narrow the query (smaller days_back, more specific keywords).",
+        "  • Call `compress_last_result` to summarize what you have, "
+        "then run the next query.",
+    ]
+    if fallback_hint:
+        note_lines.append(f"  • {fallback_hint}")
+    return body[:truncated_at] + "\n".join(note_lines)
+
+
 class ToolExecutor:
     """Routes tool calls to Promaia backends."""
 
@@ -3158,6 +3562,73 @@ class ToolExecutor:
         self._current_msg_idx = 0
         # Per-tool counters for deterministic act-burst shelf naming.
         self._tool_counters: Dict[str, int] = {}
+        # Parent / Sub re-arch — current role of this executor. One of
+        # "parent", "search", "act". Defaults to "parent" so legacy code
+        # paths (which never set this) behave unchanged. The role is used
+        # by `_role_check_or_error` to gate tool dispatch when the parent-
+        # sub feature flag is on.
+        self.current_role: str = "parent"
+        # Snapshot of the unified tool list this executor is dispatching
+        # against. Set by the agentic loop on entry so the role allowlist
+        # for the "act" role can be computed without re-importing the tool
+        # registry. None when not in parent-sub mode.
+        self._role_unified_tools: Optional[List[Dict[str, Any]]] = None
+        # Phase 2 — stack of tool_result block locations from the
+        # previous assistant turn that are still eligible for
+        # `compress_last_result`. Each entry is (message_index, content
+        # _block_index). The agent can call compress_last_result N times
+        # in a single turn to compress N parallel tool_results from the
+        # prior turn — needed because the model often emits 4 parallel
+        # query tool_use blocks at once. Each compress pops one entry.
+        self._pending_compressible_stack: List[tuple] = []
+
+    def _role_check_or_error(self, tool_name: str) -> Optional[str]:
+        """If `tool_name` is not in `self.current_role`'s allowlist, return
+        an error tool_result string. Returns None when the call is allowed.
+
+        Permissive when `_role_unified_tools` is None (legacy mode): every
+        tool is allowed. Only enforces the role contract when the agentic
+        loop has stamped the unified tool list.
+        """
+        if self._role_unified_tools is None:
+            return None
+        allowed = role_tool_allowlist(self.current_role, self._role_unified_tools)
+        if tool_name in allowed:
+            return None
+        # Sentinel sub-strings carry through the agentic loop; treat as
+        # control flow even when the role wouldn't normally permit them.
+        if tool_name in {"act", "search", "done", "mark_step_done"}:
+            # Still gated — but the error message tells the model how to
+            # escalate. For the disallowed ones above, the standard
+            # message is already informative enough.
+            pass
+        allowed_list = ", ".join(sorted(allowed)) or "(none)"
+        return (
+            f"ERROR: `{tool_name}` is not available in `{self.current_role}` role. "
+            f"Allowed: {allowed_list}. "
+            f"If you need to escalate to the parent, call `done(report=\"…\")`."
+        )
+
+    def clone_for_child(self) -> "ToolExecutor":
+        """Return a fresh ToolExecutor for a child (act subagent) session.
+
+        Carries the parent's notepad forward (notes are the only thing that
+        crosses the parent/child boundary, per conversation_mode_child.md).
+        Children start with EMPTY sources — per design they don't use
+        shelving; their context-trim logic handles size growth.
+
+        The child's connectors, sandbox, and counters are fresh so child
+        operations don't race with the parent.
+        """
+        child = ToolExecutor(
+            self.agent,
+            self.workspace,
+            platform=self.platform,
+            channel_context=self.channel_context,
+        )
+        # Notepad is the persistent thread between parent and children.
+        child._notepad = self._notepad
+        return child
         # External MCP server connections
         self._mcp_client = None        # McpClient instance
         self._mcp_tool_map = {}        # namespaced_name → (server_name, original_name)
@@ -3165,6 +3636,14 @@ class ToolExecutor:
     async def execute(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         """Execute a tool and return a plain text result."""
         try:
+            # Parent / Sub re-arch — role gate. When the agentic loop has
+            # stamped the unified tool list on this executor, refuse calls
+            # outside the current role's allowlist by returning an
+            # informative error tool_result. The model can self-correct on
+            # the next iteration.
+            role_err = self._role_check_or_error(tool_name)
+            if role_err is not None:
+                return role_err
             # Query tools
             if tool_name == "query_sql":
                 return await self._query_sql(tool_input)
@@ -3284,6 +3763,22 @@ class ToolExecutor:
                 instructions = tool_input.get("instructions", [])
                 import json as _json_act
                 return f"__ACT__:{','.join(suites)}|{_json_act.dumps(instructions)}"
+            elif tool_name == "search":
+                # Parent / Sub re-arch — sentinel. The agentic loop in the
+                # parent intercepts this prefix and dispatches to the
+                # search-child spawn callback. Children ought never reach
+                # here because the role gate above blocks `search` for
+                # non-parent roles.
+                instructions = tool_input.get("instructions", [])
+                import json as _json_search
+                return f"__SEARCH__:{_json_search.dumps(instructions)}"
+            elif tool_name == "compress_last_result":
+                # Parent / Sub re-arch — sentinel. The agentic loop
+                # intercepts this and rewrites the previous tool_result
+                # body in-place (one-shot, see _pending_compressible).
+                summary = tool_input.get("summary", "") or ""
+                import json as _json_compress
+                return f"__COMPRESS__:{_json_compress.dumps({'summary': summary})}"
             elif tool_name == "mark_step_done":
                 step = tool_input.get("step", 0)
                 return f"__MARK_STEP__:{step}"
@@ -3385,10 +3880,23 @@ class ToolExecutor:
         query = tool_input.get("query", "")
         if not query:
             return "Error: missing 'query' parameter"
+        days_back = tool_input.get("days_back")
+        if not isinstance(days_back, int) or days_back < 1:
+            return (
+                "Error: missing or invalid 'days_back' parameter. "
+                "Specify how many days back to search (e.g. 7, 30, 365). "
+                "This is required so queries stay scoped and the context "
+                "window stays lean."
+            )
+
+        # Augment the NL query with the date scope so the SQL generator
+        # produces a date-filtered query. The generator is NL-driven so a
+        # natural-sounding constraint here lands as a WHERE clause.
+        scoped_query = f"{query} (within the last {days_back} days)"
 
         result = await asyncio.to_thread(
             process_natural_language_to_content,
-            nl_prompt=query,
+            nl_prompt=scoped_query,
             workspace=self.workspace,
             verbose=False,
             skip_confirmation=True,
@@ -3410,7 +3918,20 @@ class ToolExecutor:
         total_pages = sum(len(pages) for pages in loaded_content.values() if pages)
         formatted = format_context_data(loaded_content)
 
-        # Store as context source so results persist across turns
+        # Parent / Sub re-arch: search children get raw data inline as
+        # the tool_result so it lives in the message history (which is
+        # cacheable). Auto-shelving rendered into the legacy postfix /
+        # system-prompt path which broke cache every iteration. Children
+        # use `compress_last_result` if a result is too big to keep.
+        if self._role_unified_tools is not None:
+            inline_parts = [f"Found {total_pages} results."]
+            if metadata and metadata.get('generated_query'):
+                inline_parts.append(f"SQL: {metadata['generated_query']}")
+            inline_parts.append("")
+            inline_parts.append(formatted)
+            return _cap_inline_tool_result("\n".join(inline_parts))
+
+        # Legacy: store as context source so results persist across turns
         source_name = f"sql_{query[:30].strip().replace(' ', '_').lower()}"
         self._sources[source_name] = {
             "content": formatted,
@@ -3437,13 +3958,25 @@ class ToolExecutor:
         query = tool_input.get("query", "")
         if not query:
             return "Error: missing 'query' parameter"
+        days_back = tool_input.get("days_back")
+        if not isinstance(days_back, int) or days_back < 1:
+            return (
+                "Error: missing or invalid 'days_back' parameter. "
+                "Specify how many days back to search (e.g. 7, 30, 365). "
+                "This is required so queries stay scoped and the context "
+                "window stays lean."
+            )
 
         top_k = tool_input.get("top_k", 50)
         min_similarity = tool_input.get("min_similarity", 0.2)
 
+        # Augment the embedded query with the date scope. Embedding match
+        # is fuzzy on dates, so we ALSO post-filter results below.
+        scoped_query = f"{query} (within the last {days_back} days)"
+
         loaded_content = await asyncio.to_thread(
             process_vector_search_to_content,
-            vs_prompt=query,
+            vs_prompt=scoped_query,
             workspace=self.workspace,
             n_results=top_k,
             min_similarity=min_similarity,
@@ -3451,13 +3984,46 @@ class ToolExecutor:
             skip_confirmation=True,
         )
 
+        # Post-filter by created_time (best-effort — entries without a
+        # parseable date pass through unfiltered so we don't drop legit
+        # results that happen to lack timestamps).
+        if loaded_content:
+            from datetime import datetime, timedelta, timezone
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+            filtered: Dict[str, list] = {}
+            for db_name, pages in loaded_content.items():
+                kept = []
+                for p in pages or []:
+                    created = p.get("created_time") or p.get("created") or ""
+                    if not created:
+                        kept.append(p)
+                        continue
+                    try:
+                        ts = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        if ts >= cutoff:
+                            kept.append(p)
+                    except Exception:
+                        kept.append(p)
+                if kept:
+                    filtered[db_name] = kept
+            loaded_content = filtered
+
         if not loaded_content:
             return "Semantic search returned no results."
 
         total_pages = sum(len(pages) for pages in loaded_content.values() if pages)
         formatted = format_context_data(loaded_content)
 
-        # Store as context source so results persist across turns
+        # Parent / Sub re-arch: return inline for search children. See
+        # _query_sql for rationale.
+        if self._role_unified_tools is not None:
+            return _cap_inline_tool_result(
+                f"Found {total_pages} semantically similar results.\n\n{formatted}"
+            )
+
+        # Legacy: store as context source so results persist across turns
         source_name = f"search_{query[:30].strip().replace(' ', '_').lower()}"
         self._sources[source_name] = {
             "content": formatted,
@@ -3488,9 +4054,19 @@ class ToolExecutor:
             if agent_id and agent_id != "terminal-user":
                 database = f"{agent_id.replace('-', '_')}_journal"
 
-        days = tool_input.get("days")
-        if days == 0:
-            days = None
+        # Phase 5 — days_back is required (matches query_sql / query_vector).
+        # Accept legacy `days` alias for stored conversations.
+        days = tool_input.get("days_back")
+        if days is None:
+            days = tool_input.get("days")
+        if not isinstance(days, int) or days < 1:
+            return (
+                "Error: missing or invalid 'days_back' parameter. "
+                "query_source requires a positive integer days_back to "
+                "scope the load. Use 1-7 for recent context, 7-30 for "
+                "short history; >30 only when the user explicitly asks "
+                "for older content."
+            )
 
         db_config = get_database_config(database, self.workspace)
         if not db_config:
@@ -3505,7 +4081,19 @@ class ToolExecutor:
         time_range = f"last {days} days" if days else "all time"
         formatted = format_context_data({database: pages})
 
-        # Store as context source instead of returning full content
+        # Parent / Sub re-arch: return inline for search children. See
+        # _query_sql for rationale.
+        if self._role_unified_tools is not None:
+            return _cap_inline_tool_result(
+                f"Loaded {len(pages)} pages from '{database}' ({time_range}).\n\n"
+                f"{formatted}",
+                fallback_hint=(
+                    f"This is the entire {database} database for this window — "
+                    f"narrow days_back if the cap is hit."
+                ),
+            )
+
+        # Legacy: store as context source instead of returning full content
         source_name = database.split(".")[-1] if "." in database else database
         self._sources[source_name] = {
             "content": formatted,
@@ -3662,6 +4250,10 @@ class ToolExecutor:
         dm_channel = await self.platform.open_dm(user_info["id"])
         if not dm_channel:
             return f"Error: could not open DM with {user_info['real_name'] or user_name}"
+
+        denied = self._check_output_channel_allowed(dm_channel)
+        if denied is not None:
+            return denied
 
         try:
             from promaia.agents.conversation_manager import (
@@ -5895,12 +6487,26 @@ class ToolExecutor:
             text = text[:MAX_CONTENT_CHARS] + "\n\n[Content truncated at 50,000 characters]"
             truncated = True
 
-        # Mount the body as a named context source. ON by default so the
-        # agent can read it right now; the trimmer will LRU it off when
-        # budget tightens. Name scheme mirrors `sql_…`, `search_…`, etc.
+        truncation_note = " (truncated)" if truncated else ""
+        header = f"# Web fetch: {url}\n\n"
+
+        # Parent / Sub re-arch: act children get the fetched body inline
+        # as the tool_result so they can actually read what they just
+        # fetched. Without this, the act child got back only a stub like
+        # "Fetched URL → source 'web_fetch_1' [ON]" and the body was
+        # shelved into _sources, which the postfix doesn't render in
+        # parent_sub_mode — so the data was effectively invisible.
+        if self._role_unified_tools is not None:
+            return _cap_inline_tool_result(
+                f"Fetched {url} → {len(text):,} chars{truncation_note}.\n\n"
+                f"{header}{text}"
+            )
+
+        # Legacy: shelf the body as a named context source. ON by default
+        # so the agent can read it right now; the trimmer will LRU it off
+        # when budget tightens. Name scheme mirrors `sql_…`, `search_…`.
         self._web_fetch_counter += 1
         source_name = f"web_fetch_{self._web_fetch_counter}"
-        header = f"# Web fetch: {url}\n\n"
         self._sources[source_name] = {
             "content": header + text,
             "on": True,
@@ -5911,7 +6517,6 @@ class ToolExecutor:
             "shelved_from_msg": self._current_msg_idx,
         }
 
-        truncation_note = " (truncated)" if truncated else ""
         return (
             f"Fetched {url} → {len(text):,} chars{truncation_note} → "
             f"source '{source_name}' [ON] @msg#{self._current_msg_idx}. "
@@ -7197,6 +7802,12 @@ class ToolExecutor:
                     connected = await self._mcp_client.connect_to_server(config)
                     if connected:
                         logger.info(f"MCP server connected: {name}")
+                        # Diff live tools against the user's last-reviewed
+                        # snapshot — never block on this; new/removed/changed
+                        # tools just get logged so the agent owner sees them
+                        # in the session log (Q10 working assumption: yes,
+                        # log at run-start in addition to the Q5c surface).
+                        await self._log_mcp_new_tools_at_connect(name)
                     else:
                         logger.warning(f"MCP server failed to connect: {name}")
                 except Exception as e:
@@ -7228,6 +7839,179 @@ class ToolExecutor:
         logger.info(f"Discovered {len(definitions)} MCP tools from external servers")
         return definitions
 
+    def _check_output_channel_allowed(self, channel_id: str) -> Optional[str]:
+        """Output-side channel gate.
+
+        Returns None if the agent is allowed to post to *channel_id*,
+        else an error string the caller surfaces back to the agent.
+
+        Delegates to AgentConfig.can_post_to_channel which handles the
+        full resolution order (output-flat-list → output-groups →
+        input-flat-list → input-groups → legacy-allow). is_default_agent
+        bypasses the gate entirely.
+        """
+        agent = self.agent
+        if agent is None:
+            return None
+
+        if getattr(agent, "is_default_agent", False):
+            return None
+
+        if hasattr(agent, "can_post_to_channel") and not agent.can_post_to_channel(channel_id):
+            return (
+                f"Permission denied: agent {getattr(agent, 'name', '?')!r} is "
+                f"not allowed to post to channel {channel_id!r}. Configure "
+                f"`allowed_output_channel_ids` (flat list) or "
+                f"`allowed_output_channel_groups` (DM / channel buckets) "
+                f"via `maia agents edit`."
+            )
+        return None
+
+    async def _log_mcp_new_tools_at_connect(self, server_name: str) -> None:
+        """Diff the freshly-connected server's tool list against the cached
+        last-reviewed snapshot and log any that have appeared/changed.
+
+        Cheap: we already hold an MCP session; one extra tools/list call.
+        Never raises into the connect path — this is a debugging signal,
+        not a permission gate. The actual gate runs at call time in
+        _execute_mcp_tool / _check_mcp_tool_allowed.
+        """
+        try:
+            from promaia.agents.mcp_tool_cache import (
+                CachedTool,
+                ServerCache,
+                load as _load_cache,
+                diff as _diff,
+            )
+            from datetime import datetime, timezone
+
+            protocol = (self._mcp_client.connected_servers or {}).get(server_name)
+            if protocol is None:
+                return
+            live = await protocol.list_tools() or []
+            live_cache = ServerCache(
+                server=server_name,
+                fetched_at=datetime.now(timezone.utc),
+                tools=[CachedTool.from_mcp_tool(t) for t in live],
+            )
+            snap = _load_cache(server_name)
+            if snap is None:
+                # First time we've seen this server — nothing to diff. The
+                # user will get a snapshot the next time they `agents edit`.
+                logger.info(
+                    "MCP server %s: %d tools available (no reviewed snapshot yet)",
+                    server_name,
+                    len(live_cache.tools),
+                )
+                return
+            d = _diff(snap, live_cache)
+            if d["added"]:
+                logger.warning(
+                    "MCP server %s has %d new tool(s) since last review: %s. "
+                    "These will be denied to non-default agents until reviewed via "
+                    "`maia agents edit`.",
+                    server_name,
+                    len(d["added"]),
+                    ", ".join(d["added"]),
+                )
+            if d["removed"]:
+                logger.info(
+                    "MCP server %s lost %d tool(s) since last review: %s",
+                    server_name,
+                    len(d["removed"]),
+                    ", ".join(d["removed"]),
+                )
+            if d["changed"]:
+                logger.info(
+                    "MCP server %s has %d tool(s) with changed input schemas: %s "
+                    "(Q5d schema-drift detection deferred — informational only)",
+                    server_name,
+                    len(d["changed"]),
+                    ", ".join(d["changed"]),
+                )
+        except Exception as e:
+            logger.debug("new-tools diff failed for %s (non-fatal): %s", server_name, e)
+
+    def _check_mcp_tool_allowed(self, server_name: str, tool_name: str) -> Optional[str]:
+        """Per-tool MCP permission gate.
+
+        Returns None if the call should proceed, else an error string
+        (which the caller surfaces back to the agent in place of the
+        tool result, so the agent sees and can react to the denial).
+
+        Decision order:
+        1. is_default_agent=True → bypass (allow-all). Currently maia.
+        2. mcp_tool_allowlist is None → legacy unmigrated agent;
+           allow-all but log a one-time warning.
+        3. server has no entry in allowlist → server is loaded but
+           none of its tools were granted; deny.
+        4. server entry is None → "all tools on this server" (rarely
+           used; lets users opt into a server wholesale).
+        5. server entry is a list → must contain tool_name.
+        Tool also has to be in the cached "last reviewed" snapshot;
+        if not, it's a new tool the user hasn't seen → deny + log.
+        """
+        agent = self.agent
+        if agent is None:
+            return None  # No agent context (e.g. ad-hoc CLI use); skip gate.
+
+        if getattr(agent, "is_default_agent", False):
+            return None
+
+        allowlist = getattr(agent, "mcp_tool_allowlist", None)
+        if allowlist is None:
+            # Unmigrated agent — log once per (server, tool) pair, allow.
+            log_key = f"_mcp_unmigrated_warned_{server_name}_{tool_name}"
+            if not getattr(self, log_key, False):
+                logger.warning(
+                    "Agent %r calls MCP tool %s.%s without mcp_tool_allowlist set "
+                    "— allowing under legacy backwards-compat. Run "
+                    "`maia agents migrate-permissions` to lock this down.",
+                    getattr(agent, "name", "?"),
+                    server_name,
+                    tool_name,
+                )
+                setattr(self, log_key, True)
+            return None
+
+        if server_name not in allowlist:
+            return (
+                f"Permission denied: agent {getattr(agent, 'name', '?')!r} is not "
+                f"granted access to MCP server {server_name!r}. Add it via "
+                f"`maia agents edit`."
+            )
+
+        granted = allowlist[server_name]
+        if granted is not None and tool_name not in granted:
+            # Distinguish "not yet granted" from "new tool since last review".
+            try:
+                from promaia.agents.mcp_tool_cache import load as _load_cache
+
+                snap = _load_cache(server_name)
+                if snap is not None and tool_name not in snap.tool_names:
+                    logger.warning(
+                        "Agent %r tried MCP tool %s.%s which is NEW since last "
+                        "review of %s. Treating as denied. Run `maia agents edit` "
+                        "to review.",
+                        getattr(agent, "name", "?"),
+                        server_name,
+                        tool_name,
+                        server_name,
+                    )
+                    return (
+                        f"Permission denied: tool {tool_name!r} on server "
+                        f"{server_name!r} is new since you last reviewed this "
+                        f"agent's permissions. Edit the agent to grant access."
+                    )
+            except Exception:
+                pass
+            return (
+                f"Permission denied: tool {tool_name!r} on server "
+                f"{server_name!r} is not in this agent's allow list."
+            )
+
+        return None
+
     async def _execute_mcp_tool(self, tool_name: str, tool_input: Dict) -> str:
         """Execute a tool on an external MCP server."""
         mapping = self._mcp_tool_map.get(tool_name)
@@ -7235,6 +8019,11 @@ class ToolExecutor:
             return f"Error: unknown MCP tool '{tool_name}'"
 
         server_name, original_name = mapping
+
+        denied = self._check_mcp_tool_allowed(server_name, original_name)
+        if denied is not None:
+            return denied
+
         protocol_client = self._mcp_client.connected_servers.get(server_name)
         if not protocol_client:
             return f"Error: MCP server '{server_name}' is not connected"
@@ -7536,6 +8325,29 @@ class ToolExecutor:
                 ids = tool_input["allowed_channel_ids"]
                 agent.allowed_channel_ids = ids if ids else None
                 changes.append("allowed_channel_ids")
+            if "allowed_output_channel_ids" in tool_input:
+                ids = tool_input["allowed_output_channel_ids"]
+                agent.allowed_output_channel_ids = ids if ids else None
+                changes.append("allowed_output_channel_ids")
+            if "allowed_channel_groups" in tool_input:
+                grp = tool_input["allowed_channel_groups"]
+                agent.allowed_channel_groups = grp if grp else None
+                # When the chat agent sets groups, clear the legacy flat list
+                # so the resolution order doesn't shadow what the user just
+                # asked for. Keeps behavior consistent with the CLI picker.
+                if grp:
+                    agent.allowed_channel_ids = None
+                changes.append("allowed_channel_groups")
+            if "allowed_output_channel_groups" in tool_input:
+                grp = tool_input["allowed_output_channel_groups"]
+                agent.allowed_output_channel_groups = grp if grp else None
+                if grp:
+                    agent.allowed_output_channel_ids = None
+                changes.append("allowed_output_channel_groups")
+            if "mcp_tool_allowlist" in tool_input:
+                al = tool_input["mcp_tool_allowlist"]
+                agent.mcp_tool_allowlist = al if al else None
+                changes.append("mcp_tool_allowlist")
 
             if not changes:
                 return "No fields to update were provided."
@@ -7656,6 +8468,18 @@ class ToolExecutor:
             if "allowed_channel_ids" in tool_input:
                 ids = tool_input["allowed_channel_ids"]
                 agent_config.allowed_channel_ids = ids if ids else None
+            if "allowed_output_channel_ids" in tool_input:
+                ids = tool_input["allowed_output_channel_ids"]
+                agent_config.allowed_output_channel_ids = ids if ids else None
+            if "allowed_channel_groups" in tool_input:
+                grp = tool_input["allowed_channel_groups"]
+                agent_config.allowed_channel_groups = grp if grp else None
+            if "allowed_output_channel_groups" in tool_input:
+                grp = tool_input["allowed_output_channel_groups"]
+                agent_config.allowed_output_channel_groups = grp if grp else None
+            if "mcp_tool_allowlist" in tool_input:
+                al = tool_input["mcp_tool_allowlist"]
+                agent_config.mcp_tool_allowlist = al if al else None
 
             # Validate
             errors = agent_config.validate()
@@ -8317,6 +9141,42 @@ def _sanitize_orphans_in_place(messages: list) -> None:
         )
 
 
+def _build_api_messages_with_postfix(
+    messages: List[Dict],
+    postfix: str,
+) -> List[Dict]:
+    """Return a copy of ``messages`` with ``postfix`` appended as a trailing
+    text block on the last message's content.
+
+    Does not mutate ``messages`` or any of its members. The original
+    ``internal_messages`` stays clean so the next iteration recomposes the
+    postfix from fresh shelf state.
+
+    The postfix is the volatile per-iteration content (context shelf
+    index, ON shelf bodies, budget note, mode-specific markers). Keeping
+    it OUT of the system prompt is what lets the system prompt stay
+    cacheable across iterations.
+
+    Anthropic accepts a trailing ``text`` block after ``tool_result``
+    blocks in a single user message, so this works whether the last
+    message is the original user query or a tool-results message between
+    assistant turns.
+    """
+    if not postfix or not messages:
+        return messages
+    out = list(messages)
+    last = dict(out[-1])
+    content = last.get("content", "")
+    if isinstance(content, str):
+        new_content = [{"type": "text", "text": content}] if content else []
+    else:
+        new_content = list(content)
+    new_content.append({"type": "text", "text": postfix})
+    last["content"] = new_content
+    out[-1] = last
+    return out
+
+
 def _render_web_search_results(result_list: list) -> str:
     """Flatten a list of web_search_tool_result entries into readable text."""
     parts: List[str] = []
@@ -8479,6 +9339,11 @@ async def agentic_turn(
     suite_registry: Optional[Dict] = None,
     mcp_suites: Optional[Dict] = None,
     model: str = "claude-sonnet-4-6",
+    is_child_mode: bool = False,
+    child_act_suites: Optional[List[str]] = None,
+    child_act_instructions: Optional[List[str]] = None,
+    spawn_child: Optional[Callable] = None,
+    parent_sub_mode: bool = False,
 ) -> AgenticTurnResult:
     """
     Run a self-contained agentic turn with tool use.
@@ -8530,6 +9395,8 @@ async def agentic_turn(
     all_tool_calls = []
     total_input_tokens = 0
     total_output_tokens = 0
+    total_cache_read_tokens = 0
+    total_cache_creation_tokens = 0
     text_parts = []
     _initial_msg_count = len(internal_messages)  # Track where tool messages start
 
@@ -8545,8 +9412,32 @@ async def agentic_turn(
     act_tool_use_ids: List[str] = []  # tool_use ids produced in the current act burst (retained for future diagnostics)
     act_start_iteration: Optional[int] = None  # iteration at which act mode began
     act_start_msg_idx: Optional[int] = None    # index into internal_messages at act entry; done() squashes from here
-    use_think_act = suite_registry is not None  # Feature flag: only use Think/Act if registry provided
+    # Parent / Sub re-arch — skip the legacy Think/Act tool-list rebuild
+    # when parent_sub_mode is on. Tools come in pre-shaped per role
+    # (parent: 4, search child: 6, act child: per-suite); the loop must
+    # not override them.
+    use_think_act = (suite_registry is not None) and not parent_sub_mode
     _retried_for_empty_text = False  # One-shot: nudge model to produce text if end_turn had none
+
+    # Child (act subagent) startup: skip Think mode entirely, enter Act mode
+    # immediately with the suites + instructions the parent passed in. The
+    # done() handler exits via report instead of squashing because there's
+    # no parent session to squash into.
+    #
+    # In parent_sub_mode children stay role-marked at the executor level
+    # (current_role="search"/"act") and don't enter the legacy act_mode
+    # state machine. Their `tools=` is what the spawn closure passed.
+    if is_child_mode and not parent_sub_mode:
+        act_mode = True
+        act_suites = list(child_act_suites or [])
+        act_instructions = list(child_act_instructions or [])
+        act_step_status = ["pending"] * len(act_instructions)
+        act_start_iteration = 0
+        act_start_msg_idx = 0  # nominal — no squash will happen for children
+    elif is_child_mode and parent_sub_mode:
+        # Track instructions for `mark_step_done` UX; don't flip act_mode.
+        act_instructions = list(child_act_instructions or [])
+        act_step_status = ["pending"] * len(act_instructions)
 
     for iteration in range(max_iterations):
         # Stamp the current iteration on the executor so source-management
@@ -8554,26 +9445,33 @@ async def agentic_turn(
         if tool_executor is not None:
             tool_executor._current_iteration = iteration
 
-        budget_note = (
-            f"\n\n[Tool budget: {max_iterations - iteration}/{max_iterations} "
+        # Iteration-budget marker — volatile per-iteration. Kept out of the
+        # cached system prompt; emitted via the postfix instead (Think/Act
+        # paths). Legacy mode appends it directly to the system prompt for
+        # backwards compatibility.
+        budget_marker = (
+            f"[Tool budget: {max_iterations - iteration}/{max_iterations} "
             f"iterations remaining]"
         )
 
         # ── Build effective prompt and tool list per mode ──────────────
-        # base_prompt = everything EXCEPT the active-source content block.
-        # The active-source block is appended via _compose_prompt() so the
-        # context trimmer can rebuild after LRU-off'ing sources.
+        # In Think/Act paths: base_prompt is the STABLE system prompt
+        # (cacheable). Volatile content (shelves, budget, act state) goes
+        # into a postfix appended to the last user message at API-call time
+        # so the system prompt can stay byte-stable across iterations.
         base_prompt = system_prompt
+        # Mode-specific volatile additions for the postfix (Think/Act only).
+        postfix_extras: List[str] = []
 
-        if use_think_act and not act_mode:
-            # THINK MODE: suite index first, then context index + active content
+        if parent_sub_mode:
+            # Parent / Sub re-arch — tools came in pre-shaped per role.
+            # No suite-index append: the prompt template already has its
+            # own brief `{suite_index}` substitution.
+            iteration_tools = tools
+        elif use_think_act and not act_mode:
+            # THINK MODE — suite index in system (stable); shelves go to postfix.
             _ws = tool_executor.workspace if tool_executor else ""
             base_prompt += "\n\n" + _build_suite_index(suite_registry, mcp_suites, workspace=_ws)
-
-            if tool_executor and hasattr(tool_executor, 'build_context_index'):
-                ctx_index = tool_executor.build_context_index()
-                if ctx_index:
-                    base_prompt += "\n\n" + ctx_index
 
             # Think mode tools: query + notepad + memory + context + workflows (read) + act
             iteration_tools = list(QUERY_TOOL_DEFINITIONS)
@@ -8589,17 +9487,17 @@ async def agentic_turn(
             iteration_tools.append(ACT_TOOL_DEFINITION)
 
         elif use_think_act and act_mode:
-            # ACT MODE: no context, no suite index — just notes + memory + loaded suites + instructions
-            budget_note += f"\n\n[ACT MODE: {', '.join(act_suites)}. Call done() when finished.]"
-
-            # Inject instructions checklist into the prompt
+            # ACT MODE — act marker + instructions go to postfix (volatile).
+            postfix_extras.append(
+                f"[ACT MODE: {', '.join(act_suites)}. Call done() when finished.]"
+            )
             if act_instructions:
-                instr_lines = ["\n\n## Instructions\n"]
+                instr_lines = ["## Instructions\n"]
                 for i, step in enumerate(act_instructions):
                     status = act_step_status[i] if i < len(act_step_status) else "pending"
                     checkbox = "[x]" if status == "done" else "[ ]"
                     instr_lines.append(f"{i+1}. {checkbox} {step}")
-                budget_note += "\n".join(instr_lines)
+                postfix_extras.append("\n".join(instr_lines))
 
             # Act mode tools: loaded suites + notepad + memory + mark_step_done + done
             # Dedupe by tool name: suites can overlap (e.g. "google" aggregates
@@ -8618,44 +9516,87 @@ async def agentic_turn(
                     _add_tool(td)
             _add_tool(NOTEPAD_TOOL_DEFINITION)
             _add_tool(MEMORY_TOOL_DEFINITION)
-            _add_tool(CONTEXT_TOOL_DEFINITION)
+            # Children don't use shelves (per subagent design — context
+            # trimming alone handles size growth) so they don't get the
+            # context tool either.
+            if not is_child_mode:
+                _add_tool(CONTEXT_TOOL_DEFINITION)
             if act_instructions:
                 _add_tool(MARK_STEP_DONE_TOOL_DEFINITION)
             _add_tool(DONE_TOOL_DEFINITION)
 
         else:
-            # Legacy mode (no suite registry): all tools, all context
+            # Legacy mode (no suite registry): all tools, all context.
+            # Postfix split is intentionally not applied here — keep the
+            # original shape for backwards compatibility.
             iteration_tools = tools
             if tool_executor and hasattr(tool_executor, 'build_context_index'):
                 ctx_index = tool_executor.build_context_index()
                 if ctx_index:
                     base_prompt += "\n\n" + ctx_index
 
-        # Compose final prompt = base + active-source block + budget_note.
-        # The active-source block is recomputed from current _sources state
-        # so it reflects post-LRU shelving when called from the trimmer.
+        # Compose system prompt for the trimmer.
+        # - Think/Act: just base_prompt (stable, cacheable). Shelves and
+        #   budget marker get injected via the postfix on the last message.
+        # - Legacy: base + active source content + budget marker (old shape).
         def _compose_prompt() -> str:
+            # parent_sub_mode keeps the system stable across iterations.
+            # Budget marker and any volatile content go into the postfix
+            # on the last message (see _build_postfix). Without this,
+            # the budget marker changes every iteration and breaks cache.
+            if use_think_act or parent_sub_mode:
+                return base_prompt
             active = ""
-            # Note: in act mode, build_active_source_content returns "" because
-            # _sources_muted is True — preserved automatically.
             if tool_executor and hasattr(tool_executor, "build_active_source_content"):
                 active = tool_executor.build_active_source_content() or ""
             parts = [base_prompt]
             if active:
                 parts.append(active)
-            return "\n\n".join(parts) + budget_note
+            return "\n\n".join(parts) + "\n\n" + budget_marker
+
+        # Build the per-iteration postfix string (Think/Act only).
+        # Recomputed AFTER the trimmer returns so it reflects any LRU-off
+        # toggles the trimmer applied to _sources.
+        def _build_postfix() -> str:
+            # Parent / Sub re-arch — no shelves, no act-mode markers.
+            # Only the budget marker so the model can pace itself.
+            if parent_sub_mode:
+                return budget_marker
+            if not use_think_act:
+                return ""
+            parts: List[str] = []
+            if tool_executor and hasattr(tool_executor, "build_context_index"):
+                idx = tool_executor.build_context_index()
+                if idx:
+                    parts.append(idx)
+            if tool_executor and hasattr(tool_executor, "build_active_source_content"):
+                active = tool_executor.build_active_source_content() or ""
+                if active:
+                    parts.append(active)
+            parts.extend(postfix_extras)
+            parts.append(budget_marker)
+            return "\n\n".join(parts)
 
         effective_prompt = _compose_prompt()
 
         from promaia.agents.context_trimmer import trim_context_to_fit
+        # In Think/Act paths the system has no shelf content, so a rebuild
+        # callback would be a no-op — pass None. Legacy mode still needs it
+        # because shelves remain in the system there.
+        rebuild_cb = None if (use_think_act or parent_sub_mode) else _compose_prompt
         trimmed_system, internal_messages = await trim_context_to_fit(
             effective_prompt,
             internal_messages,
             tools=iteration_tools,
             tool_executor=tool_executor,
             current_iteration=iteration,
-            rebuild_system_prompt=_compose_prompt,
+            rebuild_system_prompt=rebuild_cb,
         )
+
+        # Build the postfix AFTER trimming so it reflects any sources the
+        # trimmer toggled off.
+        postfix_text = _build_postfix()
+        api_messages = _build_api_messages_with_postfix(internal_messages, postfix_text)
 
         # Log the effective prompt (first iteration and on mode switches)
         if iteration == 0:
@@ -8666,21 +9607,93 @@ async def agentic_turn(
                 log_dir.mkdir(parents=True, exist_ok=True)
                 ts = _dt_log.datetime.now().strftime("%Y%m%d-%H%M%S")
                 log_path = log_dir / f"{ts}_agentic_prompt.md"
-                log_path.write_text(trimmed_system)
+                # Log the system + a representation of the postfix so the
+                # full picture survives even with the new split.
+                log_body = trimmed_system
+                if postfix_text:
+                    log_body += "\n\n---\n# POSTFIX (injected on last message)\n\n" + postfix_text
+                log_path.write_text(log_body)
                 logger.info(f"Agentic prompt logged to {log_path}")
             except Exception as log_err:
                 logger.debug(f"Failed to log agentic prompt: {log_err}")
 
-        # Build API call kwargs
+        # Build API call kwargs.
+        # System is sent as a single content block with cache_control so
+        # Anthropic caches the (now-stable) system prompt across iterations.
+        # The last tool definition also gets cache_control so the tools
+        # array is cached too — second cache breakpoint, covers the whole
+        # tools list before it.
+        #
+        # Parent / Sub re-arch — when PROMAIA_PARENT_SUB_MODE is on we
+        # use the 1-hour cache TTL beta. Cache writes cost 2× input
+        # (vs 1.25× default) but reads stay 0.1×; net win for long
+        # bursts where parent waits >5 minutes while a sub-agent runs.
+        # Rolling bp3 is added on the last completed assistant message
+        # so [system+tools+history] is fully cached across iterations.
         from promaia.ai.models import resolve_anthropic_model_id
+        import os as _os_cache
+        _ps_cache_on = _os_cache.environ.get("PROMAIA_PARENT_SUB_MODE", "").lower() in (
+            "1", "true", "yes", "on"
+        )
+        _cache_marker: Dict[str, Any] = {"type": "ephemeral"}
+        if _ps_cache_on:
+            _cache_marker["ttl"] = "1h"
+        system_blocks = [
+            {
+                "type": "text",
+                "text": trimmed_system,
+                "cache_control": dict(_cache_marker),
+            }
+        ]
         api_kwargs = dict(
             model=f"{prefix}{resolve_anthropic_model_id(model)}",
-            system=trimmed_system,
-            messages=internal_messages,
+            system=system_blocks,
+            messages=api_messages,
             max_tokens=4096,
         )
         if iteration_tools:
-            api_kwargs["tools"] = iteration_tools
+            # Copy the list and tag the last tool with cache_control. The
+            # marker on the last block caches everything before it in the
+            # tools array.
+            cached_tools = list(iteration_tools)
+            last_tool = dict(cached_tools[-1])
+            last_tool["cache_control"] = dict(_cache_marker)
+            cached_tools[-1] = last_tool
+            api_kwargs["tools"] = cached_tools
+
+        # Rolling bp3 — tag the last block of the most-recent completed
+        # assistant message so [system+tools+history] is cached up to
+        # that point. Only in parent_sub_mode (legacy paths use shelves
+        # postfix and don't benefit from a third stable breakpoint).
+        # cache_control is request-scoped metadata, not part of the
+        # message — so we copy api_messages before mutating to make
+        # sure internal_messages stays clean (when postfix is empty,
+        # _build_api_messages_with_postfix returns its input directly).
+        if _ps_cache_on and api_messages:
+            api_messages = list(api_messages)
+            for _idx in range(len(api_messages) - 1, -1, -1):
+                _msg = api_messages[_idx]
+                if _msg.get("role") != "assistant":
+                    continue
+                _content = _msg.get("content")
+                if not isinstance(_content, list) or not _content:
+                    break
+                last_block = dict(_content[-1])
+                if "cache_control" not in last_block:
+                    last_block["cache_control"] = dict(_cache_marker)
+                _content_copy = list(_content[:-1]) + [last_block]
+                _msg_copy = dict(_msg)
+                _msg_copy["content"] = _content_copy
+                api_messages[_idx] = _msg_copy
+                break
+            api_kwargs["messages"] = api_messages
+
+        # 1-hour TTL beta header. Anthropic's SDK accepts extra_headers
+        # as a kwarg on messages.create.
+        if _ps_cache_on:
+            api_kwargs["extra_headers"] = {
+                "anthropic-beta": "extended-cache-ttl-2025-04-11",
+            }
 
         # Defensive guard: a tool_result in message history with no preceding
         # tool_use is a 400 ("unexpected tool_use_id") from Anthropic. The
@@ -8713,6 +9726,8 @@ async def agentic_turn(
                 iterations_used=iteration + 1,
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
+                cache_read_tokens=total_cache_read_tokens,
+                cache_creation_tokens=total_cache_creation_tokens,
                 plan=plan,
             )
         except Exception as api_err:
@@ -8777,6 +9792,8 @@ async def agentic_turn(
                         iterations_used=iteration + 1,
                         input_tokens=total_input_tokens,
                         output_tokens=total_output_tokens,
+                        cache_read_tokens=total_cache_read_tokens,
+                        cache_creation_tokens=total_cache_creation_tokens,
                         plan=plan,
                     )
             else:
@@ -8786,6 +9803,22 @@ async def agentic_turn(
         if hasattr(response, 'usage'):
             total_input_tokens += response.usage.input_tokens
             total_output_tokens += response.usage.output_tokens
+            # Cache telemetry — measure whether the postfix split is
+            # actually realizing prompt-cache wins. cache_read_input_tokens
+            # are billed at ~10% of normal input rate.
+            cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
+            cache_create = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+            total_cache_read_tokens += cache_read
+            total_cache_creation_tokens += cache_create
+            if cache_read or cache_create:
+                total_in = response.usage.input_tokens + cache_read + cache_create
+                ratio = (cache_read / total_in * 100) if total_in else 0
+                logger.info(
+                    f"[agentic.cache] iter={iteration} "
+                    f"input={response.usage.input_tokens} "
+                    f"cache_read={cache_read} cache_create={cache_create} "
+                    f"hit_ratio={ratio:.0f}%"
+                )
 
         # Separate text and tool_use blocks
         text_parts = []
@@ -8898,6 +9931,8 @@ async def agentic_turn(
                 iterations_used=iteration + 1,
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
+                cache_read_tokens=total_cache_read_tokens,
+                cache_creation_tokens=total_cache_creation_tokens,
                 plan=plan,
                 history_messages=new_msgs,
             )
@@ -8948,6 +9983,7 @@ async def agentic_turn(
             # returned a stub — shelving the stub a second time is wasteful.
             if (
                 act_mode
+                and not is_child_mode  # children don't use shelves
                 and tool_use.name not in _CONTROL_TOOL_NAMES
                 and tool_use.name not in _SELF_SHELVING_TOOL_NAMES
                 and isinstance(result_text, str)
@@ -8983,51 +10019,215 @@ async def agentic_turn(
                     suite_names = [s.strip() for s in suites_part.split(",")]
                     try:
                         import json as _json_parse
-                        act_instructions = _json_parse.loads(instructions_json)
-                        act_step_status = ["pending"] * len(act_instructions)
+                        parsed_instructions = _json_parse.loads(instructions_json)
                     except Exception:
-                        act_instructions = []
-                        act_step_status = []
+                        parsed_instructions = []
                 else:
                     suite_names = [s.strip() for s in payload.split(",")]
-                    act_instructions = []
-                    act_step_status = []
-                act_mode = True
-                act_suites = suite_names
-                act_tool_use_ids = []  # fresh burst
-                act_start_iteration = iteration
-                # Point at the assistant message that contains this act()
-                # tool_use. Squashing from this index on done() removes the
-                # entering-act assistant + every subsequent burst message,
-                # so no act() tool_use is left orphaned without its paired
-                # tool_result.
-                act_start_msg_idx = len(internal_messages) - 1
-                # Mute pre-burst context (preserves individual on/off states).
-                # Shelves created from this iteration onward stay visible to
-                # the act agent via the _act_start_iteration filter.
-                if tool_executor:
-                    tool_executor._sources_muted = True
-                    tool_executor._act_start_iteration = iteration
-                    tool_executor._tool_counters = {}  # fresh burst namespace
-                instr_count = f" {len(act_instructions)} steps." if act_instructions else ""
-                result_text = f"Act mode. Suites loaded: {', '.join(suite_names)}.{instr_count} Context muted. Follow your instructions."
-                logger.info(f"[think/act] Entered Act mode with suites: {suite_names}, instructions: {len(act_instructions)} steps")
-                # Fire plan step callback for UX
-                if act_instructions and on_tool_activity:
+                    parsed_instructions = []
+
+                # Subagent mode: instead of flipping this session into Act
+                # mode in place, spawn a fresh child session and await its
+                # report. The act() call becomes a tool that takes (suites,
+                # instructions) and returns a report string. The parent
+                # never enters Act mode itself.
+                #
+                # Phase 3 — pass parent's history (excluding the in-flight
+                # assistant message that contains this tool_use) so the
+                # child inherits the conversational prefix. Cache impact:
+                # child's first iteration hits the parent's prefix cache.
+                if spawn_child is not None:
+                    parent_history_snapshot = internal_messages[:-1]
                     try:
-                        await on_tool_activity(
-                            tool_name="__plan_step__",
-                            tool_input={"step": 1, "total": len(act_instructions), "steps": act_instructions},
-                            completed=False,
+                        child_result = await spawn_child(
+                            role="act",
+                            suites=suite_names,
+                            instructions=parsed_instructions,
+                            parent_tool_use_id=tool_use.id,
+                            parent_messages=parent_history_snapshot,
                         )
-                    except Exception:
-                        pass
+                        # Roll up child token usage into parent totals so
+                        # the parent's accounting reflects the full cost.
+                        total_input_tokens += getattr(child_result, "input_tokens", 0) or 0
+                        total_output_tokens += getattr(child_result, "output_tokens", 0) or 0
+                        total_cache_read_tokens += getattr(child_result, "cache_read_tokens", 0) or 0
+                        total_cache_creation_tokens += getattr(child_result, "cache_creation_tokens", 0) or 0
+                        result_text = child_result.response_text or "(child returned no report)"
+                        # Carry forward the child's notepad — legacy
+                        # subagent mode treats notepad as a bidirectional
+                        # bridge so the act child can stamp facts. In
+                        # parent_sub_mode, notepad is parent-only-write
+                        # (children have no notepad tool); the carry-back
+                        # is a no-op there but we gate it on the env flag
+                        # for clarity. Read the flag once per spawn.
+                        import os as _os_carry
+                        _ps_on = _os_carry.environ.get(
+                            "PROMAIA_PARENT_SUB_MODE", ""
+                        ).lower() in ("1", "true", "yes", "on")
+                        if not _ps_on:
+                            child_notepad = getattr(child_result, "notepad_content", None)
+                            if child_notepad is not None and tool_executor is not None:
+                                tool_executor._notepad = child_notepad
+                        logger.info(
+                            f"[subagent] child completed: suites={suite_names}, "
+                            f"report_chars={len(result_text)}, "
+                            f"iters={getattr(child_result, 'iterations_used', 0)}"
+                        )
+                    except Exception as child_err:
+                        logger.error(
+                            f"[subagent] child spawn failed: {child_err}",
+                            exc_info=True,
+                        )
+                        result_text = (
+                            f"Act subagent failed: {type(child_err).__name__}: "
+                            f"{str(child_err)[:200]}. Try a smaller scope or "
+                            f"different suites."
+                        )
+                else:
+                    # Legacy in-place mode flip.
+                    act_instructions = parsed_instructions
+                    act_step_status = ["pending"] * len(act_instructions)
+                    act_mode = True
+                    act_suites = suite_names
+                    act_tool_use_ids = []  # fresh burst
+                    act_start_iteration = iteration
+                    # Point at the assistant message that contains this
+                    # act() tool_use. Squashing from this index on done()
+                    # removes the entering-act assistant + every burst
+                    # message so no act() tool_use is orphaned.
+                    act_start_msg_idx = len(internal_messages) - 1
+                    # Mute pre-burst context (preserves on/off states).
+                    if tool_executor:
+                        tool_executor._sources_muted = True
+                        tool_executor._act_start_iteration = iteration
+                        tool_executor._tool_counters = {}  # fresh burst
+                    instr_count = f" {len(act_instructions)} steps." if act_instructions else ""
+                    result_text = f"Act mode. Suites loaded: {', '.join(suite_names)}.{instr_count} Context muted. Follow your instructions."
+                    logger.info(f"[think/act] Entered Act mode with suites: {suite_names}, instructions: {len(act_instructions)} steps")
+                    # Fire plan step callback for UX
+                    if act_instructions and on_tool_activity:
+                        try:
+                            await on_tool_activity(
+                                tool_name="__plan_step__",
+                                tool_input={"step": 1, "total": len(act_instructions), "steps": act_instructions},
+                                completed=False,
+                            )
+                        except Exception:
+                            pass
+            elif result_text.startswith("__SEARCH__:"):
+                # Parent / Sub re-arch — search sub-agent spawn. Mirrors
+                # the act path above but always role="search" with no
+                # suites (the search child gets the search role's tool
+                # allowlist via the unified union, not a per-suite load).
+                payload = result_text[len("__SEARCH__:"):]
+                try:
+                    import json as _json_search_parse
+                    parsed_instructions = _json_search_parse.loads(payload)
+                except Exception:
+                    parsed_instructions = []
+
+                if spawn_child is not None:
+                    parent_history_snapshot = internal_messages[:-1]
+                    try:
+                        child_result = await spawn_child(
+                            role="search",
+                            suites=[],
+                            instructions=parsed_instructions,
+                            parent_tool_use_id=tool_use.id,
+                            parent_messages=parent_history_snapshot,
+                        )
+                        total_input_tokens += getattr(child_result, "input_tokens", 0) or 0
+                        total_output_tokens += getattr(child_result, "output_tokens", 0) or 0
+                        total_cache_read_tokens += getattr(child_result, "cache_read_tokens", 0) or 0
+                        total_cache_creation_tokens += getattr(child_result, "cache_creation_tokens", 0) or 0
+                        result_text = child_result.response_text or "(child returned no report)"
+                        logger.info(
+                            f"[subagent] search child completed: "
+                            f"report_chars={len(result_text)}, "
+                            f"iters={getattr(child_result, 'iterations_used', 0)}"
+                        )
+                    except Exception as child_err:
+                        logger.error(
+                            f"[subagent] search child spawn failed: {child_err}",
+                            exc_info=True,
+                        )
+                        result_text = (
+                            f"Search subagent failed: {type(child_err).__name__}: "
+                            f"{str(child_err)[:200]}. Try a smaller scope or "
+                            f"different instructions."
+                        )
+                else:
+                    result_text = (
+                        "Search sub-agent is not available in this mode. "
+                        "Set PROMAIA_PARENT_SUB_MODE=1 to enable parent/sub "
+                        "delegation."
+                    )
+            elif result_text.startswith("__COMPRESS__:"):
+                # Parent / Sub re-arch — replace one of the previous turn's
+                # eligible tool_results with the agent's prose summary. The
+                # executor maintains a STACK of pending compressible
+                # results (multiple parallel tool_uses from the prior
+                # turn); each compress_last_result pops one entry off the
+                # top (most recent first). The agent can emit N parallel
+                # compress_last_result tool_use blocks to compress N
+                # parallel results from the prior turn.
+                payload_str = result_text[len("__COMPRESS__:"):]
+                try:
+                    import json as _json_compress_parse
+                    cpayload = _json_compress_parse.loads(payload_str)
+                    compress_summary = cpayload.get("summary", "") or ""
+                except Exception:
+                    compress_summary = ""
+
+                stack = getattr(tool_executor, "_pending_compressible_stack", None) if tool_executor else None
+                if not stack:
+                    result_text = (
+                        "ERROR: no compressible tool result available. "
+                        "compress_last_result must be called on the iteration "
+                        "immediately following a tool result, before any "
+                        "other non-compress tool use."
+                    )
+                else:
+                    msg_idx, block_idx = stack.pop()
+                    try:
+                        msg = internal_messages[msg_idx]
+                        content = msg.get("content")
+                        if isinstance(content, list) and 0 <= block_idx < len(content):
+                            block = content[block_idx]
+                            if isinstance(block, dict) and block.get("type") == "tool_result":
+                                block["content"] = (
+                                    f"[compressed by agent] {compress_summary}"
+                                )
+                                result_text = (
+                                    "Compressed previous tool result. "
+                                    f"Replaced with: {compress_summary[:120]}"
+                                    f"{'…' if len(compress_summary) > 120 else ''}"
+                                )
+                                logger.info(
+                                    f"[compress] msg={msg_idx} block={block_idx} "
+                                    f"summary_chars={len(compress_summary)} "
+                                    f"remaining_in_stack={len(stack)}"
+                                )
+                            else:
+                                result_text = (
+                                    "ERROR: pending tool result is not a tool_result block."
+                                )
+                        else:
+                            result_text = (
+                                "ERROR: pending tool result reference is out of range."
+                            )
+                    except Exception as compress_err:
+                        result_text = (
+                            f"ERROR: compress failed: {type(compress_err).__name__}: "
+                            f"{str(compress_err)[:100]}"
+                        )
             elif result_text.startswith("__MARK_STEP__:"):
                 step_num = int(result_text.split(":")[1])
                 if 0 < step_num <= len(act_step_status):
                     act_step_status[step_num - 1] = "done"
                     result_text = f"Step {step_num} marked done."
-                    logger.info(f"[think/act] Marked step {step_num}/{len(act_instructions)} done")
+                    log_tag = "subagent.child" if is_child_mode else "think/act"
+                    logger.info(f"[{log_tag}] Marked step {step_num}/{len(act_instructions)} done")
                     # Fire UX callback
                     if on_tool_activity:
                         try:
@@ -9058,6 +10258,27 @@ async def agentic_turn(
                             f"[think/act] done payload parse failed: {parse_err}; "
                             "using defaults (discard all burst shelves)"
                         )
+
+                # Child path: this is a subagent. Return the report
+                # immediately to the parent — no squash, no message
+                # rewrite. The parent embeds the report as the tool_result
+                # for its act() tool_use.
+                if is_child_mode:
+                    logger.info(
+                        f"[subagent.child] done: report_chars={len(report)} "
+                        f"iters={iteration + 1}"
+                    )
+                    return AgenticTurnResult(
+                        response_text=report,
+                        tool_calls_made=all_tool_calls,
+                        iterations_used=iteration + 1,
+                        input_tokens=total_input_tokens,
+                        output_tokens=total_output_tokens,
+                        cache_read_tokens=total_cache_read_tokens,
+                        cache_creation_tokens=total_cache_creation_tokens,
+                        plan=plan,
+                        notepad_content=tool_executor._notepad if tool_executor else None,
+                    )
 
                 # Burst-scoped shelves are everything mounted at or after entry.
                 burst_start = act_start_iteration if act_start_iteration is not None else iteration
@@ -9229,6 +10450,8 @@ async def agentic_turn(
                     iterations_used=iteration + 1,
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
+                    cache_read_tokens=total_cache_read_tokens,
+                    cache_creation_tokens=total_cache_creation_tokens,
                     plan=plan,
                     signal={"type": "interview_start", "workflow": workflow_name},
                 )
@@ -9239,6 +10462,8 @@ async def agentic_turn(
                     iterations_used=iteration + 1,
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
+                    cache_read_tokens=total_cache_read_tokens,
+                    cache_creation_tokens=total_cache_creation_tokens,
                     plan=plan,
                     signal={"type": "interview_end"},
                 )
@@ -9251,6 +10476,8 @@ async def agentic_turn(
                     iterations_used=iteration + 1,
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
+                    cache_read_tokens=total_cache_read_tokens,
+                    cache_creation_tokens=total_cache_creation_tokens,
                     plan=plan,
                     signal={"type": "show_selection", "payload": payload},
                 )
@@ -9266,6 +10493,8 @@ async def agentic_turn(
                     iterations_used=iteration + 1,
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
+                    cache_read_tokens=total_cache_read_tokens,
+                    cache_creation_tokens=total_cache_creation_tokens,
                     plan=plan,
                     signal={"type": "end_conversation", "emoji": emoji or None, "summary": summary or None},
                 )
@@ -9278,6 +10507,8 @@ async def agentic_turn(
                     iterations_used=iteration + 1,
                     input_tokens=total_input_tokens,
                     output_tokens=total_output_tokens,
+                    cache_read_tokens=total_cache_read_tokens,
+                    cache_creation_tokens=total_cache_creation_tokens,
                     plan=plan,
                     signal={"type": "leave_conversation"},
                 )
@@ -9340,6 +10571,27 @@ async def agentic_turn(
         # here would corrupt the pairing.
         if not squashed_this_iter and tool_results:
             internal_messages.append({"role": "user", "content": tool_results})
+            # Parent / Sub re-arch — rebuild the compressible stack for
+            # the next iteration. Collect ALL non-compress tool_results
+            # from this turn so the agent can compress each one with a
+            # separate compress_last_result call (typically emitted as
+            # parallel tool_uses on the next assistant turn).
+            if tool_executor is not None:
+                msg_idx_for_stack = len(internal_messages) - 1
+                eligible: List[tuple] = []
+                for blk_idx, block in enumerate(tool_results):
+                    block_use_id = block.get("tool_use_id") if isinstance(block, dict) else None
+                    src_name: Optional[str] = None
+                    for _tu in tool_uses:
+                        if _tu.id == block_use_id:
+                            src_name = _tu.name
+                            break
+                    if src_name and src_name != "compress_last_result":
+                        eligible.append((msg_idx_for_stack, blk_idx))
+                # Replace stack with this iteration's eligible results.
+                # Compress calls during the next iteration pop entries off
+                # this list (most recent first).
+                tool_executor._pending_compressible_stack = eligible
 
     # Exhausted iteration budget — return whatever text we have
     last_text = "\n".join(text_parts) if text_parts else ""
@@ -9406,6 +10658,8 @@ async def agentic_turn(
         iterations_used=max_iterations,
         input_tokens=total_input_tokens,
         output_tokens=total_output_tokens,
+        cache_read_tokens=total_cache_read_tokens,
+        cache_creation_tokens=total_cache_creation_tokens,
         plan=plan,
         history_messages=new_msgs,
     )
@@ -9499,9 +10753,10 @@ def _summarize_tool_result(
 
     elif tool_name == "query_source":
         db = tool_input.get("database", "?")
-        days = tool_input.get("days", "all")
+        # days_back is the canonical field; fall back to legacy days alias.
+        days = tool_input.get("days_back") or tool_input.get("days") or "?"
         phrase = _extract_count_phrase(result)
-        return _vs(f"Load {db}:{days}", phrase or "ok")
+        return _vs(f"Load {db} ({days}d)", phrase or "ok")
 
     elif tool_name == "write_agent_journal":
         return _vs("Agent journal", "noted")
@@ -9596,9 +10851,22 @@ def _summarize_tool_result(
 
     elif tool_name == "act":
         suites = tool_input.get("suites", [])
-        if isinstance(suites, list):
-            return _vs("Act mode", f"suites: {', '.join(suites)}")
-        return _vs("Act mode", str(suites))
+        suites_str = ", ".join(suites) if isinstance(suites, list) else str(suites)
+        # In subagent mode the parent's act() spawns a child and embeds
+        # the report as the tool_result — it never enters Act mode itself.
+        # Reflect that in the summary so the breadcrumb isn't misleading.
+        import os as _os_act
+        if _os_act.environ.get("PROMAIA_SUBAGENT_MODE", "").lower() in (
+            "1", "true", "yes", "on"
+        ):
+            # Surface a short excerpt of the report so the breadcrumb shows
+            # what the subagent actually did, not just "subagent ran".
+            report_excerpt = (result or "").strip().split("\n")[0][:80]
+            outcome = f"suites: {suites_str}"
+            if report_excerpt:
+                outcome += f" → {report_excerpt}"
+            return _vs("Spawned subagent", outcome)
+        return _vs("Act mode", f"suites: {suites_str}")
 
     else:
         return _vs(tool_name, "")

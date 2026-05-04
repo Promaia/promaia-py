@@ -131,15 +131,25 @@ def _improved_token_estimate(text: str) -> int:
     # Ensure we have a reasonable minimum
     return max(estimated_tokens, len(text) // 4)
 
-def calculate_ai_cost(prompt_tokens: int, response_tokens: int, model_name: str = "claude-sonnet-4") -> dict:
+def calculate_ai_cost(
+    prompt_tokens: int,
+    response_tokens: int,
+    model_name: str = "claude-sonnet-4",
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+) -> dict:
     """
     Calculate the cost of AI API usage for various models.
-    
+
     Args:
-        prompt_tokens: Number of input tokens
-        response_tokens: Number of output tokens  
+        prompt_tokens: Number of fresh (uncached) input tokens
+        response_tokens: Number of output tokens
         model_name: Name of the model used
-    
+        cache_read_tokens: Tokens served from Anthropic prompt cache.
+            Billed at 0.1x the normal input rate.
+        cache_creation_tokens: Tokens written to the prompt cache this
+            request. Billed at 1.25x the normal input rate (5-min TTL).
+
     Returns:
         Dictionary with cost breakdown
     """
@@ -148,6 +158,10 @@ def calculate_ai_cost(prompt_tokens: int, response_tokens: int, model_name: str 
         "claude-sonnet-4": {
             "input_cost_per_million": 3.00,
             "output_cost_per_million": 15.00
+        },
+        "claude-opus-4.7": {
+            "input_cost_per_million": 5.00,
+            "output_cost_per_million": 25.00
         },
         "claude-opus-4.6": {
             "input_cost_per_million": 5.00,
@@ -189,6 +203,7 @@ def calculate_ai_cost(prompt_tokens: int, response_tokens: int, model_name: str 
     
     # Map model names to pricing keys
     model_mapping = {
+        "claude-opus-4-7": "claude-opus-4.7",
         "claude-opus-4-6": "claude-opus-4.6",
         "claude-opus-4-6-1m": "claude-opus-4.6",
         "claude-opus-4-5-20251101": "claude-opus-4.5",
@@ -210,18 +225,43 @@ def calculate_ai_cost(prompt_tokens: int, response_tokens: int, model_name: str 
         
     model_pricing = pricing[pricing_key]
     
-    input_cost = (prompt_tokens / 1_000_000) * model_pricing["input_cost_per_million"]
-    output_cost = (response_tokens / 1_000_000) * model_pricing["output_cost_per_million"]
-    total_cost = input_cost + output_cost
-    
+    input_rate = model_pricing["input_cost_per_million"]
+    output_rate = model_pricing["output_cost_per_million"]
+
+    input_cost = (prompt_tokens / 1_000_000) * input_rate
+    output_cost = (response_tokens / 1_000_000) * output_rate
+    # Anthropic prompt-cache pricing (per Anthropic docs):
+    # - cache reads:  0.1x the normal input rate
+    # - cache writes: 1.25x the normal input rate (5-min ephemeral TTL)
+    cache_read_cost = (cache_read_tokens / 1_000_000) * input_rate * 0.1
+    cache_creation_cost = (cache_creation_tokens / 1_000_000) * input_rate * 1.25
+    total_cost = input_cost + output_cost + cache_read_cost + cache_creation_cost
+
+    # Counterfactual: what the same token volume would have cost if every
+    # cache_read had been billed as fresh input and no cache_creation
+    # premium had been paid. cache_savings = positive when caching is
+    # winning, negative when cache writes outweigh reads (e.g. a turn
+    # that wrote to cache but didn't read enough to amortize the 1.25x).
+    cost_without_cache = (
+        ((prompt_tokens + cache_read_tokens + cache_creation_tokens) / 1_000_000) * input_rate
+        + output_cost
+    )
+    cache_savings = cost_without_cache - total_cost
+
     return {
         "input_cost": input_cost,
-        "output_cost": output_cost, 
+        "output_cost": output_cost,
+        "cache_read_cost": cache_read_cost,
+        "cache_creation_cost": cache_creation_cost,
         "total_cost": total_cost,
+        "cost_without_cache": cost_without_cache,
+        "cache_savings": cache_savings,
         "model": model_name,
         "prompt_tokens": prompt_tokens,
         "response_tokens": response_tokens,
-        "total_tokens": prompt_tokens + response_tokens
+        "cache_read_tokens": cache_read_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        "total_tokens": prompt_tokens + response_tokens + cache_read_tokens + cache_creation_tokens,
     }
 
 def handle_rate_limit_basic():

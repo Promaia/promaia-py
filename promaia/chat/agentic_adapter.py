@@ -237,11 +237,24 @@ def build_agentic_system_prompt(
     agent_calendars: Optional[Dict[str, str]] = None,
     has_platform: bool = False,
     mcp_tool_descriptions: Optional[List[Dict]] = None,
+    is_child_mode: bool = False,
 ) -> str:
     """Append conversation_mode.md tool guidance to the base terminal prompt.
 
     Strips the XML-format query tools section (used by the non-agentic path)
     since the agentic loop has its own tool guidance in conversation_mode.md.
+
+    Prompt selection:
+    - ``PROMAIA_PARENT_SUB_MODE`` on → load ``parent_sub.md`` (single
+      unified prompt with PARENT / SEARCH / ACT role sections). Same
+      prompt is sent regardless of which role the agent will end up in;
+      the model detects its role from the kickoff user message's
+      ``[role: …]`` marker.
+    - Else, ``is_child_mode=True`` → ``conversation_mode_child.md`` (legacy
+      act-subagent prompt under PROMAIA_SUBAGENT_MODE).
+    - Else, ``PROMAIA_SUBAGENT_MODE`` on → ``conversation_mode_parent.md``
+      (legacy parent-only prompt).
+    - Else → ``conversation_mode.md`` (legacy think/act flip).
     """
     from promaia.utils.env_writer import get_prompts_dir
 
@@ -249,11 +262,34 @@ def build_agentic_system_prompt(
     base_prompt = _strip_xml_query_tools(base_prompt)
 
     from promaia.ai.prompts import _resolve_prompt
-    conv_prompt_path = _resolve_prompt("conversation_mode.md")
+
+    import os as _os
+    _parent_sub_on = _os.environ.get("PROMAIA_PARENT_SUB_MODE", "").lower() in (
+        "1", "true", "yes", "on"
+    )
+    if _parent_sub_on:
+        # Parent / Sub re-arch — single unified prompt for all three roles.
+        prompt_filename = "parent_sub.md"
+    elif is_child_mode:
+        prompt_filename = "conversation_mode_child.md"
+    else:
+        # When the subagent feature flag is on, the parent's mental model
+        # changes substantially: it stays in think mode and delegates to
+        # subagents via act() rather than flipping mode in place. Use the
+        # rewritten parent prompt so the model isn't told it has tools and
+        # exits (done, keep_shelves) that no longer apply to it.
+        _subagent_on = _os.environ.get("PROMAIA_SUBAGENT_MODE", "").lower() in (
+            "1", "true", "yes", "on"
+        )
+        prompt_filename = (
+            "conversation_mode_parent.md" if _subagent_on
+            else "conversation_mode.md"
+        )
+    conv_prompt_path = _resolve_prompt(prompt_filename)
     try:
         template = conv_prompt_path.read_text()
     except FileNotFoundError:
-        logger.warning(f"conversation_mode.md not found at {conv_prompt_path}")
+        logger.warning(f"{prompt_filename} not found at {conv_prompt_path}")
         return base_prompt
 
     # Build queryable sources list
@@ -517,17 +553,82 @@ def build_agentic_system_prompt(
     workflow_section = ""
 
     # Apply template substitutions
+    import datetime as _dt
+    _now = _dt.datetime.now()
     filled = template.replace("{agent_name}", "Maia")
     filled = filled.replace("{platform}", "terminal")
     filled = filled.replace("{sources}", sources_list)
+    filled = filled.replace("{today_date}", _now.strftime("%Y-%m-%d"))
+    filled = filled.replace("{current_time}", _now.strftime("%H:%M"))
     # Tool sections embedded in conversation_mode.md template — positioned before
     # context sources so the agent sees available tools early in the prompt.
     filled = filled.replace("{tool_sections}", tool_sections)
     filled = filled.replace("{notion_guidance}", notion_guidance)
 
-    # Workflow/interview descriptions, MCP tool descriptions, and saved workflows
-    # are NOT injected into the prompt. They appear in the suite index (Think mode)
-    # and as loaded tool schemas (Act mode).
+    # parent_sub.md uses {suite_index} — a brief one-line-per-suite list
+    # so the parent knows what to pass for `act(suites=[…])` without
+    # carrying 78 detailed tool schemas in its prompt. We render only
+    # the per-suite lines (skipping the legacy `_build_suite_index`
+    # wrapper text which mentions Act mode / muted context — concepts
+    # that don't apply in parent_sub mode).
+    if "{suite_index}" in filled:
+        try:
+            from promaia.agents.agentic_turn import _build_tool_suite_registry
+            class _IndexShim:
+                def __init__(self):
+                    self.mcp_tools = mcp_tools
+                    self.calendar_id = agent_calendar_id
+                    self.agent_calendars = agent_calendars or {}
+            _suite_registry_for_index = _build_tool_suite_registry(
+                _IndexShim(), has_platform=has_platform
+            )
+            # Include actual tool names per suite so the parent picks the
+            # right suites=[…] argument and writes correct tool names in
+            # its instructions. Without these names the model hallucinates
+            # (e.g. wrote `send_slack_message` for the messaging suite,
+            # whose actual write tool is `start_conversation`).
+            _index_lines = []
+            for _name, _info in _suite_registry_for_index.items():
+                _tool_names = [t.get("name") for t in _info.get("tools") or [] if t.get("name")]
+                if _tool_names:
+                    _names_str = ", ".join(_tool_names)
+                    _index_lines.append(
+                        f"- **{_name}** ({_info['count']} tools) — {_info['description']}\n"
+                        f"  tools: {_names_str}"
+                    )
+                else:
+                    _index_lines.append(
+                        f"- **{_name}** ({_info['count']} tools) — {_info['description']}"
+                    )
+            suite_index_text = "\n".join(_index_lines) if _index_lines else "(no suites configured)"
+        except Exception as _idx_err:
+            logger.debug(f"suite index build failed: {_idx_err}")
+            suite_index_text = "(suite index unavailable)"
+        filled = filled.replace("{suite_index}", suite_index_text)
+
+    # parent_sub.md also has {workflows_index} — saved-workflow names with
+    # truncated descriptions, so the parent knows what user-defined
+    # workflows exist and can call get_workflow_details(name="…") to load
+    # the steps. Without this the parent would conflate workflows with
+    # memory and hunt the memory store for them.
+    if "{workflows_index}" in filled:
+        try:
+            from promaia.tools.workflow_store import list_workflows_for_prompt
+            wf_summaries = list_workflows_for_prompt(workspace) if workspace else []
+            if wf_summaries:
+                _wf_lines = []
+                for wf in wf_summaries:
+                    desc = wf.get("description", "") or ""
+                    if len(desc) > 100:
+                        desc = desc[:97] + "..."
+                    _wf_lines.append(f"- **{wf['name']}** — {desc}")
+                workflows_index_text = "\n".join(_wf_lines)
+            else:
+                workflows_index_text = "(no saved workflows)"
+        except Exception as _wf_err:
+            logger.debug(f"workflows index build failed: {_wf_err}")
+            workflows_index_text = "(workflows index unavailable)"
+        filled = filled.replace("{workflows_index}", workflows_index_text)
 
     return base_prompt + "\n\n" + filled
 
@@ -547,13 +648,18 @@ def make_terminal_activity_callback(
         **kwargs,
     ):
         tool_input = tool_input or {}
+        # Activity events from inside an act subagent are tagged child=True
+        # by _spawn_act_child's wrapper. Indent them so the terminal output
+        # makes the parent/child boundary visible.
+        is_child = bool(kwargs.get("child"))
+        prefix = "    ↳ " if is_child else "  "
 
         # Plan announcement
         if tool_name == "__plan__":
             steps = tool_input.get("steps", [])
             print_text_fn("\n📋 Plan:", style="bold cyan")
             for i, step in enumerate(steps, 1):
-                print_text_fn(f"  {i}. {step}", style="dim cyan")
+                print_text_fn(f"{prefix}{i}. {step}", style="dim cyan")
             print_text_fn("")
             return
 
@@ -570,7 +676,7 @@ def make_terminal_activity_callback(
 
         # Context trim
         if tool_name == "__context_trim__":
-            print_text_fn("  ✂️  Context too large, trimming and retrying", style="dim yellow")
+            print_text_fn(f"{prefix}✂️  Context too large, trimming and retrying", style="dim yellow")
             return
 
         # Context toggle
@@ -580,22 +686,22 @@ def make_terminal_activity_callback(
             name = (tool_input or {}).get("name", "")
             target = ", ".join(sources) if sources else name
             if action in ("on", "all_on"):
-                print_text_fn(f"  📖 Context ON: {target or 'all'}", style="dim cyan")
+                print_text_fn(f"{prefix}📖 Context ON: {target or 'all'}", style="dim cyan")
             elif action in ("off", "all_off"):
-                print_text_fn(f"  📕 Context OFF: {target or 'all'}", style="dim cyan")
+                print_text_fn(f"{prefix}📕 Context OFF: {target or 'all'}", style="dim cyan")
             elif action == "add":
-                print_text_fn(f"  📚 Context added: {name}", style="dim cyan")
+                print_text_fn(f"{prefix}📚 Context added: {name}", style="dim cyan")
             elif action == "remove":
-                print_text_fn(f"  🗑️  Context removed: {target}", style="dim cyan")
+                print_text_fn(f"{prefix}🗑️  Context removed: {target}", style="dim cyan")
             return
 
         # Think/Act mode switching
         if tool_name == "act" and completed:
             suites = (tool_input or {}).get("suites", [])
-            print_text_fn(f"  🔧 Act mode ({', '.join(suites)})", style="dim yellow")
+            print_text_fn(f"{prefix}🔧 Act mode ({', '.join(suites)})", style="dim yellow")
             return
         if tool_name == "done" and completed:
-            print_text_fn("  📚 Think mode", style="dim cyan")
+            print_text_fn(f"{prefix}📚 Think mode", style="dim cyan")
             return
 
         # Notepad update
@@ -603,7 +709,7 @@ def make_terminal_activity_callback(
             action = (tool_input or {}).get("action", "")
             labels = {"write": "updated", "append": "appended", "clear": "cleared", "read": "read"}
             label = labels.get(action, action)
-            print_text_fn(f"  📝 Notes {label}", style="dim cyan")
+            print_text_fn(f"{prefix}📝 Notes {label}", style="dim cyan")
             return
 
         # Memory
@@ -611,20 +717,20 @@ def make_terminal_activity_callback(
             action = (tool_input or {}).get("action", "")
             name = (tool_input or {}).get("name", "")
             if action == "save":
-                print_text_fn(f"  💾 Memory saved: {name}", style="dim cyan")
+                print_text_fn(f"{prefix}💾 Memory saved: {name}", style="dim cyan")
             elif action == "recall":
-                print_text_fn(f"  🧠 Memory recalled: {name}", style="dim cyan")
+                print_text_fn(f"{prefix}🧠 Memory recalled: {name}", style="dim cyan")
             elif action == "delete":
-                print_text_fn(f"  🗑️  Memory deleted: {name}", style="dim cyan")
+                print_text_fn(f"{prefix}🗑️  Memory deleted: {name}", style="dim cyan")
             elif action == "list":
-                print_text_fn("  🧠 Memory listed", style="dim cyan")
+                print_text_fn(f"{prefix}🧠 Memory listed", style="dim cyan")
             return
 
         # Regular tool activity
         if not completed:
             # Tool starting
             input_summary = _summarize_tool_input(tool_name, tool_input)
-            print_text_fn(f"  🔧 {tool_name}{input_summary}", style="dim yellow")
+            print_text_fn(f"{prefix}🔧 {tool_name}{input_summary}", style="dim yellow")
         else:
             # Tool completed
             if summary:
@@ -633,9 +739,9 @@ def make_terminal_activity_callback(
                 # Detect errors in summary and use appropriate indicator
                 is_error = "(error)" in display.lower() or display.startswith("Error")
                 if is_error:
-                    print_text_fn(f"  ✗ {display}", style="dim red")
+                    print_text_fn(f"{prefix}✗ {display}", style="dim red")
                 else:
-                    print_text_fn(f"  ✓ {display}", style="dim green")
+                    print_text_fn(f"{prefix}✓ {display}", style="dim green")
 
     return on_tool_activity
 
@@ -767,14 +873,33 @@ async def run_agentic_turn(
             )
     has_platform = platform is not None
 
-    # Build tool definitions (legacy, used as fallback)
-    tools = build_tool_definitions(shim, has_platform=has_platform)
+    # Build tool definitions. Parent / Sub re-arch flag picks the parent's
+    # tiny tool list (search/act/notepad/memory only); sub-agents get
+    # their own scoped tool lists at spawn time. Suite-specific tool
+    # schemas are NEVER in the parent's array — the parent's prompt has
+    # a brief suite index (one line per suite) so it can pick the right
+    # `suites=[…]` argument when calling `act()`.
+    import os as _os_tools
+    _parent_sub_on = _os_tools.environ.get("PROMAIA_PARENT_SUB_MODE", "").lower() in (
+        "1", "true", "yes", "on"
+    )
+    if _parent_sub_on:
+        from promaia.agents.agentic_turn import build_parent_tool_definitions
+        tools = build_parent_tool_definitions(shim)
+    else:
+        tools = build_tool_definitions(shim, has_platform=has_platform)
 
-    # Build suite registry for Think/Act mode
+    # Build suite registry for Think/Act mode (and act-child spawns).
     suite_registry = _build_tool_suite_registry(shim, has_platform=has_platform)
 
     # Create tool executor
     executor = ToolExecutor(agent=shim, workspace=workspace, platform=platform)
+    # Parent / Sub re-arch — stamp the parent's tool list on the executor
+    # so the role gate inside `execute()` has something to validate
+    # against. Default current_role stays "parent"; child spawns set
+    # their own role + their own tool list before invoking agentic_turn.
+    if _parent_sub_on:
+        executor._role_unified_tools = tools
 
     # Restore notepad from previous turn
     if notepad_content:
@@ -887,6 +1012,254 @@ async def run_agentic_turn(
     # Use external callback if provided (Slack/Discord), otherwise build terminal callback
     activity_cb = on_tool_activity or make_terminal_activity_callback(print_text_fn)
 
+    # Subagent mode flags. Two co-existing flags:
+    #   - PROMAIA_PARENT_SUB_MODE — Parent / Sub re-arch: unified prompt,
+    #     unified tool union, search + act sub-agents, role gating.
+    #   - PROMAIA_SUBAGENT_MODE — legacy parent/act-child split (act only).
+    # When parent_sub_mode is on it implies subagent_mode functionality
+    # for the act child too. Both off → legacy in-place think/act flip.
+    import os as _os
+    subagent_mode = _os.environ.get("PROMAIA_SUBAGENT_MODE", "").lower() in (
+        "1", "true", "yes", "on"
+    )
+    # _parent_sub_on already computed earlier; reuse for the spawn path.
+
+    spawn_child_cb = None
+    if subagent_mode or _parent_sub_on:
+        # Build the child-mode system prompt. In parent_sub_mode we send
+        # the same parent_sub.md for both roles (the model picks its role
+        # from the kickoff message marker). In legacy subagent_mode we
+        # send conversation_mode_child.md.
+        child_base_prompt = build_agentic_system_prompt(
+            system_prompt, workspace, mcp_tools, databases,
+            agent_calendars=agent_calendars,
+            mcp_tool_descriptions=mcp_tool_defs if mcp_tool_defs else None,
+            is_child_mode=True,
+        )
+        # Memory index is read-only context that the child benefits from
+        # in legacy mode. In parent_sub_mode children have no memory tool;
+        # the index is still useful background context.
+        try:
+            from promaia.agents.memory_store import load_memory_index
+            _mem = load_memory_index(workspace)
+            if _mem:
+                child_base_prompt += f"\n\n## Memory\n\n{_mem}"
+        except ImportError:
+            pass
+
+        async def _make_child_activity_cb():
+            """Wrap the parent activity callback so child tool steps are
+            tagged child=True (drives the ↳ indent in the breadcrumb)."""
+            async def _child_activity_cb(*a, **kw):
+                if activity_cb is None:
+                    return
+                kw.setdefault("child", True)
+                try:
+                    await activity_cb(*a, **kw)
+                except TypeError:
+                    kw.pop("child", None)
+                    await activity_cb(*a, **kw)
+            return _child_activity_cb
+
+        def _build_kickoff_messages(parent_messages, kickoff_text: str) -> List[Dict]:
+            """Phase 3 — child inherits parent's conversational prefix.
+
+            Parent's `internal_messages[:-1]` is the snapshot at spawn
+            time (the in-flight assistant message that contains the
+            spawn tool_use is excluded — the child has no orphan
+            tool_use to match). Append the child's role-marked kickoff
+            user message. Two consecutive user messages at the boundary
+            are accepted by Anthropic and the model treats them as one
+            extended turn; the role marker at the start of the kickoff
+            keeps role detection deterministic.
+
+            In parent_sub_mode this is the cache-shared prefix: parent
+            and children all start their requests with byte-exact
+            identical [system, tools, history] and the child's first
+            iteration hits the parent's bp3 cache entry.
+            """
+            base = list(parent_messages or [])
+            base.append({"role": "user", "content": kickoff_text})
+            return base
+
+        async def _spawn_act_child(
+            suites,
+            instructions,
+            parent_tool_use_id,
+            parent_messages=None,
+        ):
+            """Spawn one act sub-agent and return its AgenticTurnResult."""
+            child_executor = executor.clone_for_child()
+
+            # Build the child's tool list scoped to the requested suites.
+            # In parent_sub_mode the act child sees ONLY the loaded
+            # suites' tools + scaffolding; the parent's 4-tool array
+            # never appears here. The role gate uses this list as its
+            # allowlist (defense-in-depth).
+            if _parent_sub_on:
+                from promaia.agents.agentic_turn import (
+                    build_act_child_tool_definitions,
+                )
+                child_tools = build_act_child_tool_definitions(
+                    shim,
+                    suites=suites,
+                    has_platform=has_platform,
+                    mcp_suites=mcp_suites if mcp_suites else None,
+                )
+                child_executor.current_role = "act"
+                child_executor._role_unified_tools = child_tools
+            else:
+                # Legacy subagent mode: keep prior behaviour (full union
+                # via the agentic loop's tool selection).
+                child_tools = tools
+
+            child_system = child_base_prompt
+            # Notepad is included in the child's system prompt as
+            # immutable kickoff context. In parent_sub_mode the child
+            # has no notepad write tool — this is its only window.
+            if child_executor._notepad:
+                child_system += f"\n\n## Working Notes\n\n{child_executor._notepad}"
+
+            instr_str = "\n".join(f"{i+1}. {s}" for i, s in enumerate(instructions or []))
+            if _parent_sub_on:
+                role_marker = f"[role: act:{','.join(suites)}]" if suites else "[role: act]"
+                child_user_msg = (
+                    f"{role_marker}\n\n"
+                    f"Instructions:\n{instr_str if instr_str else '(no explicit steps)'}"
+                )
+            else:
+                child_user_msg = (
+                    "You are acting on behalf of the parent Think agent. "
+                    f"Loaded suites: {', '.join(suites)}.\n\n"
+                    f"Instructions:\n{instr_str if instr_str else '(no explicit steps)'}"
+                )
+
+            # Phase 3 — only inherit parent's history when parent_sub_mode
+            # is on. Legacy subagent_mode (act-only) keeps the previous
+            # fresh-history behaviour to avoid changing its semantics.
+            if _parent_sub_on:
+                child_messages = _build_kickoff_messages(
+                    parent_messages, child_user_msg
+                )
+            else:
+                child_messages = [{"role": "user", "content": child_user_msg}]
+
+            logger.info(
+                f"[subagent.spawn] role=act parent_tool_use_id={parent_tool_use_id} "
+                f"suites={suites} instructions={len(instructions or [])} "
+                f"history_msgs={len(child_messages)}"
+            )
+
+            child_activity_cb = await _make_child_activity_cb()
+
+            child_kwargs = dict(
+                system_prompt=child_system,
+                messages=child_messages,
+                tools=child_tools,
+                tool_executor=child_executor,
+                max_iterations=40,
+                on_tool_activity=child_activity_cb,
+                suite_registry=suite_registry,
+                mcp_suites=mcp_suites if mcp_suites else None,
+                is_child_mode=True,
+                child_act_suites=suites,
+                child_act_instructions=instructions,
+                parent_sub_mode=_parent_sub_on,
+                # spawn_child=None — children don't spawn grandchildren.
+            )
+            if model:
+                child_kwargs["model"] = model
+            return await agentic_turn(**child_kwargs)
+
+        async def _spawn_search_child(
+            instructions,
+            parent_tool_use_id,
+            parent_messages=None,
+        ):
+            """Spawn one search sub-agent (parent_sub_mode only).
+
+            Tool list: query_sql, query_vector, query_source plus burst
+            scaffolding (compress_last_result, mark_step_done, done).
+            Six tools total — small, scoped, disappears with the burst.
+            """
+            from promaia.agents.agentic_turn import (
+                build_search_child_tool_definitions,
+            )
+            child_executor = executor.clone_for_child()
+            child_executor.current_role = "search"
+            child_tools = build_search_child_tool_definitions()
+            child_executor._role_unified_tools = child_tools
+
+            child_system = child_base_prompt
+            if child_executor._notepad:
+                child_system += f"\n\n## Working Notes\n\n{child_executor._notepad}"
+
+            instr_str = "\n".join(f"{i+1}. {s}" for i, s in enumerate(instructions or []))
+            child_user_msg = (
+                "[role: search]\n\n"
+                f"Instructions:\n{instr_str if instr_str else '(no explicit steps)'}"
+            )
+
+            child_messages = _build_kickoff_messages(
+                parent_messages, child_user_msg
+            )
+
+            logger.info(
+                f"[subagent.spawn] role=search parent_tool_use_id={parent_tool_use_id} "
+                f"instructions={len(instructions or [])} "
+                f"history_msgs={len(child_messages)} "
+                f"tools={len(child_tools)}"
+            )
+
+            child_activity_cb = await _make_child_activity_cb()
+
+            child_kwargs = dict(
+                system_prompt=child_system,
+                messages=child_messages,
+                tools=child_tools,
+                tool_executor=child_executor,
+                max_iterations=40,
+                on_tool_activity=child_activity_cb,
+                suite_registry=suite_registry,
+                mcp_suites=mcp_suites if mcp_suites else None,
+                is_child_mode=True,
+                child_act_suites=[],
+                child_act_instructions=instructions,
+                parent_sub_mode=_parent_sub_on,
+            )
+            if model:
+                child_kwargs["model"] = model
+            return await agentic_turn(**child_kwargs)
+
+        async def _spawn_child_dispatch(
+            role: str,
+            suites=None,
+            instructions=None,
+            parent_tool_use_id=None,
+            parent_messages=None,
+        ):
+            """Single entrypoint the agentic loop calls. Dispatches by role."""
+            if role == "search":
+                if not _parent_sub_on:
+                    raise RuntimeError(
+                        "search sub-agent requires PROMAIA_PARENT_SUB_MODE=1"
+                    )
+                return await _spawn_search_child(
+                    instructions=instructions or [],
+                    parent_tool_use_id=parent_tool_use_id,
+                    parent_messages=parent_messages,
+                )
+            # Default: act child (covers role="act" and any legacy callers
+            # that didn't pass role).
+            return await _spawn_act_child(
+                suites=suites or [],
+                instructions=instructions or [],
+                parent_tool_use_id=parent_tool_use_id,
+                parent_messages=parent_messages,
+            )
+
+        spawn_child_cb = _spawn_child_dispatch
+
     # Run the agentic loop
     try:
         agentic_kwargs = dict(
@@ -899,6 +1272,8 @@ async def run_agentic_turn(
             context_data_block=context_data_block,
             suite_registry=suite_registry,
             mcp_suites=mcp_suites if mcp_suites else None,
+            spawn_child=spawn_child_cb,
+            parent_sub_mode=_parent_sub_on,
         )
         if model:
             agentic_kwargs["model"] = model

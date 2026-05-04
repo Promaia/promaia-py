@@ -51,6 +51,7 @@ LLAMA_MODELS = {
 # Display names for models (maps model IDs to human-readable names)
 MODEL_DISPLAY_NAMES = {
     # Anthropic models
+    "claude-opus-4-7": "Claude Opus 4.7 (200K)",
     "claude-opus-4-6": "Claude Opus 4.6",
     "claude-opus-4-6-1m": "Claude Opus 4.6 (1M)",
     "claude-opus-4-5": "Claude Opus 4.5",
