@@ -3581,6 +3581,15 @@ class ToolExecutor:
         # prior turn — needed because the model often emits 4 parallel
         # query tool_use blocks at once. Each compress pops one entry.
         self._pending_compressible_stack: List[tuple] = []
+        # External MCP server connections. Set by connect_mcp_servers(); kept
+        # at module level so MCP-routed tool execution can check `if self._mcp_client`
+        # safely even when no servers are configured. Children inherit the
+        # parent's already-connected client via clone_for_child().
+        self._mcp_client = None        # McpClient instance
+        self._mcp_tool_map: Dict[str, tuple] = {}  # namespaced_name → (server_name, original_name)
+        # True when this executor owns its MCP client (parent). Children share
+        # the parent's client and must not disconnect it.
+        self._owns_mcp_client = True
 
     def _role_check_or_error(self, tool_name: str) -> Optional[str]:
         """If `tool_name` is not in `self.current_role`'s allowlist, return
@@ -3628,10 +3637,14 @@ class ToolExecutor:
         )
         # Notepad is the persistent thread between parent and children.
         child._notepad = self._notepad
+        # Share the parent's MCP client + tool map so children can execute
+        # external MCP tools (mcp__<server>__<tool>) loaded via act suites.
+        # The child does not own the connection — disconnect_mcp_servers()
+        # on the child is a no-op so the parent's connections survive.
+        child._mcp_client = self._mcp_client
+        child._mcp_tool_map = dict(self._mcp_tool_map)
+        child._owns_mcp_client = False
         return child
-        # External MCP server connections
-        self._mcp_client = None        # McpClient instance
-        self._mcp_tool_map = {}        # namespaced_name → (server_name, original_name)
 
     async def execute(self, tool_name: str, tool_input: Dict[str, Any]) -> str:
         """Execute a tool and return a plain text result."""
@@ -8050,7 +8063,13 @@ class ToolExecutor:
             return f"Error calling MCP tool {original_name} on {server_name}: {e}"
 
     async def disconnect_mcp_servers(self):
-        """Clean up all MCP server connections."""
+        """Clean up all MCP server connections.
+
+        No-op on child executors (which share the parent's client) so the
+        parent's connections survive until the parent itself disconnects.
+        """
+        if not self._owns_mcp_client:
+            return
         if self._mcp_client:
             try:
                 await self._mcp_client.disconnect_all()
