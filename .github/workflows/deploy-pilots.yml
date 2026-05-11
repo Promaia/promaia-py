@@ -76,15 +76,17 @@ jobs:
             set -euo pipefail
             cd /root/promaia-py
             docker compose pull
-            # Recreate every service except maia-mail so mail sessions stay up.
+            # Recreate every service except maia-mail. maia-mail is kept OFF
+            # on Glacier (it eats tokens); it must not be counted in the
+            # post-deploy health check either.
             SERVICES=$(docker compose config --services | grep -v '^maia-mail$' | tr '\n' ' ')
             docker compose up -d --no-deps --force-recreate --remove-orphans $SERVICES
             docker builder prune -f
             docker image prune -a -f
             df -h /
             sleep 5
-            RUNNING=$(docker compose ps --status running -q | wc -l)
-            EXPECTED=$(docker compose config --services | wc -l)
+            RUNNING=$(docker compose ps --status running -q $SERVICES | wc -l)
+            EXPECTED=$(echo $SERVICES | wc -w)
             if [ "$RUNNING" -lt "$EXPECTED" ]; then
               echo "ERROR: Only $RUNNING/$EXPECTED services running"
               docker compose ps
