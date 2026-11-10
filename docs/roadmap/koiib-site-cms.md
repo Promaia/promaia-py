@@ -45,7 +45,10 @@ integration (fine-grained PAT, Contents read/write on the site repo), passed
 to git as an `http.extraheader` env var — never stored in `.git/config`.
 
 **Newsletter:** in `site` mode a post is "published" when
-`{base_url}/feed/posts/<slug>.json` answers 200. The cover image and body
+`{media_base_url}/feed/posts/<slug>.json` answers 200 (`media_base_url`
+defaults to `base_url`; set it to `https://koiib-website.pages.dev` only if an
+email must go out before the domain points at the new site — links stay on
+`base_url`, images come from the Pages project's own permanent URL). The cover image and body
 images come from that record (absolute URLs on the site) and replace the
 Notion URLs by position — in the markdown (so the plain-text part is clean
 too) and in the HTML. In both modes the "read on website" and "Subscribe"
@@ -62,6 +65,7 @@ Layered: `DEFAULT_CMS_CONFIG` ← `conf/cms.json` ← the `cms` section of
   "target": "webflow",            // "site" after cutover
   "site": {
     "base_url": "https://www.koiib.com",
+    "media_base_url": null,         // optional: feed + image origin, defaults to base_url
     "repo_url": "https://github.com/koiibenvenutto/koiib-website.git",
     "branch": "main",
     "checkout_dir": "sites/koiib-website",   // relative → under get_data_dir()
@@ -111,9 +115,18 @@ them to "temp"/"Don't sync".
 maia cms sync --target site --dry-run                 # plan only, touches nothing
 maia cms sync --target site --page <notion-page-id>   # just this page
 maia cms sync --target site --no-publish --checkout ~/dev-2/koiib-website
-maia news test --target site --base-url https://koiib-website.pages.dev \
+maia news test --target site --base-url https://www.koiib.com \
+               --media-base-url https://koiib-website.pages.dev \
                --page <notion-page-id> --email koii.create@gmail.com
 ```
+
+Running from the worktree (iCloud hides the venv's .pth files):
+`PYTHONPATH=$PWD PROMAIA_DATA_DIR=$PWD/maia-data uv run --no-project maia …`
+(`maia-data/` there is a gitignored scratch copy of the Notion credentials and
+RESEND_*/WEBFLOW_* env lines — delete it when done).
+
+The Docker image now installs `git` (the live `promaia:dev` image has none,
+so the site target could not clone/push from a container without it).
 
 `--page/--dry-run/--no-publish/--checkout` are refused with the webflow
 target so they can never widen into a full Webflow sync.
@@ -142,7 +155,25 @@ target so they can never widen into a full Webflow sync.
 - [x] Site mode: published check via the feed, site-hosted cover + body images (markdown and HTML), no Webflow calls
 - [x] `news test --page/--target/--base-url`
 - [x] Tests (`tests/test_newsletter_site.py`) + stubbed-Resend run against a local copy of a synced post
-- [ ] Real test send to koii.create@gmail.com against the `*.pages.dev` preview (`news test --target site --base-url … --page …`)
+- [x] `--media-base-url` / `site.media_base_url`: links on www.koiib.com, feed + images from the deployed preview
+- [x] Real test sends to koii.create@gmail.com (2026-11-09, Resend ids `01a1c3c9-6280-…` test page and
+  `01a1c3c9-64f3-…` "Dreamshare Monthly-FEB2026: Pathways"): both delivered; every `<img>` is
+  `https://koiib-website.pages.dev/media/posts/…` (all 200), every link `https://www.koiib.com/…`, no Notion
+  S3, Webflow or koiibenvenutto.com URLs in HTML or text
+
+## End-to-end proof (2026-11-09)
+
+Notion test page "[TEST] koiib.com site sync check" (`414d1339-6967-819a-abbc-d7a5112de6ef`, slug
+`koiib-site-sync-test`, Is newsletter on, one Notion-uploaded image) run through
+`maia cms sync --target site --page … --checkout ~/dev-2/koiib-website` (publish = git-push):
+
+1. To sync → created, image downloaded to WebP, pushed (site commit `4f4488b`); Notion status flipped to
+   Update on sync; `npm run deploy` → page + image 200 on koiib-website.pages.dev.
+2. Edited in Notion ("version 2") → updated (`8602a30`) → deployed → preview shows version 2.
+3. Set to Don't sync → deleted (`3966dfe`) → deployed → the deployment answers 404 (one pages.dev edge kept a
+   cached copy for a while; after cutover, purge www.koiib.com's cache for an unpublished URL if it matters).
+
+The test page is left in Notion at Don't sync for Koii to delete.
 
 ## Phase 3: Cutover (needs Koii's go-ahead; after the concert newsletter is out)
 
@@ -150,7 +181,8 @@ target so they can never widen into a full Webflow sync.
 - [ ] `CLOUDFLARE_API_TOKEN` repo secret on `koiibenvenutto/koiib-website` (Pages: Edit) so pushes deploy
 - [ ] Re-run the Webflow import on the site repo to catch posts published via Webflow after 2026-11-09
 - [ ] Decide the two queued April drafts (publish, or move off "To sync")
-- [ ] Merge `koiib-site-cms` into `koii-prod` (deploys kb) and pull it into `~/promaia/promaia-fresh`
+- [ ] Merge `koiib-site-cms` into `koii-prod` (deploys kb) and pull it into `~/promaia/promaia-fresh`;
+  rebuild the local image (Dockerfile now installs git)
 - [ ] Add `"cms": {"target": "site"}` to `promaia.config.json` on kb and the laptop (hand edit; nothing writes this section)
 - [ ] First real `maia cms sync` with `--dry-run`, then for real; check the Actions deploy
 
@@ -161,6 +193,14 @@ changes Blog Status "To sync" → "Update on sync", which the Webflow sync
 treats the same way.
 
 ## Open questions
+
+- Newsletter sign-ups: none of the ~118 Webflow form sign-ups (Dec 2025–Mar 2026) are in the Resend audience
+  "Newsletter Subscribers" — the Zapier zaps sent them elsewhere. The new site's form adds to the Resend
+  audience (Pages secrets RESEND_API_KEY + RESEND_AUDIENCE_ID, not set yet). Should the old sign-ups be
+  imported (export: `~/dev-2/koiib-capture/raw/api/form-submissions-*.json`)?
+- The concert newsletter, if sent through the Webflow path before cutover, links to
+  `www.koiibenvenutto.com/post/<slug>` and Webflow CDN images: re-import that post into the site before the
+  DNS switch so the link keeps working; its images live on Webflow's CDN for as long as Webflow keeps them.
 
 - Is "KOii chat" really a privacy flag? If not, set `skip_koii_chat_pages` to false.
 - Should the newsletter refuse to send (not just warn) when the post is not on the site yet?
