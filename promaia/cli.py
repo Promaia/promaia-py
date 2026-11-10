@@ -878,7 +878,51 @@ async def handle_cms_push(args):
         if hasattr(e, 'body'): logger.error(f"Details: {e.body}")
 
 async def handle_cms_sync(args):
-    """Handles 'maia cms sync' command."""
+    """Handles 'maia cms sync' command (target: webflow or the static site)."""
+    from promaia.config.cms_config import get_cms_target
+
+    try:
+        target = get_cms_target(getattr(args, "target", None))
+    except ValueError as e:
+        logger.error(str(e))
+        return
+
+    page_ids = getattr(args, "page", None) or []
+    dry_run = getattr(args, "dry_run", False)
+    no_publish = getattr(args, "no_publish", False)
+    checkout = getattr(args, "checkout", None)
+
+    if target == "site":
+        from promaia.cms_site.sync import sync_to_site
+
+        notion_db_id = None
+        if not page_ids:
+            try:
+                notion_db_id = get_notion_database_id("cms")
+            except (FileNotFoundError, ValueError) as e:
+                logger.error(f"Error loading Notion database ID for CMS: {e}")
+                return
+        try:
+            await sync_to_site(
+                notion_database_id=notion_db_id,
+                only_page_ids=page_ids or None,
+                dry_run=dry_run,
+                publish="none" if no_publish else None,
+                checkout_dir=checkout,
+                force_update=args.force_update,
+                blog_status_property_name=args.blog_status_property,
+            )
+        except Exception as e:
+            logger.error(f"Error during Notion-site sync: {str(e)}")
+            traceback.print_exc()
+        return
+
+    # Webflow target (legacy). The site-only flags must not silently widen into a full sync.
+    if page_ids or dry_run or no_publish or checkout:
+        logger.error("--page, --dry-run, --no-publish and --checkout only work with the site target "
+                     "(--target site); nothing was synced.")
+        return
+
     from promaia.webflow.sync import sync_to_webflow
 
     logger.info(f"Initiating sync for CMS with Webflow.")
@@ -3209,10 +3253,15 @@ def create_parser():
     cms_pull_parser.add_argument("--force", action="store_true", default=False, help="Force pull ignoring last sync time.")
     cms_pull_parser.set_defaults(func=handle_cms_pull)
     
-    cms_sync_parser = cms_subparsers.add_parser("sync", help="Sync CMS content to Webflow")
+    cms_sync_parser = cms_subparsers.add_parser("sync", help="Sync CMS content to the website (Webflow or the static site, per cms config)")
+    cms_sync_parser.add_argument("--target", choices=["webflow", "site"], help="Override the configured cms target (default from cms config: 'webflow')")
     cms_sync_parser.add_argument("--collection", help="Webflow collection ID (or use WEBFLOW_COLLECTION_ID env var)")
     cms_sync_parser.add_argument("--blog-status-property", default="Blog Status", help="Notion property name for blog status (default: 'Blog Status')")
     cms_sync_parser.add_argument("--force-update", action="store_true", help="Force update even if already synced")
+    cms_sync_parser.add_argument("--page", action="append", metavar="PAGE_ID", help="Site target: sync only this Notion page (repeatable); its Blog Status still decides what happens")
+    cms_sync_parser.add_argument("--dry-run", action="store_true", help="Site target: show what would change; write nothing, touch nothing in Notion")
+    cms_sync_parser.add_argument("--no-publish", action="store_true", help="Site target: write files into the checkout but don't commit/push")
+    cms_sync_parser.add_argument("--checkout", metavar="PATH", help="Site target: use this site checkout instead of cms.site.checkout_dir")
     cms_sync_parser.set_defaults(func=handle_cms_sync)
     
     # Newsletter command
@@ -3225,6 +3274,9 @@ def create_parser():
     
     newsletter_test_parser = newsletter_subparsers.add_parser("test", help="Test newsletter generation without sending")
     newsletter_test_parser.add_argument("--email", action="append", help="Email address to send test to (can be used multiple times)")
+    newsletter_test_parser.add_argument("--page", action="append", metavar="PAGE_ID", help="Test these Notion pages (repeatable) instead of the 'To send' ones")
+    newsletter_test_parser.add_argument("--target", choices=["webflow", "site"], help="Override the configured cms target for this test")
+    newsletter_test_parser.add_argument("--base-url", help="Site origin for links/images in this test (e.g. a *.pages.dev preview)")
     newsletter_test_parser.set_defaults(func=newsletter_test_command)
 
     # Add 'news' alias for newsletter
@@ -3237,6 +3289,9 @@ def create_parser():
 
     news_test_parser = news_subparsers.add_parser("test", help="Test newsletter generation without sending")
     news_test_parser.add_argument("--email", action="append", help="Email address to send test to (can be used multiple times)")
+    news_test_parser.add_argument("--page", action="append", metavar="PAGE_ID", help="Test these Notion pages (repeatable) instead of the 'To send' ones")
+    news_test_parser.add_argument("--target", choices=["webflow", "site"], help="Override the configured cms target for this test")
+    news_test_parser.add_argument("--base-url", help="Site origin for links/images in this test (e.g. a *.pages.dev preview)")
     news_test_parser.set_defaults(func=newsletter_test_command)
     
 
