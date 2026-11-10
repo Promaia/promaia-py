@@ -8,6 +8,16 @@ work with it.
 
 ## Active
 
+### koiib.com off Webflow — site CMS target + newsletter rework
+
+`maia cms sync` gets a `site` target that writes Notion CMS posts (JSON +
+downloaded images) into the koiib-website repo and pushes so its CI deploys
+to Cloudflare Pages; the newsletter checks publication, builds links and
+takes permanent image URLs from the site instead of Webflow. Webflow stays
+the default until cutover.
+
+See [`koiib-site-cms.md`](koiib-site-cms.md).
+
 ### Parent / Sub re-architecture — unified prefix, delegating parent
 
 Make the parent a pure delegator (search + act sub-agents only); ditch
