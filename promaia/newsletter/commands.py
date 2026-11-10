@@ -20,6 +20,13 @@ from promaia.newsletter.template import (
 )
 from promaia.webflow.client import get_webflow_client
 from promaia.utils.config import get_config
+from promaia.config.cms_config import get_cms_target, get_site_base_url, get_site_config
+from promaia.newsletter.site_source import (
+    fetch_site_post,
+    post_url,
+    replace_images_by_position,
+    replace_markdown_images_by_position,
+)
 from promaia.utils.display import print_text, print_separator
 
 # Default database ID (uses the same as Webflow CMS)
@@ -191,6 +198,62 @@ def replace_notion_images_with_webflow(html_content: str, webflow_id: str, heade
             print_text(f"   ⚠️ No more Webflow images to map for: {truncate_url(src)}", style="yellow")
 
     return str(soup)
+
+def get_page_slug(page: Dict[str, Any]) -> Optional[str]:
+    """Slug property, else slugify(title) — the rule both CMS sync targets use."""
+    slug = get_property_value(page, "Slug")
+    if slug:
+        return slug.strip()
+    title = get_property_value(page, "Title") or get_property_value(page, "Name")
+    if title:
+        from slugify import slugify
+        return slugify(title)
+    return None
+
+
+def check_site_published(page: Dict[str, Any], base_url: str):
+    """Site target: look the post up in the website's feed.
+
+    Returns (site_post or None, slug). A post counts as published when
+    {base_url}/feed/posts/<slug>.json answers 200.
+    """
+    slug = get_page_slug(page)
+    if not slug:
+        print_text(f"   ❌ No slug found for page: {page['id']}", style="red")
+        return None, None
+    site_cfg = get_site_config()
+    try:
+        site_post = fetch_site_post(
+            base_url, slug,
+            feed_path=site_cfg.get("feed_path", "/feed/posts/{slug}.json"),
+            post_path=site_cfg.get("post_path", "/post/{slug}"),
+        )
+    except Exception as e:
+        print_text(f"   ❌ Error checking the website feed: {e}", style="red")
+        return None, slug
+    if site_post:
+        print_text(f"   ✅ Found published post on the website: {site_post.url}", style="green")
+    else:
+        print_text(f"   ❌ Post '{slug}' is not on the website ({base_url}) yet", style="red")
+    return site_post, slug
+
+
+def read_on_website_url(base_url: str, slug: Optional[str]) -> str:
+    """The email's "read on website" link."""
+    return post_url(base_url, slug, get_site_config().get("post_path", "/post/{slug}"))
+
+
+def apply_site_images(html_content: str, site_post, header_image: Optional[str], base_url: str) -> str:
+    """Replace Notion image URLs in the email with the site-hosted copies, by position."""
+    html_out, replaced, unmapped = replace_images_by_position(
+        html_content, site_post.body_images, header_image=header_image,
+        keep_prefixes=(base_url.rstrip("/") + "/",),
+    )
+    print_text(f"   🔗 Replaced {replaced} image URL(s) with website-hosted copies", style="white")
+    if unmapped:
+        print_text(f"   ⚠️ {unmapped} image(s) had no website copy to map to", style="yellow")
+    return html_out
+
 
 async def query_pages_by_status(database_id: str, status: str) -> List[Dict[str, Any]]:
     """
@@ -411,15 +474,29 @@ async def send_newsletter_via_resend(page: Dict[str, Any], test_mode: bool = Fal
     if not title:
         return False, "❌ Missing page title", None
     
-    # Check if the blog post has been published to Webflow
-    is_published, webflow_id, webflow_slug = await check_webflow_published(page)
-    if not is_published:
-        print_text(f"   ⚠️  Blog post not found in Webflow, but continuing for newsletter testing...", style="yellow")
-        # Use a default slug based on title
-        webflow_slug = title.lower().replace(' ', '-').replace(',', '').replace('.', '')
+    target = get_cms_target()
+    base_url = get_site_base_url()
+    site_post = None
+    webflow_id = None
+
+    if target == "site":
+        # Check the post is live on the static website (its feed answers 200)
+        site_post, webflow_slug = check_site_published(page, base_url)
+        is_published = site_post is not None
+        if not is_published:
+            print_text(f"   ⚠️  Post not found on the website: images would use expiring Notion links. Continuing...", style="yellow")
+            if not webflow_slug:
+                webflow_slug = title.lower().replace(' ', '-').replace(',', '').replace('.', '')
+    else:
+        # Check if the blog post has been published to Webflow
+        is_published, webflow_id, webflow_slug = await check_webflow_published(page)
+        if not is_published:
+            print_text(f"   ⚠️  Blog post not found in Webflow, but continuing for newsletter testing...", style="yellow")
+            # Use a default slug based on title
+            webflow_slug = title.lower().replace(' ', '-').replace(',', '').replace('.', '')
     
     # Generate the "read on website" URL using the blog slug
-    post_link = f"https://www.koiibenvenutto.com/post/{webflow_slug}" if webflow_slug else f"https://www.koiibenvenutto.com/"
+    post_link = read_on_website_url(base_url, webflow_slug)
     print_text(f"   📄 Using 'read on website' URL: {post_link}", style="white")
     
     # Get additional properties for email template
@@ -427,8 +504,12 @@ async def send_newsletter_via_resend(page: Dict[str, Any], test_mode: bool = Fal
     print_text(f"   📄 Subtitle: {subtitle}", style="white")
     
     # Get cover image URL
-    cover_image_url = get_cover_image_url(page)
-    if cover_image_url:
+    if site_post is not None and site_post.cover_image:
+        cover_image_url = site_post.cover_image
+        print_text(f"   ✅ Using website-hosted image: {truncate_url(cover_image_url)}", style="green")
+    else:
+        cover_image_url = get_cover_image_url(page)
+    if target != "site" and cover_image_url:
         # Try to get Webflow-hosted version (best practice)
         webflow_image_url = await get_webflow_hosted_image_url(page, cover_image_url)
         if webflow_image_url:
@@ -438,6 +519,10 @@ async def send_newsletter_via_resend(page: Dict[str, Any], test_mode: bool = Fal
     try:
         blocks = await get_block_content(page_id)
         content_markdown = notion_blocks_to_markdown(blocks)
+        if site_post is not None:
+            content_markdown = replace_markdown_images_by_position(
+                content_markdown, site_post.body_images, keep_prefixes=(base_url.rstrip("/") + "/",)
+            )
         print_text(f"   📄 Generated markdown content length: {len(content_markdown)} characters", style="white")
     except Exception as e:
         return False, f"❌ Error converting page to markdown: {str(e)}", None
@@ -449,11 +534,16 @@ async def send_newsletter_via_resend(page: Dict[str, Any], test_mode: bool = Fal
             title=title,
             header_image_url=cover_image_url,
             subtitle=subtitle,
-            post_link=post_link
+            post_link=post_link,
+            subscribe_url=base_url + "/"
         )
 
-        # Replace Notion S3 image URLs with permanent Webflow CDN URLs
-        if is_published and webflow_id:
+        # Replace Notion S3 image URLs with permanent hosted URLs
+        if site_post is not None:
+            email_html_content = apply_site_images(
+                email_html_content, site_post, cover_image_url, base_url
+            )
+        elif is_published and webflow_id:
             email_html_content = replace_notion_images_with_webflow(
                 email_html_content, webflow_id, header_image=cover_image_url
             )
@@ -467,7 +557,8 @@ async def send_newsletter_via_resend(page: Dict[str, Any], test_mode: bool = Fal
             newsletter_title=title,
             subtitle=subtitle,
             post_link=post_link,
-            cover_image_url=cover_image_url
+            cover_image_url=cover_image_url,
+            subscribe_url=base_url + "/"
         )
         
     except Exception as e:
@@ -634,14 +725,20 @@ async def list_eligible_newsletter_pages(args):
         title = get_page_display_title(page)
         status = get_property_value(page, "Newsletter Status")
 
-        # Check if the blog post has been published to Webflow
-        is_published, _, _ = await check_webflow_published(page)
+        # Check if the blog post has been published to the website
+        if get_cms_target() == "site":
+            site_post, _ = check_site_published(page, get_site_base_url())
+            is_published = site_post is not None
+            label = "Website"
+        else:
+            is_published, _, _ = await check_webflow_published(page)
+            label = "Webflow"
         webflow_status = "✅ Published" if is_published else "❌ Not published"
 
         # Display page information
         print(f"   {i}. {title}")
         print(f"      Status: {status}")
-        print(f"      Webflow: {webflow_status}")
+        print(f"      {label}: {webflow_status}")
 
 async def newsletter_sync_command(args):
     """
@@ -735,11 +832,21 @@ async def newsletter_test_command(args):
         test_recipients = [test_email]
         print(f"📧 Test email: {test_email}")
 
-    # Always use the CMS database
-    database_id = WEBFLOW_CMS_DATABASE_ID
+    target = getattr(args, "target", None)
+    base_url = getattr(args, "base_url", None)
+    page_ids = getattr(args, "page", None) or []
+    print(f"🌐 Target: {get_cms_target(target)} · site: {get_site_base_url(base_url)}")
 
-    # Get eligible pages
-    eligible_pages = await get_eligible_newsletter_pages(database_id)
+    if page_ids:
+        # Explicit pages, whatever their Newsletter Status
+        notion_client = ensure_default_client()
+        eligible_pages = [await notion_client.pages.retrieve(page_id=pid) for pid in page_ids]
+    else:
+        # Always use the CMS database
+        database_id = WEBFLOW_CMS_DATABASE_ID
+
+        # Get eligible pages
+        eligible_pages = await get_eligible_newsletter_pages(database_id)
 
     if not eligible_pages:
         print("❌ No newsletters to test")
@@ -755,7 +862,9 @@ async def newsletter_test_command(args):
         title = get_page_display_title(page)
 
         # Test newsletter generation (with actual TEST email sending)
-        success, message, email_id = await test_newsletter_generation(page, test_recipients=test_recipients)
+        success, message, email_id = await test_newsletter_generation(
+            page, test_recipients=test_recipients, target=target, base_url=base_url
+        )
 
         if success:
             print(f"   {message}")
@@ -772,13 +881,17 @@ async def newsletter_test_command(args):
         print(f"❌ {failure_count} test(s) failed")
 
 
-async def test_newsletter_generation(page: Dict[str, Any], test_recipients: Optional[List[str]] = None) -> Tuple[bool, str, Optional[str]]:
+async def test_newsletter_generation(page: Dict[str, Any], test_recipients: Optional[List[str]] = None,
+                                     target: Optional[str] = None,
+                                     base_url: Optional[str] = None) -> Tuple[bool, str, Optional[str]]:
     """
     Test newsletter generation for a page and send actual TEST email to safe recipients.
 
     Args:
         page: Notion page object
         test_recipients: Optional list of email addresses to send test to. If not provided, uses RESEND_TEST_EMAIL env var.
+        target: Override the cms target ("webflow" or "site") for this test.
+        base_url: Override the site origin (e.g. a *.pages.dev preview before cutover).
 
     Returns:
         Tuple of (success, message, email_id)
@@ -789,22 +902,38 @@ async def test_newsletter_generation(page: Dict[str, Any], test_recipients: Opti
         # Get basic page properties
         properties = page.get("properties", {})
         
-        # Check Webflow publishing status (but don't fail if not published)
-        is_published, webflow_id, slug = await check_webflow_published(page)
-        if not is_published:
-            # Create a fallback slug from the title
-            title = get_page_display_title(page)
-            slug = title.lower().replace(' ', '-').replace(',', '').replace('.', '').replace('✨', '')
+        target = get_cms_target(target)
+        base_url = get_site_base_url(base_url)
+        site_post = None
+        webflow_id = None
+
+        if target == "site":
+            # Check the post is on the static website (feed answers 200)
+            site_post, slug = check_site_published(page, base_url)
+            is_published = site_post is not None
+            if not is_published and not slug:
+                title = get_page_display_title(page)
+                slug = title.lower().replace(' ', '-').replace(',', '').replace('.', '').replace('✨', '')
+        else:
+            # Check Webflow publishing status (but don't fail if not published)
+            is_published, webflow_id, slug = await check_webflow_published(page)
+            if not is_published:
+                # Create a fallback slug from the title
+                title = get_page_display_title(page)
+                slug = title.lower().replace(' ', '-').replace(',', '').replace('.', '').replace('✨', '')
         
         # Get the website URL
-        website_url = f"https://www.koiibenvenutto.com/post/{slug}"
+        website_url = read_on_website_url(base_url, slug)
 
         # Get subtitle (description)
         subtitle = get_property_value(page, "Description") or ""
 
         # Get cover image URL
-        cover_image_url = get_cover_image_url(page)
-        if cover_image_url:
+        if site_post is not None and site_post.cover_image:
+            cover_image_url = site_post.cover_image
+        else:
+            cover_image_url = get_cover_image_url(page)
+        if target != "site" and cover_image_url:
             # Try to get Webflow-hosted version
             webflow_image_url = await get_webflow_hosted_image_url(page, cover_image_url)
             if webflow_image_url:
@@ -823,6 +952,10 @@ async def test_newsletter_generation(page: Dict[str, Any], test_recipients: Opti
         try:
             blocks = await get_block_content(page_id)
             content_markdown = notion_blocks_to_markdown(blocks)
+            if site_post is not None:
+                content_markdown = replace_markdown_images_by_position(
+                    content_markdown, site_post.body_images, keep_prefixes=(base_url.rstrip("/") + "/",)
+                )
         except Exception as e:
             return False, f"❌ Error converting page content: {str(e)}", None
 
@@ -832,11 +965,16 @@ async def test_newsletter_generation(page: Dict[str, Any], test_recipients: Opti
             title=title,
             header_image_url=cover_image_url,
             subtitle=subtitle,
-            post_link=website_url
+            post_link=website_url,
+            subscribe_url=base_url + "/"
         )
 
-        # Replace Notion S3 image URLs with permanent Webflow CDN URLs
-        if is_published and webflow_id:
+        # Replace Notion S3 image URLs with permanent hosted URLs
+        if site_post is not None:
+            html_newsletter_content = apply_site_images(
+                html_newsletter_content, site_post, cover_image_url, base_url
+            )
+        elif is_published and webflow_id:
             html_newsletter_content = replace_notion_images_with_webflow(
                 html_newsletter_content, webflow_id, header_image=cover_image_url
             )
@@ -847,7 +985,8 @@ async def test_newsletter_generation(page: Dict[str, Any], test_recipients: Opti
             newsletter_title=title,
             subtitle=subtitle,
             post_link=website_url,
-            cover_image_url=cover_image_url
+            cover_image_url=cover_image_url,
+            subscribe_url=base_url + "/"
         )
 
         # Get safe test recipients

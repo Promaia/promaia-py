@@ -9,6 +9,12 @@ from typing import Optional, Dict, Any, List
 # Resend unsubscribe URL placeholder (will be replaced by Resend when sending)
 RESEND_UNSUBSCRIBE_PLACEHOLDER = "{{{RESEND_UNSUBSCRIBE_URL}}}"
 
+def _default_subscribe_url() -> str:
+    """The site's home page (cms.site.base_url), where the signup form lives."""
+    from promaia.config.cms_config import get_site_base_url
+    return get_site_base_url() + "/"
+
+
 def escape_html(text: Optional[str]) -> str:
     """
     Escape HTML special characters.
@@ -163,7 +169,8 @@ def create_simple_newsletter_html(
     title: str,
     header_image_url: Optional[str] = None,
     subtitle: Optional[str] = None,
-    post_link: Optional[str] = None
+    post_link: Optional[str] = None,
+    subscribe_url: Optional[str] = None
 ) -> str:
     """
     Create a simple newsletter HTML from markdown content.
@@ -181,10 +188,13 @@ def create_simple_newsletter_html(
         header_image_url: Optional URL for header image
         subtitle: Optional subtitle text
         post_link: Optional link to read on website
+        subscribe_url: "Subscribe here" link; defaults to the site's home page
         
     Returns:
         Complete HTML email ready to send
     """
+    subscribe_url = subscribe_url or _default_subscribe_url()
+
     # Convert markdown content to HTML
     content_html = markdown_to_html(content_markdown)
     
@@ -250,7 +260,7 @@ def create_simple_newsletter_html(
         </div>
 
         <div style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #e0e0e0; font-size: 14px; color: #888;">
-            <p style="margin: 0;">Forwarded this email? <a href="https://www.koiibenvenutto.com/" style="color: #007acc; text-decoration: none;">Subscribe here</a></p>
+            <p style="margin: 0;">Forwarded this email? <a href="{subscribe_url}" style="color: #007acc; text-decoration: none;">Subscribe here</a></p>
         </div>
 
         <div style="margin-top: 20px; font-size: 12px; color: #888;">
@@ -605,7 +615,8 @@ def create_plain_text_newsletter(
     subtitle: Optional[str] = None,
     post_link: Optional[str] = None,
     from_name: Optional[str] = None,
-    cover_image_url: Optional[str] = None
+    cover_image_url: Optional[str] = None,
+    subscribe_url: Optional[str] = None
 ) -> str:
     """
     Create a plain text newsletter from content (deprecated - kept for backward compatibility).
@@ -651,6 +662,6 @@ def create_plain_text_newsletter(
     if post_link:
         email_parts.append(f"Read on website: {post_link}")
     email_parts.append("")
-    email_parts.append("Forwarded this email? Subscribe: https://www.koiibenvenutto.com/")
+    email_parts.append(f"Forwarded this email? Subscribe: {subscribe_url or _default_subscribe_url()}")
     
     return "\n".join(email_parts)
