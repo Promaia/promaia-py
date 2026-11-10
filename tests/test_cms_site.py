@@ -224,6 +224,9 @@ def run_sync(tmp_path, pages, mapping, **kw):
         return True
 
     cfg = dict(cms_config.DEFAULT_CMS_CONFIG["site"])
+    # Hermetic: an empty checkout dir would be cloned from the real repo_url.
+    cfg["repo_url"] = ""
+    (tmp_path / ".checkout").write_text("")
     res = asyncio.run(sync_to_site(
         "db", checkout_dir=str(tmp_path), publish="none", use_cache=False,
         download=fake_download_factory(mapping), fetch_pages=fetch_pages, fetch_html=fetch_html,

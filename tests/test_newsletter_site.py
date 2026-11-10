@@ -87,3 +87,32 @@ def test_check_site_published(monkeypatch):
     page["properties"]["Slug"]["rich_text"][0]["text"]["content"] = "draft"
     post, slug = commands.check_site_published(page, BASE)
     assert post is None and slug == "draft"
+
+
+def test_check_site_published_split_media_origin(monkeypatch):
+    """Before cutover: links on www.koiib.com, feed + images from the pages.dev deployment."""
+    from promaia.newsletter import commands
+    seen = {}
+
+    def fake_fetch(base, slug, **kw):
+        seen["base"] = base
+        return S.site_post_from_feed(FEED, base)
+
+    monkeypatch.setattr(commands, "fetch_site_post", fake_fetch)
+    page = {"id": "x", "properties": {"Slug": {"type": "rich_text", "rich_text": [{"text": {"content": "concert"}}]}}}
+    post, _ = commands.check_site_published(page, "https://www.koiib.com", BASE)
+    assert seen["base"] == BASE
+    assert post.url == "https://www.koiib.com/post/concert"
+    assert post.cover_image.startswith(BASE + "/media/")
+    assert all(u.startswith(BASE + "/media/") for u in post.body_images)
+    html = '<img src="https://s3.example/notion.png"><img src="https://www.koiib.com/media/x.webp">'
+    out = commands.apply_site_images(html, post, None, "https://www.koiib.com", BASE)
+    assert "s3.example" not in out and "https://www.koiib.com/media/x.webp" in out
+
+
+def test_media_base_url_defaults_to_base(monkeypatch):
+    from promaia.config import cms_config
+    monkeypatch.setattr(cms_config, "get_site_config", lambda: {"base_url": "https://www.koiib.com"})
+    assert cms_config.get_site_media_base_url() == "https://www.koiib.com"
+    assert cms_config.get_site_media_base_url(None, "https://x.dev/") == "https://x.dev"
+    assert cms_config.get_site_media_base_url("https://koiib-website.pages.dev/") == "https://koiib-website.pages.dev"

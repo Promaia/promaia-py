@@ -3276,7 +3276,8 @@ def create_parser():
     newsletter_test_parser.add_argument("--email", action="append", help="Email address to send test to (can be used multiple times)")
     newsletter_test_parser.add_argument("--page", action="append", metavar="PAGE_ID", help="Test these Notion pages (repeatable) instead of the 'To send' ones")
     newsletter_test_parser.add_argument("--target", choices=["webflow", "site"], help="Override the configured cms target for this test")
-    newsletter_test_parser.add_argument("--base-url", help="Site origin for links/images in this test (e.g. a *.pages.dev preview)")
+    newsletter_test_parser.add_argument("--base-url", help="Site origin for the links in this test (default: cms site.base_url)")
+    newsletter_test_parser.add_argument("--media-base-url", help="Origin to read the feed and images from (e.g. https://koiib-website.pages.dev before cutover; default: --base-url)")
     newsletter_test_parser.set_defaults(func=newsletter_test_command)
 
     # Add 'news' alias for newsletter
@@ -3291,7 +3292,8 @@ def create_parser():
     news_test_parser.add_argument("--email", action="append", help="Email address to send test to (can be used multiple times)")
     news_test_parser.add_argument("--page", action="append", metavar="PAGE_ID", help="Test these Notion pages (repeatable) instead of the 'To send' ones")
     news_test_parser.add_argument("--target", choices=["webflow", "site"], help="Override the configured cms target for this test")
-    news_test_parser.add_argument("--base-url", help="Site origin for links/images in this test (e.g. a *.pages.dev preview)")
+    news_test_parser.add_argument("--base-url", help="Site origin for the links in this test (default: cms site.base_url)")
+    news_test_parser.add_argument("--media-base-url", help="Origin to read the feed and images from (e.g. https://koiib-website.pages.dev before cutover; default: --base-url)")
     news_test_parser.set_defaults(func=newsletter_test_command)
     
 

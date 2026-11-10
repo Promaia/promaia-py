@@ -177,6 +177,17 @@ def get_site_base_url(override: Optional[str] = None) -> str:
     return (override or get_site_config().get("base_url") or "").rstrip("/")
 
 
+def get_site_media_base_url(override: Optional[str] = None, base_override: Optional[str] = None) -> str:
+    """Origin the newsletter reads the feed and images from.
+
+    Defaults to the public base_url. Set ``site.media_base_url`` (or pass an
+    override) to the Pages project's own URL (https://koiib-website.pages.dev)
+    when emails must go out before the domain points at the new site: links
+    still use base_url, images and the published check use this origin.
+    """
+    return (override or get_site_config().get("media_base_url") or get_site_base_url(base_override)).rstrip("/")
+
+
 def get_webp_config() -> Dict[str, Any]:
     """
     Get WebP conversion configuration.

@@ -2,10 +2,12 @@ FROM python:3.13-slim AS base
 
 WORKDIR /app
 
-# System deps for chromadb native extensions, build tools,
-# and Node.js for MCP servers (Notion, etc.) that run via npx
+# System deps for chromadb native extensions, build tools, git (cms sync's
+# site target clones/pushes the website repo), and Node.js for MCP servers
+# (Notion, etc.) that run via npx
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    git \
     nodejs \
     npm \
     && rm -rf /var/lib/apt/lists/*
