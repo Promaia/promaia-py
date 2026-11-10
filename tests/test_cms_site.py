@@ -269,6 +269,18 @@ def test_sync_status_semantics(tmp_path):
     assert "amazonaws" not in new["html"]
     assert len(list((tmp_path / "public/media/posts/new-post").iterdir())) == 2
     assert marked == ["aaaa"]                                # only "To sync" → "Update on sync"
+    # the unpublished URL redirects at once (Pages may keep a removed page in its edge cache)
+    assert "/post/gone-post /blog 302" in (tmp_path / "public/_redirects").read_text()
+
+
+def test_republishing_a_slug_drops_its_takedown_redirect(tmp_path):
+    seed_post(tmp_path, "back", notion_id="bbbb")
+    run_sync(tmp_path, [make_page("bbbb", "Back", "Don't sync", slug="back")], {NOTION_IMG: jpeg_bytes()})
+    redirects = tmp_path / "public/_redirects"
+    assert "/post/back /blog 302" in redirects.read_text()
+    res, _ = run_sync(tmp_path, [make_page("bbbb", "Back", "To sync", slug="back")], {NOTION_IMG: jpeg_bytes()})
+    assert res.created == 1 and "/post/back " not in redirects.read_text()
+    assert (tmp_path / "content/posts/back.json").exists()
 
 
 def test_dry_run_writes_nothing(tmp_path):

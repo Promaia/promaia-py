@@ -89,7 +89,7 @@ Layered: `DEFAULT_CMS_CONFIG` ← `conf/cms.json` ← the `cms` section of
 | Live | left exactly as published |
 | To sync | written; after a successful push, status → "Update on sync" |
 | Update on sync | rewritten when the Notion page changed (own cache: `cache/site_sync_cache.db`) |
-| Don't sync | post file + media removed if present |
+| Don't sync | post file + media removed if present, and `/post/<slug> /blog 302` added to `public/_redirects` (Cloudflare Pages kept serving a removed page from its edge cache in testing; a redirect rule takes effect on the next deploy). Publishing that slug again drops the redirect. |
 | anything else (temp) | ignored |
 
 Extra rules: the "Webflow ID" property is never touched in site mode;
@@ -170,8 +170,9 @@ Notion test page "[TEST] koiib.com site sync check" (`414d1339-6967-819a-abbc-d7
 1. To sync → created, image downloaded to WebP, pushed (site commit `4f4488b`); Notion status flipped to
    Update on sync; `npm run deploy` → page + image 200 on koiib-website.pages.dev.
 2. Edited in Notion ("version 2") → updated (`8602a30`) → deployed → preview shows version 2.
-3. Set to Don't sync → deleted (`3966dfe`) → deployed → the deployment answers 404 (one pages.dev edge kept a
-   cached copy for a while; after cutover, purge www.koiib.com's cache for an unpublished URL if it matters).
+3. Set to Don't sync → deleted (`3966dfe`) → deployed → the deployment answers 404, but the pages.dev edge kept
+   serving the cached page (`s-maxage=604800`). A `_redirects` line fixed it on the next deploy, so the site
+   sync now adds one for every unpublished post (test: `test_republishing_a_slug_drops_its_takedown_redirect`).
 
 The test page is left in Notion at Don't sync for Koii to delete.
 

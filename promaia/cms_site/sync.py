@@ -148,6 +148,36 @@ class SiteStore:
         self.by_slug.pop(slug, None)
         return removed
 
+    def _redirects_file(self) -> Path:
+        return self.root / "public" / "_redirects"
+
+    def add_takedown_redirect(self, slug: str, target: str = "/blog") -> Path:
+        """Point an unpublished post's URL elsewhere.
+
+        Cloudflare Pages can keep serving a removed page from its edge cache for
+        a while after a deploy; a _redirects rule takes effect immediately.
+        """
+        redirects = self._redirects_file()
+        line = f"{self.post_path.format(slug=slug)} {target} 302\n"
+        current = redirects.read_text() if redirects.exists() else ""
+        if line not in current:
+            redirects.parent.mkdir(parents=True, exist_ok=True)
+            redirects.write_text(current + ("" if current.endswith("\n") or not current else "\n") + line)
+        return redirects
+
+    def drop_redirects_from(self, slug: str) -> bool:
+        """Remove _redirects rules whose source is this post's URL (it is being published again)."""
+        redirects = self._redirects_file()
+        if not redirects.exists():
+            return False
+        src = self.post_path.format(slug=slug)
+        lines = redirects.read_text().splitlines(keepends=True)
+        kept = [ln for ln in lines if not (ln.split() and ln.split()[0] in (src, src + "/"))]
+        if len(kept) == len(lines):
+            return False
+        redirects.write_text("".join(kept))
+        return True
+
     def add_redirect(self, old_slug: str, new_slug: str) -> Path:
         """Keep an old post URL working after a slug change (Cloudflare Pages _redirects)."""
         redirects = self.root / "public" / "_redirects"
@@ -312,7 +342,8 @@ async def sync_to_site(
                     result.log(f"{prefix}would delete post /{slug} and its media: {title}")
                 else:
                     store.delete_post(slug)
-                    result.log(f"deleted post {slug}: {title}")
+                    store.add_takedown_redirect(slug)
+                    result.log(f"deleted post {slug} (its URL now redirects to /blog): {title}")
                     changed_titles.append(f"remove {title}")
                 result.deleted += 1
                 continue
@@ -358,6 +389,8 @@ async def sync_to_site(
                     store.delete_post(existing["slug"])
                     store.add_redirect(existing["slug"], slug)
                     result.log(f"  slug changed {existing['slug']} → {slug}; redirect added")
+                if store.drop_redirects_from(slug):
+                    result.log(f"  removed the old redirect from /post/{slug}")
                 store.write_post(record, media.images)
                 for w in media.warnings:
                     result.log(f"  warning: {w}")
