@@ -19,10 +19,11 @@ default target, so merging changes nothing until the cms config says
 **Content lives in the site repo, as JSON, with its images next to it.**
 
 - `content/posts/<slug>.json` — one record per post: `slug, title,
-  description, subtitle, publishDate, tag, emojiTags, author, readTime,
+  description, subtitle, publishDate, createdAt, tag, emojiTags, author, readTime,
   featured, isNewsletter, thumbnail, mainImage, gallery, html, notionPageId,
   webflowId, source, syncedAt` (images are `{src, width, height}`; `html` uses
-  site-relative image paths). The site builds pages from these at build time
+  site-relative image paths; `createdAt` = the Notion page's created_time,
+  the tie-breaker when posts share a publish date). The site builds pages from these at build time
   and also publishes them as `/feed/posts/<slug>.json` + `/feed/posts.json`.
 - `public/media/posts/<slug>/<sha1[:12]>.<ext>` — every image, downloaded
   during the sync (Notion's signed S3 links expire after ~1 hour).

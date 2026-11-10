@@ -61,7 +61,8 @@ def make_page(pid, title, status, slug="", koii_chat=False, webflow_id="", thumb
             {"type": "file", "name": "t.jpg", "file": {"url": thumb}}] if thumb else []},
     }
     props.update(extra)
-    return {"id": pid, "properties": props, "last_edited_time": "2026-11-09T00:00:00.000Z", "cover": None}
+    return {"id": pid, "properties": props, "last_edited_time": "2026-11-09T00:00:00.000Z",
+            "created_time": "2026-11-01T10:00:00.000Z", "cover": None}
 
 
 def fake_download_factory(mapping, calls=None):
@@ -198,6 +199,8 @@ def test_record_has_contract_keys_and_no_relations():
     page = make_page("abc-123", "Title", "To sync", webflow_id="wf1")
     rec = C.build_post_record(page, "<p>x</p>", {"src": "/m/a.webp", "width": 1, "height": 1})
     assert tuple(rec.keys()) == C.POST_KEYS
+    assert C.POST_KEYS.index("createdAt") == C.POST_KEYS.index("publishDate") + 1
+    assert rec["createdAt"] == "2026-11-01T10:00:00.000Z"
     assert rec["source"] == "notion-sync" and rec["notionPageId"] == "abc-123"
     assert rec["thumbnail"] == rec["mainImage"]
     assert "secret-journal" not in C.dump_post(rec)

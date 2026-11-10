@@ -29,7 +29,7 @@ from slugify import slugify
 logger = logging.getLogger(__name__)
 
 POST_KEYS = (
-    "slug", "title", "description", "subtitle", "publishDate", "tag", "emojiTags",
+    "slug", "title", "description", "subtitle", "publishDate", "createdAt", "tag", "emojiTags",
     "author", "readTime", "featured", "isNewsletter", "thumbnail", "mainImage",
     "gallery", "html", "notionPageId", "webflowId", "source", "syncedAt",
 )
@@ -332,6 +332,9 @@ def build_post_record(page: Dict[str, Any], html: str, thumbnail: Optional[Dict[
         "description": prop_text(page, "Description"),
         "subtitle": existing.get("subtitle") or "",
         "publishDate": publish_date,
+        # Tie-breaker for posts sharing a publish date (the site sorts by
+        # publishDate desc, then createdAt desc, as Webflow did).
+        "createdAt": page.get("created_time") or existing.get("createdAt"),
         "tag": prop_select(page, "Tag"),
         "emojiTags": prop_text(page, "Emoji Tags") or None,
         "author": prop_text(page, "Author Name") or None,
