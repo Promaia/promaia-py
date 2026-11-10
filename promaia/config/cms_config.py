@@ -1,11 +1,21 @@
 """
 CMS configuration loader for promaia.
 
-This module loads and validates CMS-specific configuration from conf/cms.json.
-Provides defaults if the config file is missing or incomplete.
+Configuration is layered, later layers winning:
+
+1. ``DEFAULT_CMS_CONFIG`` (below)
+2. ``conf/cms.json`` in the repo
+3. the optional ``cms`` section of ``<data dir>/promaia.config.json``
+   (per-install overrides, e.g. ``{"cms": {"target": "site"}}``)
+
+The data-dir file is only ever READ here; this module never writes it.
+
+``target`` picks where ``maia cms sync`` publishes: ``"webflow"`` (the
+legacy Webflow CMS path, default) or ``"site"`` (content files in the
+static-site repo, see ``promaia.cms_site``).
 """
+import copy
 import json
-import os
 from pathlib import Path
 from typing import Dict, Any, Optional
 import logging
@@ -15,8 +25,11 @@ logger = logging.getLogger(__name__)
 # Cache the loaded config to avoid repeated file reads
 _cached_config: Optional[Dict[str, Any]] = None
 
+CMS_TARGETS = ("webflow", "site")
+
 # Default configuration values
 DEFAULT_CMS_CONFIG = {
+    "target": "webflow",
     "image_processing": {
         "webp_conversion": {
             "enabled": True,
@@ -29,26 +42,73 @@ DEFAULT_CMS_CONFIG = {
     "webflow": {
         "max_concurrent_uploads": 8,
         "retry_attempts": 3
+    },
+    "site": {
+        # Public origin of the site; used for "read on website" links,
+        # newsletter image URLs and the published-check feed.
+        "base_url": "https://www.koiib.com",
+        "repo_url": "https://github.com/koiibenvenutto/koiib-website.git",
+        "branch": "main",
+        # Relative paths resolve under get_data_dir(); absolute paths are used as-is.
+        "checkout_dir": "sites/koiib-website",
+        "content_dir": "content/posts",
+        "media_dir": "public/media/posts",
+        "media_url_prefix": "/media/posts",
+        "post_path": "/post/{slug}",
+        "feed_path": "/feed/posts/{slug}.json",
+        # "git-push": commit + push to `branch` (the site repo's CI deploys);
+        # "none": write files only.
+        "publish": "git-push",
+        "image_max_width": 2000,
+        "image_quality": 82,
+        # Never write pages ticked "KOii chat" (note: 16 of the 30 posts that
+        # were public on Webflow in Nov 2026 have it ticked; they are "Live",
+        # so this only matters if one is set back to "To sync"/"Update on sync").
+        "skip_koii_chat_pages": True
     }
 }
 
 
 def get_config_path() -> Path:
     """
-    Get the path to the CMS config file.
+    Get the path to the repo-level CMS config file.
 
     Returns:
         Path to conf/cms.json
     """
-    # Get project root (parent of promaia package)
-    current_file = Path(__file__)
-    project_root = current_file.parent.parent.parent
-    return project_root / "conf" / "cms.json"
+    from promaia.utils.env_writer import get_project_root
+    return Path(get_project_root()) / "conf" / "cms.json"
+
+
+def _read_json(path: Path) -> Dict[str, Any]:
+    """Read a JSON object from *path*; missing or invalid files give {}."""
+    if not path.exists():
+        return {}
+    try:
+        with open(path, 'r') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in {path}: {e}")
+    except Exception as e:
+        logger.error(f"Error reading {path}: {e}")
+    return {}
+
+
+def _data_dir_cms_section() -> Dict[str, Any]:
+    """The ``cms`` section of <data dir>/promaia.config.json (read-only)."""
+    try:
+        from promaia.utils.env_writer import get_config_path as get_promaia_config_path
+        section = _read_json(get_promaia_config_path()).get("cms", {})
+        return section if isinstance(section, dict) else {}
+    except Exception as e:
+        logger.warning(f"Could not read cms section of promaia.config.json: {e}")
+        return {}
 
 
 def load_cms_config(reload: bool = False) -> Dict[str, Any]:
     """
-    Load CMS configuration from conf/cms.json.
+    Load the layered CMS configuration (defaults <- conf/cms.json <- data-dir cms section).
 
     Uses cached config by default for performance. Set reload=True to
     force reloading from disk.
@@ -61,41 +121,24 @@ def load_cms_config(reload: bool = False) -> Dict[str, Any]:
     """
     global _cached_config
 
-    # Return cached config if available and not forcing reload
     if _cached_config is not None and not reload:
         return _cached_config
 
-    config_path = get_config_path()
+    config = _deep_merge(DEFAULT_CMS_CONFIG, _read_json(get_config_path()))
+    config = _deep_merge(config, _data_dir_cms_section())
 
-    # If config file doesn't exist, return defaults
-    if not config_path.exists():
-        logger.warning(f"CMS config file not found at {config_path}, using defaults")
-        _cached_config = DEFAULT_CMS_CONFIG.copy()
-        return _cached_config
+    if config.get("target") not in CMS_TARGETS:
+        logger.warning(f"Unknown cms target {config.get('target')!r}; using 'webflow'")
+        config["target"] = "webflow"
 
-    try:
-        with open(config_path, 'r') as f:
-            loaded_config = json.load(f)
-
-        # Merge with defaults to ensure all keys exist
-        config = _deep_merge(DEFAULT_CMS_CONFIG.copy(), loaded_config)
-
-        _cached_config = config
-        return config
-
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON in CMS config file {config_path}: {e}")
-        _cached_config = DEFAULT_CMS_CONFIG.copy()
-        return _cached_config
-    except Exception as e:
-        logger.error(f"Error loading CMS config from {config_path}: {e}")
-        _cached_config = DEFAULT_CMS_CONFIG.copy()
-        return _cached_config
+    _cached_config = config
+    return config
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """
     Deep merge two dictionaries, with override values taking precedence.
+    Neither input is mutated.
 
     Args:
         base: Base dictionary with default values
@@ -104,15 +147,34 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     Returns:
         Merged dictionary
     """
-    result = base.copy()
+    result = copy.deepcopy(base)
 
     for key, value in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = _deep_merge(result[key], value)
         else:
-            result[key] = value
+            result[key] = copy.deepcopy(value)
 
     return result
+
+
+def get_cms_target(override: Optional[str] = None) -> str:
+    """Return the CMS publish target: ``"webflow"`` or ``"site"``."""
+    if override:
+        if override not in CMS_TARGETS:
+            raise ValueError(f"cms target must be one of {CMS_TARGETS}, got {override!r}")
+        return override
+    return load_cms_config().get("target", "webflow")
+
+
+def get_site_config() -> Dict[str, Any]:
+    """Return the ``site`` section (static-site target settings)."""
+    return load_cms_config().get("site", {})
+
+
+def get_site_base_url(override: Optional[str] = None) -> str:
+    """Public origin of the site, without a trailing slash."""
+    return (override or get_site_config().get("base_url") or "").rstrip("/")
 
 
 def get_webp_config() -> Dict[str, Any]:

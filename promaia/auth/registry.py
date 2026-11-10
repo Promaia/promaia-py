@@ -54,6 +54,7 @@ def _ensure_loaded() -> None:
     from promaia.auth.integrations.slack import SlackIntegration
     from promaia.auth.integrations.perplexity import PerplexityIntegration
     from promaia.auth.integrations.openrouter import OpenRouterIntegration
+    from promaia.auth.integrations.github import GitHubIntegration
 
     register(OpenRouterIntegration())
     register(AnthropicIntegration())
@@ -64,3 +65,4 @@ def _ensure_loaded() -> None:
     register(DiscordIntegration())
     register(SlackIntegration())
     register(PerplexityIntegration())
+    register(GitHubIntegration())
