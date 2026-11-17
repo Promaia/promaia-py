@@ -35,6 +35,13 @@ WEBFLOW_CMS_DATABASE_ID = os.getenv("WEBFLOW_CMS_DATABASE_ID", "10dd13396967807a
 # Default collection ID for Webflow
 DEFAULT_WEBFLOW_COLLECTION_ID = os.getenv("WEBFLOW_COLLECTION_ID")
 
+# A real broadcast never goes out before its post is live: until then the email would carry Notion's
+# image links, which expire about an hour after sending. The page keeps "To send", so a later send retries.
+NOT_LIVE_REFUSAL = (
+    "❌ Not sent: the post isn't live {where} yet, so its images would break about an hour after sending. "
+    "Run `maia cms sync`, wait for the site to deploy, then send again."
+)
+
 def truncate_url(url: str, max_length: int = 50) -> str:
     """Truncate a URL for display purposes."""
     if len(url) <= max_length:
@@ -496,17 +503,21 @@ async def send_newsletter_via_resend(page: Dict[str, Any], test_mode: bool = Fal
         site_post, webflow_slug = check_site_published(page, base_url, media_base_url)
         is_published = site_post is not None
         if not is_published:
-            print_text(f"   ⚠️  Post not found on the website: images would use expiring Notion links. Continuing...", style="yellow")
+            if not test_mode:
+                return False, NOT_LIVE_REFUSAL.format(where="on the website"), None
+            print_text(f"   ⚠️  Post not found on the website: images would use expiring Notion links. Continuing (test send)...", style="yellow")
             if not webflow_slug:
                 webflow_slug = title.lower().replace(' ', '-').replace(',', '').replace('.', '')
     else:
         # Check if the blog post has been published to Webflow
         is_published, webflow_id, webflow_slug = await check_webflow_published(page)
         if not is_published:
+            if not test_mode:
+                return False, NOT_LIVE_REFUSAL.format(where="in Webflow"), None
             print_text(f"   ⚠️  Blog post not found in Webflow, but continuing for newsletter testing...", style="yellow")
             # Use a default slug based on title
             webflow_slug = title.lower().replace(' ', '-').replace(',', '').replace('.', '')
-    
+
     # Generate the "read on website" URL using the blog slug
     post_link = read_on_website_url(base_url, webflow_slug)
     print_text(f"   📄 Using 'read on website' URL: {post_link}", style="white")

@@ -160,6 +160,9 @@ target so they can never widen into a full Webflow sync.
   `01a1c3c9-64f3-…` "Dreamshare Monthly-FEB2026: Pathways"): both delivered; every `<img>` is
   `https://koiib-website.pages.dev/media/posts/…` (all 200), every link `https://www.koiib.com/…`, no Notion
   S3, Webflow or koiibenvenutto.com URLs in HTML or text
+- [x] A real send (`maia news send`) refuses when the post isn't live yet, on both targets: the email would
+  otherwise carry Notion image links that expire about an hour later. The page keeps "To send", so the next
+  send retries. Test sends still warn and continue (Koii, 2026-11-16)
 
 ## End-to-end proof (2026-11-09)
 
@@ -204,6 +207,5 @@ treats the same way.
   DNS switch so the link keeps working; its images live on Webflow's CDN for as long as Webflow keeps them.
 
 - Is "KOii chat" really a privacy flag? If not, set `skip_koii_chat_pages` to false.
-- Should the newsletter refuse to send (not just warn) when the post is not on the site yet?
 - The newsletter's plain-text part still shows the cover image URL line; fine with site URLs, confirm Koii wants it.
 - Old emails already sent point at Webflow CDN image URLs, which may stop working once Webflow is gone; nothing in Promaia can fix those.

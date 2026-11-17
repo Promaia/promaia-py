@@ -116,3 +116,44 @@ def test_media_base_url_defaults_to_base(monkeypatch):
     assert cms_config.get_site_media_base_url() == "https://www.koiib.com"
     assert cms_config.get_site_media_base_url(None, "https://x.dev/") == "https://x.dev"
     assert cms_config.get_site_media_base_url("https://koiib-website.pages.dev/") == "https://koiib-website.pages.dev"
+
+
+class _PastTheGate(Exception):
+    """Raised by a stub placed right after the published check, to prove a send got past it."""
+
+
+def _not_live_send(monkeypatch, target, test_mode):
+    import asyncio
+    from promaia.newsletter import commands as C
+
+    page = {"id": "p1", "properties": {"Name": {"type": "title", "title": [{"text": {"content": "Concert"}}]}}}
+    monkeypatch.setattr(C, "get_cms_target", lambda *a: target)
+    monkeypatch.setattr(C, "get_site_base_url", lambda *a: "https://www.koiib.com")
+    monkeypatch.setattr(C, "get_site_media_base_url", lambda *a: "https://www.koiib.com")
+    monkeypatch.setattr(C, "check_site_published", lambda *a: (None, "concert"))
+
+    async def not_on_webflow(page):
+        return False, None, None
+
+    monkeypatch.setattr(C, "check_webflow_published", not_on_webflow)
+
+    def past_the_gate(*a):
+        raise _PastTheGate()
+
+    monkeypatch.setattr(C, "read_on_website_url", past_the_gate)
+    return asyncio.run(C.send_newsletter_via_resend(page, test_mode=test_mode))
+
+
+def test_real_send_refuses_when_post_is_not_live(monkeypatch):
+    for target in ("site", "webflow"):
+        ok, message, email_id = _not_live_send(monkeypatch, target, test_mode=False)
+        assert not ok and email_id is None
+        assert "Not sent" in message
+
+
+def test_test_send_continues_when_post_is_not_live(monkeypatch):
+    import pytest
+
+    for target in ("site", "webflow"):
+        with pytest.raises(_PastTheGate):
+            _not_live_send(monkeypatch, target, test_mode=True)
