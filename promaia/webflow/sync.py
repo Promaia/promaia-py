@@ -370,7 +370,17 @@ async def notion_to_webflow_item(page: Dict[str, Any],
                 emoji_tags = "".join([text.get("plain_text", "") for text in rich_text if text])
                 if emoji_tags:
                     webflow_data[emoji_tags_field] = emoji_tags
-    
+
+    # Process description field (blog card summary; also the meta description source)
+    description_field = field_mapping.get("Description", "post-summary")
+    if "Description" in properties:
+        desc_prop = properties["Description"]
+        if desc_prop and desc_prop.get("type") == "rich_text":
+            rich_text = desc_prop.get("rich_text", [])
+            description = "".join([text.get("plain_text", "") for text in rich_text if text]).strip()
+            if description:
+                webflow_data[description_field] = description
+
     # Process featured image field as Webflow asset
     image_field = field_mapping.get("Thumbnail Image", "main-image")
     if "Thumbnail Image" in properties:
